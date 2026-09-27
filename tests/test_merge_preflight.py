@@ -372,6 +372,20 @@ TEXT_CASES = (
          "No fast-forward merges; use merge commits.\n\nA human must authorize each one."),
     Case("kept authorized after a cleared method rule", 2,
          "No fast-forward merges; use merge commits.\n\nEach one must be authorized."),
+    Case("kept review after a cleared method rule", 2,
+         "No fast-forward merges; use merge commits.\n\nA human must review each one."),
+    Case("kept manual step after a cleared method rule", 2,
+         "No fast-forward merges; use merge commits.\n\nEach one is manual."),
+    Case("kept first-person check after a cleared method rule", 2,
+         "No fast-forward merges; use merge commits.\n\nCheck with me each time."),
+    Case("kept qualifier later in a cleared rule's section", 2,
+         "No fast-forward merges; use merge commits.\n\nKeep history readable.\n\nA human must review each one."),
+    Case("kept qualifier in a cleared rule's subsection", 2,
+         "## Git\n\nNo fast-forward merges; use merge commits.\n\n### Review\n\nEach one must be confirmed."),
+    Case("cleared method rule followed by unrelated rules", 0,
+         "No fast-forward merges; use merge commits.\n\nTests must pass.\n\nKeep commits small."),
+    Case("cleared method rule before a sibling section", 0,
+         "## Git\n\nNo fast-forward merges; use merge commits.\n\n## Docs\n\nReview docs weekly."),
     Case("kept upstream rule with a restricted subject", 2, "No contributor may merge changes from upstream."),
     Case("kept negated lead-in between table rows", 2, "| Rule |\n|---|\n| Do not do the following |\n| merge PRs |"),
     Case("kept idiom lead-in between table rows", 2, "| Rule |\n|---|\n| Under no circumstances |\n| merge PRs |"),
@@ -428,8 +442,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 323 or len({case.name for case in ALL_CASES}) != 323:
-    raise RuntimeError("Merge fixture inventory must contain 323 unique cases")
+if len(ALL_CASES) != 330 or len({case.name for case in ALL_CASES}) != 330:
+    raise RuntimeError("Merge fixture inventory must contain 330 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

@@ -214,6 +214,16 @@ BARE_TOKENS = METHOD_TOKENS | MECHANICS_CONTENT | {'them', 'it'}
 FOLLOW_HOLD = re.compile(
     PAUSE_WORD + r'|' + APPROVAL_WORD + r'|\b(?:until|unless|wait\w*|hold\w*|jusqu\w*|attend\w*|tant\s+que'
     r'|ok(?:s|ed)?|first|d\W?abord|final\s+say|dernier\s+mot|feu\s+vert|owner|maintainer|propriétaire|mainteneur)\b')
+# The rest of a cleared rule's section, subsections included, is read as a class, not a
+# word list: a later unit before a heading of the same or a higher level returns 2 when it refers back to the rule or names who decides
+# or checks ('A human must review each one.', 'Each one is manual.', 'Check with me first.').
+NEXT_HOLD = re.compile(
+    r'\b(?:each|every|them|they|it|its|these|those|this|that|such|one|ones'
+    r'|humans?|people|person|someone|somebody|anyone|nobody|me|my|mine|i|we|us|our'
+    r'|review\w*|confirm\w*|valid\w*|vet(?:s|ted|ting)?|allow\w*|permit\w*|green[\s-]?light\w*|lgtm'
+    r'|clearance|bless\w*|okay\w*|thumbs?[\s-]+up|manual\w*|decid\w*|trigger\w*|check\w*|sign\w*'
+    r'|chaque|chacune?|les|elles?|ils?|ceux|celles|cela|ça|humains?|personne|moi|je|nous|mon|ma|mes'
+    r'|relu\w*|relecture|vérifi\w*|valid\w*|manuel\w*)\b')
 # Pause wording is also read across Markdown blocks, as sibling headings or items can carry it.
 STRONG_PAUSE = r'\b(?:suspend\w*|paused?|on\s+hold|en\s+attente)\b'
 CROSS_PAUSE = re.compile(
@@ -336,7 +346,7 @@ def strip_markers(value):
     return DATED.sub('', EXAMPLE.sub('', re.sub(r'\s+', ' ', value)))
 
 
-def units(lines, hold_found):
+def units(lines, hold_found, heading_found=lambda level: None):
     """Yield (context, unit) for each Markdown block and its wrapped lines.
 
     Context is the heading path, unterminated lead-in blocks, parent list items
@@ -467,6 +477,7 @@ def units(lines, hold_found):
         lead, items, header, row_intro = [], [], None, False
         intros.clear()
         end_run()
+        heading_found(level)
         return pair
 
     for line in lines:
@@ -682,14 +693,23 @@ def scan_normalized(text):
 
     # Free-form restrictions are read per Markdown unit so that sibling list
     # items and separate sentences are not joined into one false restriction.
-    cleared, follows, held = False, False, []
-    for context, unit in units(outside, lambda: held.append(True)):
+    cleared, follows, held, headings = False, False, [], []
+    level, section = 0, None  # current heading level; level of the cleared rule's section
+    for context, unit in units(outside, lambda: held.append(True), headings.append):
+        if headings:
+            level = headings.pop()
+            if section is not None and level <= section:
+                section = None  # a sibling or parent heading ends the cleared rule's section
         unit = strip_markers(unit)
         result = free_restriction(strip_markers(context), unit)
         if result is True:
             return 2
         if result == 'cleared' and FOLLOW_HOLD.search(strip_markers(context)):
             return 2  # a heading, lead-in or parent item conditions the rule
+        if section is not None and NEXT_HOLD.search(unit):
+            return 2  # a later unit of the section qualifies the cleared rule
+        if result == 'cleared' and section is None:
+            section = level
         cleared = cleared or result == 'cleared'
         follows = follows or bool(FOLLOW_HOLD.search(unit))
     if held:
