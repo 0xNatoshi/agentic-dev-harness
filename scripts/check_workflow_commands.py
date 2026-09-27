@@ -218,6 +218,10 @@ HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 SHORTHAND = re.compile(r'gh\s+(?:pr|run|issue|repo)\s+\w+(?:[|/]\w+)+(?:\s+--repo\s+"\$workflow_host/\$workflow_repo")?')
 REDIRECTION = re.compile(r"^(?:&(?:>>|>)|\d*(?:<<<|<<-|<<|<>|<&|>>|>\||>&|<|>))(.*)$")
 PROJECT_COMMAND_ROW = re.compile(r"\s*\|\s*(?:Install|Build|Lint|Typecheck|Tests)\s*\|\s*`([^`]+)`\s*\|\s*")
+PLACEHOLDER = r"<[A-Za-z_][A-Za-z_0-9-]*>"
+DOCUMENTED_OPERAND = re.compile(
+    rf"{PLACEHOLDER}(?:(?:[/-]{PLACEHOLDER})+|\([A-Za-z_0-9-]+\): [^<>]+)?\Z"
+)
 
 
 @dataclass(frozen=True)
@@ -280,7 +284,9 @@ def _arguments(tokens, start):
 
 def _redirect(word):
     """Return whether a token is shell redirection and needs a next word."""
-    if re.fullmatch(r"<[^<>\s]+>", word):  # documented <pr> placeholders
+    # Accept the documented placeholder, branch-name and commit-title shapes.
+    # Paths inside <...> or literal suffixes can be actual shell redirections.
+    if DOCUMENTED_OPERAND.fullmatch(word):
         return False, False
     match = REDIRECTION.match(word)
     if match is None:
@@ -303,6 +309,16 @@ def _without_redirections(args):
             operands.append(args[index])
             index += 1
     return operands, incomplete
+
+
+def _option_value(flag, value):
+    return (
+        bool(value.strip())
+        and (not value.startswith("-") or flag in {"--body-file", "-F"} and value == "-")
+        # After '=' a leading redirect leaves the option value empty. A digit
+        # there is already part of the value, not a file-descriptor prefix.
+        and not (value.startswith(("<", ">")) and _redirect(value)[0])
+    )
 
 
 def _options(args, command, *, extra_boolean_flags=()):
@@ -332,11 +348,11 @@ def _options(args, command, *, extra_boolean_flags=()):
         flag, equal, attached = word.partition("=")
         if flag in value_flags:
             if equal:
-                if attached.strip() and not attached.startswith("-"):
+                if _option_value(flag, attached):
                     valued[flag] = attached
                 else:
                     missing.add(flag)
-            elif index + 1 < len(args) and args[index + 1].strip() and not _redirect(args[index + 1])[0] and not args[index + 1].startswith("-"):
+            elif index + 1 < len(args) and _option_value(flag, args[index + 1]) and not _redirect(args[index + 1])[0]:
                 index += 1
                 valued[flag] = args[index]
             else:
@@ -353,14 +369,14 @@ def _options(args, command, *, extra_boolean_flags=()):
     return positional, valued, missing, unknown, incomplete
 
 
-def _direct_python(tail):
+def _direct_python(tail, *, windows_launcher=False):
     tail, incomplete = _without_redirections(tail)
     if incomplete:
         return False, True
     index = 0
     while index < len(tail):
         word = tail[index]
-        if word in PY_SWITCHES:
+        if word in PY_SWITCHES or windows_launcher and word == "-3":
             index += 1
         elif word in PY_VALUE_SWITCHES:
             index += 2
@@ -373,7 +389,8 @@ def _direct_python(tail):
         elif word.startswith("-"):
             return False, True
         else:
-            return False, False
+            # Python accepts extensionless scripts, directories and ZIP apps.
+            return True, False
     return False, False
 
 
@@ -387,15 +404,15 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
 
     findings = []
     for index, word in enumerate(words):
-        if word not in {"gh", "python3"} or not _command_start(words, index):
+        if word not in {"gh", "python3", "python", "py"} or not _command_start(words, index):
             continue
         tail = _arguments(words, index + 1)
-        if word == "python3":
-            direct, unsupported = _direct_python(tail)
+        if word != "gh":
+            direct, unsupported = _direct_python(tail, windows_launcher=word == "py")
             if direct and not (probe or project_python):
-                findings.append(Diagnostic(file, line, "direct python3 invocation; use the selected python_cmd array"))
+                findings.append(Diagnostic(file, line, f"direct {word} invocation; use the selected python_cmd array"))
             elif unsupported:
-                findings.append(Diagnostic(file, line, "unsupported python3 invocation; cannot verify interpreter usage"))
+                findings.append(Diagnostic(file, line, f"unsupported {word} invocation; cannot verify interpreter usage"))
             continue
 
         if len(tail) < 2 or tail[0] not in {"pr", "run", "issue", "repo"}:
@@ -415,13 +432,15 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
             findings.append(Diagnostic(file, line, "incomplete shell redirection in gh command"))
         for flag in sorted(unknown):
             findings.append(Diagnostic(file, line, f"unsupported gh option {flag}; cannot verify command operands"))
+        for flag in sorted(missing - {"--repo", "-R", "--match-head-commit"}):
+            findings.append(Diagnostic(file, line, f"gh {command_name} {flag} needs a value"))
         if "-R" in valued or "-R" in missing:
             findings.append(Diagnostic(file, line, "gh repository alias -R is unsupported; use only the verified --repo"))
         if any(not value.strip() for value in positional):
             findings.append(Diagnostic(file, line, "empty gh operand cannot select a PR or run"))
         if family in {"pr", "run", "issue"}:
             repository = valued.get("--repo")
-            if repository is None:
+            if repository is None or "--repo" in missing:
                 findings.append(Diagnostic(file, line, f"gh {family} {subcommand} needs a valued --repo"))
             elif not ORIGIN_REPO.fullmatch(repository):
                 findings.append(Diagnostic(file, line, f"gh {family} {subcommand} --repo must target the verified origin"))
@@ -448,7 +467,14 @@ def _origin_comparison(file, heading, line, snippet):
 
 def _interpreter_probe(lines, number):
     """Recognize the actual three-way probe, not its section or a loose -c."""
-    following = [line.strip() for line in lines[number:number + 9]]
+    starts = [
+        number - offset for offset, command in (
+            (0, PROBE), (2, PY_LAUNCHER_PROBE), (4, PYTHON_PROBE),
+        ) if number > offset and lines[number - 1].strip() == command
+    ]
+    if not starts or lines[starts[0] - 1].strip() != PROBE:
+        return False
+    following = [line.strip() for line in lines[starts[0]:starts[0] + 9]]
     return (
         len(following) >= 9
         and following[:6] == [
@@ -498,7 +524,7 @@ def scan_document(file, text):
             if pending.endswith("\\"):
                 pending = pending[:-1] + " "
                 continue
-            is_probe = source.strip() == PROBE and _interpreter_probe(lines, number)
+            is_probe = _interpreter_probe(lines, number)
             findings.extend(_analyze(pending, file, pending_line, probe=is_probe))
             pending = ""
             continue
@@ -520,7 +546,7 @@ def scan_document(file, text):
                 origin_comparison=_origin_comparison(file, heading, source, snippet),
                 project_python=project_python,
             ))
-        if re.match(r"^\s*(?:gh|python3)\s+", source):
+        if re.match(r"^\s*(?:gh|python3|python|py)\s+", source):
             findings.extend(_analyze(source, file, number))
     if pending:
         findings.extend(_analyze(pending, file, pending_line))
