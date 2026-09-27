@@ -4,8 +4,9 @@
 The privacy screen rejects machine-specific home paths, common credential
 formats and email addresses outside example domains, GitHub noreply,
 the Claude and Codex co-author trailers and the GitHub SSH user; in Python files
-it reads strings and comments only. It does not detect personal names or
-obfuscated addresses.
+it reads literal source content and comments, excluding Python syntax quotes.
+It does not detect personal names or reconstruct addresses through separate
+strings, escape decoding or interpolation.
 """
 import ast
 import importlib.util
@@ -114,7 +115,7 @@ def neutral_domain(domain):
 
 
 def python_text(text):
-    """Python source with names, operators and numbers blanked, so only strings and comments are screened.
+    """Blank Python syntax while preserving literal content, comments and physical positions.
 
     Matrix multiplication and decorators are operators, not addresses. Untokenizable
     source is screened whole.
@@ -126,8 +127,19 @@ def python_text(text):
     rows = [list(row) for row in io.StringIO(text).readlines()]
     for token in tokens:
         (start_row, start), (end_row, end) = token.start, token.end
-        if token.type in (tokenize.NAME, tokenize.OP, tokenize.NUMBER) and start_row == end_row:
+        if (
+            token.type in (tokenize.NAME, tokenize.OP, tokenize.NUMBER)
+            or tokenize.tok_name[token.type] in {"FSTRING_START", "FSTRING_END", "TSTRING_START", "TSTRING_END"}
+        ) and start_row == end_row:
             rows[start_row - 1][start:end] = " " * (end - start)
+        elif token.type == tokenize.STRING:
+            # Only token delimiters are syntax. Quotes inside the literal may
+            # belong to an address and must remain visible to the privacy screen.
+            quote = next(index for index, char in enumerate(token.string) if char in "'\"")
+            width = 3 if token.string[quote:].startswith(token.string[quote] * 3) else 1
+            opening = quote + width
+            rows[start_row - 1][start:start + opening] = " " * opening
+            rows[end_row - 1][end - width:end] = " " * width
     return "".join("".join(row) for row in rows)
 
 
