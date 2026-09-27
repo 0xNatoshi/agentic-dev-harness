@@ -14,6 +14,21 @@ The Git lifecycle serves an observable outcome. For implementation/fixes (`start
 
 **Tools**: Bash/Git Bash, Git, gh and Python 3.8+ (standard library for Unicode/origin checks); Git Bash supplies awk/grep/mktemp. No external jq: gh has built-in `--jq`. Avoid the unsupported gh 2.93 combination `--paginate --slurp --jq`; supplied checks process `--paginate --jq` page by page. Resolve missing tools before the gate. On Windows, install Python 3 from python.org and reopen Git Bash; python3, py -3 or python is detected. An error is not green evidence.
 
+In each Bash/Git Bash shell, select a working interpreter before Python examples. These probes match `merge-preflight.sh`; an executable name alone does not establish that a Windows Store alias works. Keep the array in the same shell as its uses.
+
+```bash
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; assert sys.version_info >= (3,8)' 2>/dev/null; then
+  python_cmd=(python3)
+elif command -v py >/dev/null 2>&1 && py -3 -c 'import sys; assert sys.version_info >= (3,8)' 2>/dev/null; then
+  python_cmd=(py -3)
+elif command -v python >/dev/null 2>&1 && python -c 'import sys; assert sys.version_info >= (3,8)' 2>/dev/null; then
+  python_cmd=(python)
+else
+  printf '%s\n' 'Python 3.8+ unavailable; check not run. Install Python 3 and reopen Git Bash.' >&2
+  exit 2
+fi
+```
+
 ## Modes and scope
 
 - **`init`** (default): install project AGENTS.md, CLAUDE.md, README and applicable CI.
@@ -43,7 +58,27 @@ IFS=$'\t' read -r workflow_host workflow_repo workflow_default <<< "$workflow_or
 export workflow_host workflow_repo workflow_default
 ```
 
-Every `gh pr`/`gh run`/`gh issue` uses `--repo "$workflow_host/$workflow_repo"`. `gh api` has no `--repo`: use `--hostname "$workflow_host"` plus an explicit `repos/$workflow_repo/...` path, or GraphQL owner/name from that verified identity. Avoid implicit `{owner}/{repo}` resolution. Pass the verified owner/repository components to `reviews`/`pages`. Ambiguous URLs/unresolved SSH aliases block; do not guess the host. Repeat before merge/cleanup and after checkout/remote changes.
+Every `gh pr`/`gh run`/`gh issue` uses `--repo "$workflow_host/$workflow_repo"`; `gh repo view/edit` takes the positional `"$workflow_host/$workflow_repo"`. Only the implicit comparison described above and the explicit `set-default` repair are exceptions. `gh api` has no `--repo`: use `--hostname "$workflow_host"` plus an explicit `repos/$workflow_repo/...` path, or GraphQL owner/name from that verified identity. Avoid implicit `{owner}/{repo}` resolution. Pass the verified owner/repository components to `reviews`/`pages`. Ambiguous URLs/unresolved SSH aliases block; do not guess the host. Repeat before merge/cleanup and after checkout/remote changes.
+
+### Select one PR explicitly
+
+`--repo` does not permit relying on the current-branch PR fallback. Capture the URL when creating the first draft after its branch push:
+
+```bash
+workflow_pr=$(gh pr create --repo "$workflow_host/$workflow_repo" --draft --base "$workflow_default" --title "<type>(scope): summary" --body-file <file>) || exit 2
+export workflow_pr
+```
+
+On resume, rerun origin binding and resolve the existing PR before any PR-specific command. Require an attached branch and exactly one open PR from the verified origin owner, against the verified default branch:
+
+```bash
+workflow_branch=$(git branch --show-current) || exit 2
+[ -n "$workflow_branch" ] || { printf '%s\n' 'Detached checkout: establish the entrusted branch/PR first.' >&2; exit 2; }
+workflow_pr=$(gh pr list --repo "$workflow_host/$workflow_repo" --base "$workflow_default" --head "$workflow_branch" --state open --limit 1000 --json url,headRepositoryOwner,isCrossRepository --jq "[.[] | select(.isCrossRepository == false and .headRepositoryOwner.login == \"${workflow_repo%%/*}\")] | if length == 1 then .[0].url else error(\"Expected exactly one origin-owned open PR\") end") || exit 2
+export workflow_pr
+```
+
+No match, multiple matches or an API error blocks this lookup; do not pick the first result or create a duplicate. Establish whether a first draft is needed or an explicit entrusted PR was supplied. Validate any supplied URL against the verified host/repository before using it. A matching head/owner does not establish session ownership: read the claim and preserve other sessions' PRs. Use `"$workflow_pr"` or an explicit `<pr>` selector for every subsequent PR-specific command. After merge, retain its URL for publication/cleanup checks; an open-PR lookup no longer applies.
 
 **English files and repository privacy**: write skills, instructions, package documentation, reports, filenames, repository docs, comments, commits and PRs in English. French is reserved for conversation. Exact historical identifiers/test inputs remain data. Personal global instructions stay outside repositories. Repository content/evidence excludes personal names/email, secrets and machine paths. Before each commit verify author/committer: actual organization or verified GitHub handle, with approved professional or confirmed noreply address. Repair personal identity only in this repository: obtain the handle with `gh api --hostname "$workflow_host" user --jq .login`, confirm noreply in account settings/verified evidence, then `git config --local user.name "<verified-handle>"` and `git config --local user.email "<confirmed-noreply>"`. Check `git var GIT_AUTHOR_IDENT`, `git var GIT_COMMITTER_IDENT` and task-scoped overrides without publishing personal data. If noreply cannot be confirmed, prepare the diff and request that indispensable information before commit. Preserve global configuration/history and invent no identity. License holders follow the same organization/handle rule.
 
@@ -56,7 +91,7 @@ For an existing repository, run the origin preflight first. For a new bootstrap,
 ```bash
 git rev-parse --show-toplevel
 git remote -v
-gh repo view --json nameWithOwner,defaultBranchRef,squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed,deleteBranchOnMerge
+gh repo view "$workflow_host/$workflow_repo" --json nameWithOwner,defaultBranchRef,squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed,deleteBranchOnMerge
 git status --short
 ls AGENTS.md CLAUDE.md README.md .github/workflows/ 2>/dev/null
 ```
@@ -161,7 +196,7 @@ Exit 1 means no unresolved placeholder; 0 means fill it; any other code means re
 Propose settings and obtain missing specific authorization. A README/About request only authorizes its description change, as the guide explains.
 
 ```bash
-gh repo edit --enable-squash-merge --squash-merge-commit-message pr-title
+gh repo edit "$workflow_host/$workflow_repo" --enable-squash-merge --squash-merge-commit-message pr-title
 gh repo edit "$workflow_host/$workflow_repo" --description "…"
 ```
 
@@ -179,7 +214,8 @@ For existing repositories, deliver the adoption branch below; license work has i
 git add <reviewed-files>
 git commit -m "chore: formalise the git/github workflow and CI (AGENTS.md, CLAUDE.md, README)"
 git push -u origin HEAD
-gh pr create --repo "$workflow_host/$workflow_repo" --draft --base <default> --title "chore: formalise the git/github workflow" --body-file <file>
+workflow_pr=$(gh pr create --repo "$workflow_host/$workflow_repo" --draft --base "$workflow_default" --title "chore: formalise the git/github workflow" --body-file <file>) || exit 2
+export workflow_pr
 ```
 
 Apply finish, resolve findings and validate the final head before ready. Continue with merge when ready; repair technical gaps and request only a genuinely missing authorization.
@@ -226,7 +262,7 @@ gh issue develop <n> --repo "$workflow_host/$workflow_repo" --name <type>/<n>-<s
 - For nontrivial entrusted work without an issue, check for duplicates and create one (`gh issue create --repo "$workflow_host/$workflow_repo"`) without another prompt. Otherwise use `git fetch origin && git switch --no-track -c <type>/<slug> origin/<default>`; no-track prevents accidentally tracking origin/default.
 - Inventory ownership/activity and reuse a free checkout before creating isolation. Revisit this task's retained resources, preserve other sessions and current work, and push only owned/entrusted branches.
 - For substantial API/schema/security/dependency work, state approach, invariants and validation, then continue authorized work. Technical difficulty alone is not an approval gate. Prepare options for a missing product decision; actual migrations/publication retain their boundary.
-- Open a draft PR on first push with `gh pr create --repo "$workflow_host/$workflow_repo" --draft --base <default> --title "<type>(scope): summary" --body-file <file>` so other agents can see the claim.
+- Open a draft PR on first push and capture `workflow_pr` using [Select one PR explicitly](#select-one-pr-explicitly), so other agents can see the claim. On resume, resolve that existing PR instead of creating another.
 
 ### Commit and push meaningful increments
 
@@ -245,9 +281,9 @@ Keep hooks/tests/CI intact; diagnose and fix failures or state the blocker. Bypa
 git fetch origin && git merge origin/<default>
 <applicable-gate-commands>
 git diff origin/<default>...HEAD
-gh pr create --repo "$workflow_host/$workflow_repo" --draft --base <default> --title "<type>(scope): summary" --body-file <file>
-gh pr checks --repo "$workflow_host/$workflow_repo"
-gh pr checks --repo "$workflow_host/$workflow_repo" --watch
+# Resolve workflow_pr using the selector contract above; the first push already opened its draft.
+gh pr checks --repo "$workflow_host/$workflow_repo" "$workflow_pr"
+gh pr checks --repo "$workflow_host/$workflow_repo" "$workflow_pr" --watch
 ```
 
 - After base synchronization, regenerate a changed lockfile through the configured manager/version, then verify frozen installation and diff; avoid manual lockfile edits.
@@ -257,9 +293,9 @@ gh pr checks --repo "$workflow_host/$workflow_repo" --watch
 - Update README in the same branch when commands/config/API/screens/usage change.
 - PR body: Why / What / How to test / Evidence (before/after visuals or measured gains/conditions) / Rollback (revert, flag, manual step, or already-authorized irreversible action) / gate / optional Closes/Refs.
 - Conventional Commit PR title becomes the squash commit message.
-- For red CI, use `gh run view --repo "$workflow_host/$workflow_repo" --log-failed`, fix, commit/push and observe again.
+- For red CI, first read the current SHA with `workflow_sha=$(gh pr view --repo "$workflow_host/$workflow_repo" "$workflow_pr" --json headRefOid --jq .headRefOid)`. List runs with `gh run list --repo "$workflow_host/$workflow_repo" --commit "$workflow_sha" --json databaseId,headSha,workflowName,status,conclusion`. Set `workflow_run` to the actual failing run's databaseId after inspecting its workflow/head; never assume the first run is the relevant one. Then use `gh run view --repo "$workflow_host/$workflow_repo" "$workflow_run" --log-failed`, fix, commit/push and observe again. Read errors or an empty/changed SHA require new valid evidence before proceeding.
 - For pending CI, use the [shared procedure](references/ci-local-gate.md): configured fallback only after about 120 seconds with no started check/assigned runner on that SHA. Wait for running work, block on red, and reread remote state before merge. gh pr checks exit 8 means pending for the documented CLI behavior.
-- After review and available gates pass on the final head, use `gh pr ready --repo "$workflow_host/$workflow_repo"` and inspect triggered checks. If ready triggers CI, finish review/local preparation first, then follow the procedure. Effective protection and required checks or authorized fallback remain mandatory.
+- After review and available gates pass on the final head, use `gh pr ready --repo "$workflow_host/$workflow_repo" "$workflow_pr"` and inspect triggered checks. If ready triggers CI, finish review/local preparation first, then follow the procedure. Effective protection and required checks or authorized fallback remain mandatory.
 - Complete the DoD and continue to merge. Repair technical gaps; ask only for an unresolved decision/authorization after checking the exact applicable rule/current request. Conversation reports follow personal preference; put progress and the next action together and continue authorized work.
 
 ### `merge <pr>`
@@ -273,6 +309,10 @@ gh pr view --repo "$workflow_host/$workflow_repo" <pr> --json body --jq .body > 
 grep -nE '^[[:space:]]*-[[:space:]]*Independent review:[[:space:]]*(not required[[:space:]]*\([^[:space:]()<>][^()<>]*\)|done on[[:space:]]+[0-9a-f]{7,40};[[:space:]]*findings:[[:space:]]*(none|fixed|justified)([[:space:]]+[^[:space:]].*)?)[[:space:]]*$' <pr-body-file>
 grep -nF 'TO FILL' <pr-body-file>
 ```
+
+The suspension scan set is: existing project-root `AGENTS.md` and `CLAUDE.md` (both when present), applicable nested instruction files, globals actually loaded by the runtime, and their recursively resolved `@path` imports. After successful origin fetch, published `origin/<default>:AGENTS.md` is scanned automatically. Read skill sources (`SKILL.md`, references, templates, history) as policy, not as project holds. Applicable project instructions are not exempt by filename.
+
+Resolve imports manually with cycle deduplication and record the resolved input set before calling the guard; it does not resolve imports automatically. Missing or unreadable applicable inputs block.
 
 After successful git fetch origin, resolve all applicable instructions/imports and run `bash <skill-dir>/scripts/merge-preflight.sh suspension <files...>`: 0 means no known pattern, 1 dated veto, 2 blocking ambiguity/error. It normalizes case, Unicode dashes, NBSP, BOM, CRLF and wrapped lines; ignores only full-line managed blocks and literal date examples; recognizes the v5 and French aliases below; and reads published origin/default AGENTS.md after verifying its tree. Refresh origin first. Zero is not semantic proof of absence. Read all instructions: an applicable free-form restriction missed by the scanner still makes the gate indeterminate (state 2) until context resolves it; current specific authorization may already do so. A scan result is not authorization. Normalize historical French review labels in the current PR to Independent review.
 
