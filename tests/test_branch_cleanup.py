@@ -43,6 +43,10 @@ SCENARIOS = (
     "operation_dir_symlink",
     "am_invalid_head",
     "invalid_head_detached_rebase",
+    "update_refs_alias",
+    "update_refs_symref_cycle",
+    "head_name_alias",
+    "symbolic_branch",
     "free",
 )
 STATUS = {
@@ -65,6 +69,8 @@ STATUS = {
     "operation_dir_symlink": 2,
     "am_invalid_head": 2,
     "invalid_head_detached_rebase": 2,
+    "update_refs_symref_cycle": 2,
+    "symbolic_branch": 2,
     "free": 0,
     "other_rebase": 0,
     "detached_rebase_merge": 0,
@@ -108,6 +114,18 @@ class BranchCleanupTests(unittest.TestCase):
     def prepare(self, scenario: str) -> None:
         if scenario in ("free", "inventory_error"):
             return
+        if scenario == "symbolic_branch":
+            # update-ref -d would follow the alias and delete the branch it names.
+            self.git("branch", "-D", "target")
+            self.git("branch", "real")
+            self.git("symbolic-ref", "refs/heads/target", "refs/heads/real")
+            return
+        if scenario in ("update_refs_alias", "head_name_alias"):
+            # Git follows the alias when it rewrites or restores the recorded name.
+            self.git("symbolic-ref", "refs/heads/alias", "refs/heads/target")
+        if scenario == "update_refs_symref_cycle":
+            self.git("symbolic-ref", "refs/heads/loop-a", "refs/heads/loop-b")
+            self.git("symbolic-ref", "refs/heads/loop-b", "refs/heads/loop-a")
         branch = "other" if scenario.startswith("other_") else "target"
         if branch == "other":
             self.git("branch", "other")
@@ -139,6 +157,8 @@ class BranchCleanupTests(unittest.TestCase):
                 "update_refs_invalid_oid": "refs/heads/other\nnot-an-object-id\n" + "0" * 40 + "\n",
                 "update_refs_invalid_ref": f"refs/heads/other bad\n{oid}\n{oid}\n",
                 "update_refs_nul": f"refs/heads/target\0\n{oid}\n{oid}\n",
+                "update_refs_alias": f"refs/heads/other\n{oid}\n{oid}\nrefs/heads/alias\n{oid}\n{oid}\n",
+                "update_refs_symref_cycle": f"refs/heads/loop-a\n{oid}\n{oid}\n",
             }
             if scenario in records:
                 (self.gitdir(worktree) / backend / "update-refs").write_text(records[scenario])
@@ -147,6 +167,7 @@ class BranchCleanupTests(unittest.TestCase):
             "unknown_state", "missing_worktree", "wrong_repository", "incomplete_rebase_apply", "invalid_head_name",
             "am_marker_only", "am_counter_extra_line", "am_counter_range", "head_name_extra_line",
             "head_name_symlink", "operation_dir_symlink", "am_invalid_head", "invalid_head_detached_rebase",
+            "head_name_alias",
         ):
             self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
             if scenario in ("am_invalid_head", "invalid_head_detached_rebase"):
@@ -160,6 +181,10 @@ class BranchCleanupTests(unittest.TestCase):
                     (gitdir / "rebase-merge").mkdir()
                     (gitdir / "rebase-merge" / "head-name").write_text("detached HEAD\n")
                 (gitdir / "HEAD").write_text("0" * 40 + "\n")
+                return
+            if scenario == "head_name_alias":
+                (self.gitdir(worktree) / "rebase-merge").mkdir()
+                (self.gitdir(worktree) / "rebase-merge" / "head-name").write_text("refs/heads/alias\n")
                 return
             if scenario == "operation_dir_symlink":
                 # The linked directory holds Git's exact literal, but its source is untrusted.

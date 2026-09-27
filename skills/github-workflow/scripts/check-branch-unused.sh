@@ -8,6 +8,13 @@ if [ -z "$branch" ] || [ "$#" -ne 1 ] || [[ "$branch" == refs/heads/* ]] || ! gi
   exit 2
 fi
 ref="refs/heads/$branch"
+# update-ref -d follows a symbolic branch and would delete the ref it names.
+if git symbolic-ref -q "$ref" >/dev/null; then
+  printf '%s\n' 'Branch is a symbolic ref; retain it.' >&2
+  exit 2
+elif [ "$?" -ne 1 ]; then
+  exit 2
+fi
 common=$(git rev-parse --path-format=absolute --git-common-dir) || exit 2
 [ -n "$common" ] || exit 2
 
@@ -32,6 +39,23 @@ git worktree list --porcelain -z > "$inventory_z" || exit 2
 # extra lines and control bytes, so reject them before reading the value.
 single_record() {
   [ "$(grep -c '' "$1")" = 1 ] && LC_ALL=C tr -d '\000-\011\013-\037\177' < "$1" | cmp -s - "$1"
+}
+
+# Git follows symbolic refs when an operation updates a recorded name, so an
+# alias such as refs/heads/alias -> refs/heads/target still rewrites target.
+# The branch itself is never symbolic, so the terminal referent is enough.
+names_ref() {
+  [ "$1" = "$ref" ] && return 0
+  if referent=$(git -C "$worktree" symbolic-ref -q "$1"); then
+    [ "$referent" = "$ref" ]
+  else
+    # Status 1 is a plain or missing ref; cycles and deep chains cannot be trusted.
+    [ "$?" -eq 1 ] || {
+      printf 'Unresolvable symbolic ref %s in %s\n' "$1" "$worktree" >&2
+      exit 2
+    }
+    return 1
+  fi
 }
 
 check_operation_file() {
@@ -68,6 +92,10 @@ check_operation_file() {
     printf 'Unknown %s state: %s\n' "$operation" "$file" >&2
     exit 2
   }
+  if names_ref "$state_ref"; then
+    printf 'Branch is in use by %s in %s through %s; retain it.\n' "$operation" "$worktree" "$state_ref" >&2
+    exit 1
+  fi
 }
 
 # A detached operation names no branch only while HEAD resolves to a real commit;
@@ -123,9 +151,15 @@ check_operation_dir() {
       status=$?
       # awk only checks the shape; Git's own rules decide whether a name is a ref.
       if [ "$status" -ne 2 ]; then
-        awk 'NR % 3 == 1' "$updates" | while IFS= read -r name; do
-          git check-ref-format "$name" || exit 2
-        done || status=2
+        awk 'NR % 3 == 1' "$updates" | {
+          in_use=$status
+          while IFS= read -r name; do
+            git check-ref-format "$name" || exit 2
+            ! names_ref "$name" || in_use=1
+          done
+          exit "$in_use"
+        }
+        status=$?
       fi
       case $status in
         0) ;;
