@@ -508,7 +508,14 @@ gh pr create --repo "$workflow_host/$workflow_repo" --title="<type>(scope): summ
                     self.assertIn(expected, result.stderr)
                     (root / "skills/github-workflow/references/examples.md").write_text("# Examples\n\n```bash\n" + good + "\n```\n", encoding="utf-8")
                     result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, check=False)
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    if redirect == "<<-EOF":
+                        # The operand is valid, but unquoted bodies are outside
+                        # the explicitly bounded here-document grammar.
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn("unsupported here-document header", result.stderr)
+                        self.assertNotIn(expected, result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_adjacent_shell_controls_and_incomplete_redirect_fail_closed(self):
         with tempfile.TemporaryDirectory(prefix="workflow-controls-") as directory:
@@ -696,6 +703,69 @@ gh pr view \\
                     root = self.root(directory, references={"examples.md": f"```bash\n{wrapper} {command}\n```\n"})
                     findings = check_repository(root)
                     self.assertTrue(any(item.line == 2 and "unsupported execution prefix" in item.message for item in findings), [str(item) for item in findings])
+
+    def test_coprocess_execution_is_explicitly_outside_the_supported_grammar(self):
+        for command in (
+            "coproc gh pr view 1",
+            "coproc worker { gh pr view 1; }",
+            "if true; then coproc python3 check.py; fi",
+        ):
+            with self.subTest(command=command), tempfile.TemporaryDirectory(prefix="workflow-coproc-") as directory:
+                root = self.root(directory, references={"boundary.md": f"```bash\n{command}\n```\n"})
+                findings = check_repository(root)
+                self.assertTrue(any(item.line == 2 and "unsupported coprocess" in item.message for item in findings), [str(item) for item in findings])
+        with tempfile.TemporaryDirectory(prefix="workflow-coproc-data-") as directory:
+            root = self.root(directory, references={"boundary.md": "Use the `coproc` keyword.\n```bash\nprintf '%s' coproc\nvalues=(coproc)\n```\n"})
+            self.assertEqual(check_repository(root), [])
+
+    def test_literal_here_document_bodies_are_data_and_following_commands_are_checked(self):
+        headers = (
+            ("cat <<'EOF'", "EOF"),
+            ('cat <<"EOF"', "EOF"),
+            ('cat <<-"EOF"', "\tEOF"),
+            ('"${python_cmd[@]}" - <<\'EOF\'', "EOF"),
+        )
+        for header, delimiter in headers:
+            with self.subTest(header=header), tempfile.TemporaryDirectory(prefix="workflow-here-body-") as directory:
+                body = f"```bash\n{header}\ngh pr view 1\npython3 check.py\n{delimiter}\ngh issue view 2\n```\n"
+                root = self.root(directory, references={"boundary.md": body})
+                findings = check_repository(root)
+                self.assertEqual([(item.line, item.message) for item in findings], [(6, "gh issue view needs a valued --repo")])
+        with tempfile.TemporaryDirectory(prefix="workflow-here-quoted-data-") as directory:
+            root = self.root(directory, references={"boundary.md": "```bash\nprintf '%s' \"<<'EOF'\"\nprintf '%s' prefix\"<<EOF\"\nprintf done;# <<'EOF'\n```\n"})
+            self.assertEqual(check_repository(root), [])
+
+    def test_ambiguous_here_document_consumers_and_delimiters_fail_explicitly(self):
+        for header in (
+            "bash <<'EOF'",
+            "sh <<'EOF'",
+            "cat <<'EOF' | bash",
+            "cat <<'EOF'; bash",
+            "cat <<EOF",
+            'cat <<"$end"',
+            "cat <<'FIRST' <<'SECOND'",
+            "unknown_consumer <<'EOF'",
+        ):
+            with self.subTest(header=header), tempfile.TemporaryDirectory(prefix="workflow-here-unsupported-") as directory:
+                root = self.root(directory, references={"boundary.md": f"```bash\n{header}\ntrue\nEOF\n```\n"})
+                findings = check_repository(root)
+                self.assertTrue(any(item.line == 2 and "unsupported here-document header" in item.message for item in findings), [str(item) for item in findings])
+
+    def test_here_document_boundaries_cannot_hide_later_markdown_or_commands(self):
+        for body in (
+            "```bash\ncat <<'EOF'\ntext\n```\n",
+            "```bash\ncat <<'EOF'\ntext\n",
+            "```bash\ncat <<'EOF'\ntext\n EOF\n```\n",
+            "```bash\ncat <<'EOF'\ntext\nEOF \n```\n",
+        ):
+            with self.subTest(body=body), tempfile.TemporaryDirectory(prefix="workflow-here-boundary-") as directory:
+                root = self.root(directory, references={"boundary.md": body})
+                findings = check_repository(root)
+                self.assertTrue(any(item.line == 2 and "unterminated here-document" in item.message for item in findings), [str(item) for item in findings])
+        with tempfile.TemporaryDirectory(prefix="workflow-here-reset-") as directory:
+            root = self.root(directory, references={"boundary.md": "```bash\ncat <<'EOF'\ntext\n```\n\n```bash\ngh pr view 1\n```\n"})
+            findings = check_repository(root)
+            self.assertTrue(any(item.line == 7 and "valued --repo" in item.message for item in findings), [str(item) for item in findings])
 
     def test_only_active_guidance_is_scanned(self):
         with tempfile.TemporaryDirectory(prefix="workflow-scope-") as directory:

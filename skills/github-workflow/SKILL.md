@@ -14,6 +14,8 @@ The Git lifecycle serves an observable outcome. For implementation/fixes (`start
 
 **Tools**: Bash/Git Bash, Git, gh and Python 3.8+ (standard library for Unicode/origin checks); Git Bash supplies awk/grep/mktemp. No external jq: gh has built-in `--jq`. Avoid the unsupported gh 2.93 combination `--paginate --slurp --jq`; supplied checks process `--paginate --jq` page by page. Resolve missing tools before the gate. On Windows, install Python 3 from python.org and reopen Git Bash; python3, py -3 or python is detected. An error is not green evidence.
 
+The source command checker verifies the documented command forms, not arbitrary Bash semantics. Coprocesses and ambiguous here-document headers fail explicitly. In shell fences, recognized here-documents use a standalone `cat` or the selected Python array with stdin, one literal quoted delimiter and no pipeline or compound chain. Review their bodies in the recipient's language; they are not shell commands. Dynamic evaluation, aliases/functions, indirect executables and substitutions inside quoted tokens still require manual review. Keep examples within this boundary instead of extending the checker for speculative shell syntax.
+
 In each Bash/Git Bash shell, select a working interpreter before Python examples. These probes match `merge-preflight.sh`; an executable name alone does not establish that a Windows Store alias works. Keep the array in the same shell as its uses.
 
 ```bash
@@ -232,11 +234,11 @@ Use chore/agent-workflow-update and the same PR delivery. The policy applicable 
 4. Run the init placeholder check, covering README.md, LICENSE*, .yml/.yaml and absent CI, distinguishing exit 1 from errors.
 5. Show the diff and summarize added/modified rules.
 
-**Package v6.5.0; active repository template v6.4.** This behavior update adds technical initiative, incidental issue capture and written collaboration. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement.
+**Package v6.5.0; active repository template v6.4.** This package adds technical initiative, incidental issue capture, written collaboration and review convergence in the shared profiles/skill. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement.
 
 ## What's new
 
-- **v6.5.0 / template v6.4**: proactive technical judgment, deduplicated incidental issues, useful next-action reporting and durable issue/PR/code reasoning across Codex, Claude Code and Hermes. Existing delivery and authorization safeguards remain applicable.
+- **v6.5.0 / template v6.4**: proactive technical judgment, deduplicated incidental issues, useful next-action reporting and durable issue/PR/code reasoning across Codex, Claude Code and Hermes. Shared profiles and the skill also require review convergence: targeted rechecks, a root-design checkpoint after repeated unresolved cycles and delivery once ready. Existing delivery and authorization safeguards remain applicable.
 - **v6.4.0**: versioned source repository, neutral profile source, reproducible packages, portable regression checks and issue/PR handoff guidance. Runtime guards and the active repository template retain their behavior.
 - **v6.3.1**: English personal instructions, skill, references and distribution files; README.md and English installer names. Runtime guards, licenses, role files and authentic template history retain their bytes. French remains the conversation language; historical aliases/test inputs remain exact data.
 - **v6.3**: origin binding, detached rebase/bisect guards, Unicode/published holds, inherited reporting preferences, qualified Claude installation/status, public-license authorization, historical word comparisons and lockfile synchronization.

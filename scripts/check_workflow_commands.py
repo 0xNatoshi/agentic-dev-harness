@@ -4,6 +4,9 @@
 This intentionally recognizes the Bash and Markdown forms used by the workflow
 guide. It is not a general Bash parser: dynamic evaluation, aliases/functions,
 indirect executables and substitutions inside quoted tokens need manual review.
+Unsupported coprocesses and ambiguous here-document headers fail explicitly.
+Only standalone cat and selected-Python commands with literal quoted delimiters
+have recognized body boundaries; their bodies are not shell commands.
 Active templates may be added by their own check; historical snapshots are
 never current guidance inputs.
 """
@@ -531,7 +534,7 @@ def _direct_python(tail, *, windows_launcher=False):
 def _analyze(command, file, line, *, inline=False, probe=False, origin_comparison=False):
     # Bare executable names in prose are references, like gh family shorthand.
     # Their standalone shell-fence/command-line form is executable and checked.
-    if inline and (SHORTHAND.fullmatch(command) or command in {"python3", "python", "py", "py -3"}):
+    if inline and (SHORTHAND.fullmatch(command) or command in {"python3", "python", "py", "py -3", "coproc"}):
         return []
     try:
         words = _tokens(command)
@@ -540,12 +543,15 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
 
     findings = []
     for index, word in enumerate(words):
-        if word not in {"gh", "python3", "python", "py"}:
+        if word not in {"gh", "python3", "python", "py", "coproc"}:
             continue
         executable, prefix_error = _command_start(words, index)
         if prefix_error:
             findings.append(Diagnostic(file, line, prefix_error))
         if not executable:
+            continue
+        if word == "coproc":
+            findings.append(Diagnostic(file, line, "unsupported coprocess execution; use an explicit foreground command"))
             continue
         tail = _arguments(words, index + 1)
         if word != "gh":
@@ -637,6 +643,25 @@ def _interpreter_probe(lines, number):
     )
 
 
+def _here_document(command):
+    """Recognize the bounded body grammar without interpreting its contents."""
+    # Preserve quotes here: ordinary shlex tokenization removes the distinction
+    # between a redirect and a quoted string that merely contains '<<'.
+    spans = re.finditer(
+        r''' '[^']*' | "(?:\\.|[^"\\])*" | \\. | (?<![^\s;&|()])\#.*$ | (?P<here>(?<!<)<<(?!<)-?) ''',
+        command, re.VERBOSE,
+    )
+    if not any(span.lastgroup == "here" for span in spans):
+        return None, None
+    header = re.fullmatch(
+        r'''\s*(?:cat|"\$\{python_cmd\[@\]\}"\s+-)\s+<<(?P<tabs>-)?\s*(?P<quote>['"])(?P<end>[A-Za-z_][A-Za-z_0-9]*)(?P=quote)\s*(?:\#.*)?''',
+        command,
+    )
+    if header is None:
+        return None, "unsupported here-document header; use a standalone cat or selected-Python command with one literal quoted delimiter"
+    return (header["end"], bool(header["tabs"])), None
+
+
 def scan_document(file, text):
     """Check a Markdown document and return deterministic file:line findings."""
     lines = text.splitlines()
@@ -646,6 +671,8 @@ def scan_document(file, text):
     heading = ""
     pending = ""
     pending_line = 0
+    here_document = None
+    here_line = 0
 
     for number, source in enumerate(lines, 1):
         match = FENCE.match(source)
@@ -656,6 +683,9 @@ def scan_document(file, text):
                 language = info.strip().split(maxsplit=1)[0].lower() if info.strip() else ""
                 shell_fence = language in SHELL_FENCES
             elif marker[0] == fence_mark[0] and len(marker) >= len(fence_mark) and not info.strip():
+                if here_document is not None:
+                    findings.append(Diagnostic(file, here_line, "unterminated here-document before the closing Markdown fence"))
+                    here_document = None
                 if pending:
                     findings.extend(_analyze(pending, file, pending_line))
                     pending = ""
@@ -664,6 +694,11 @@ def scan_document(file, text):
             continue
         if fence_mark is not None:
             if not shell_fence:
+                continue
+            if here_document is not None:
+                delimiter, strip_tabs = here_document
+                if (source.lstrip("\t") if strip_tabs else source) == delimiter:
+                    here_document = None
                 continue
             stripped = source.rstrip()
             if language == "console" and not pending and stripped.lstrip().startswith("$ "):
@@ -677,6 +712,11 @@ def scan_document(file, text):
                 pending = pending[:-1] + " "
                 continue
             is_probe = _interpreter_probe(lines, number)
+            here_document, here_error = _here_document(pending)
+            if here_error:
+                findings.append(Diagnostic(file, pending_line, here_error))
+            if here_document is not None:
+                here_line = pending_line
             findings.extend(_analyze(pending, file, pending_line, probe=is_probe))
             pending = ""
             continue
@@ -694,6 +734,8 @@ def scan_document(file, text):
             findings.extend(_analyze(source, file, number))
     if pending:
         findings.extend(_analyze(pending, file, pending_line))
+    if here_document is not None:
+        findings.append(Diagnostic(file, here_line, "unterminated here-document at the end of the document"))
     return findings
 
 
