@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## Shared template ownership
+
+One active agent/session owns the shared template family: `profiles/`, `skills/github-workflow/templates/`, their rendered copies and template version metadata. [Issue #15](https://github.com/0xNatoshi/dev-harness/issues/15) is the common coordination record for this family, across issues, PRs, branches, worktrees, computers and runtimes. Read its latest claim before editing, link related work there and reread after claiming. Resolve conflicting claims before writes. Others propose edits in comments for the owner to integrate. Handoffs/releases are explicit and recorded; inactivity never releases ownership. Preserve historical snapshots. See CONTRIBUTING.md and the skill's development-loop guide for the procedure.
+
 <!-- github-workflow:start v6.4 — managed block from the github-workflow skill; preserve local safeguards and explicit approval requirements on update -->
 
 Working instructions for AI agents (Claude Code, Codex, Copilot, Cursor…) and humans on this repository.
