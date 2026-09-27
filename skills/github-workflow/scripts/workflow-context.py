@@ -381,13 +381,24 @@ def permitted_method(clause):
 
     Polarity is read per comma or 'but' segment from its start; a segment with
     neither polarity word continues the previous one, so 'never use squash
-    merges, rebase merges or merge commits' bans all three.
+    merges, rebase merges or merge commits' bans all three. 'and' starts a new
+    segment only before a polarity word, so 'do not use squash merges and use
+    merge commits' permits one method while 'squash and merge' stays one name.
     """
     words = re.findall(r'[^\W_]+', clause)
     if not set(words) <= METHOD_TOKENS:
         return None
+    segments = []
+    for part in re.split(r',|\b(?:but|mais|instead|plutôt)\b', clause):
+        pieces = re.split(r'\b(?:and|et)\b', part)
+        segments.append(pieces[0])
+        for piece in pieces[1:]:
+            if set(re.findall(r'[^\W_]+', piece)) & (NEGATIVE | POSITIVE):
+                segments.append(piece)
+            else:
+                segments[-1] += ' and ' + piece
     permitted, banned, polarity = set(), set(), None
-    for segment in re.split(r',|\b(?:but|mais|instead|plutôt)\b', clause):
+    for segment in segments:
         tokens = set(re.findall(r'[^\W_]+', segment))
         if tokens & NEGATIVE:
             polarity = False
