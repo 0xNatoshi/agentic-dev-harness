@@ -101,7 +101,13 @@ class SourceCheckTests(unittest.TestCase):
                         "@".join(["person", "host.\u0661"]),
                         # A dotted alphabetic ref passes only as the value of a `uses:` key.
                         "@".join(["owner/action", "feature.one"]),
-                        "@".join(["see uses: owner/action", "feature.one"])]:
+                        "@".join(["see uses: owner/action", "feature.one"]),
+                        # A slash local part is a repository reference only before a default branch.
+                        "@".join(["first/last", "privatehost"]), "@".join(["owner/action", "feature"]),
+                        # Only a VCS URL path takes a revision; other URL paths and user info stay screened.
+                        "https://github.com/" + "@".join(["owner/repo.git", "feature"]),
+                        "https://lists.host.test/archive/" + "@".join(["person", "mail-host.co"]),
+                        "git+https://" + "@".join(["person", "github.com"]) + "/owner/repo.git"]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
@@ -168,6 +174,9 @@ class SourceCheckTests(unittest.TestCase):
             "  - uses: " + "@".join(["owner/action", "feature.one"]),
             "        uses: '" + "@".join(["owner/action", "release.candidate"]) + "'",
             "    uses: " + "@".join(["owner/repo/.github/workflows/ci.yml", "feature.one"]),
+            "    uses: " + "@".join(["owner/action", "feature"]),
+            "git+https://github.com/" + "@".join(["owner/repo.git", "feature"]),
+            "git+ssh://" + "@".join(["git", "github.com/owner/repo.git", "main"]),
         ]
         with tempfile.TemporaryDirectory(prefix="harness-neutral-email-") as directory:
             root = Path(directory)
@@ -178,6 +187,31 @@ class SourceCheckTests(unittest.TestCase):
             environment, _ = fixture_environment(root)
             result = run([sys.executable, "scripts/check.py"], source, environment)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+    def test_source_gate_reads_python_strings_and_comments_only(self):
+        # Matrix multiplication and decorators are operators; strings and comments are screened.
+        clean = "@".join(["result = matrix", "vector"]) + "\n\n\n" + "@".join(["", "decorator"]) + "\ndef f():\n    pass\n"
+        with tempfile.TemporaryDirectory(prefix="harness-python-email-") as directory:
+            root = Path(directory)
+            source = self.copy_source(root)
+            (source / "tests/fixture_operators.py").write_text(clean, encoding="utf-8")
+            environment, _ = fixture_environment(root)
+            result = run([sys.executable, "scripts/check.py"], source, environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        address = "@".join(["first.last", "personal-mail.net"])
+        for text in [f"CONTACT = '{address}'\n", f"x = 1  # {address}\n", f'"""Docs\n{address}\n"""\n',
+                     f"value = f'{{x}} {address}'\n"]:
+            with self.subTest(text=text), tempfile.TemporaryDirectory(prefix="harness-python-email-") as directory:
+                root = Path(directory)
+                source = self.copy_source(root)
+                (source / "tests/fixture_operators.py").write_text("import os\n" + text, encoding="utf-8")
+                environment, _ = fixture_environment(root)
+                result = run([sys.executable, "scripts/check.py"], source, environment)
+                self.assertNotEqual(result.returncode, 0)
+                line = 3 if text.startswith('"""') else 2
+                self.assertIn(f"Email address outside the neutral allowlist: tests/fixture_operators.py:{line}", result.stderr)
+                self.assertNotIn(address, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

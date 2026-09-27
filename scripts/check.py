@@ -3,15 +3,18 @@
 
 The privacy screen rejects machine-specific home paths, common credential
 formats and email addresses outside example domains, GitHub noreply,
-the Claude and Codex co-author trailers and the GitHub SSH user. It does not detect
-personal names or obfuscated addresses.
+the Claude and Codex co-author trailers and the GitHub SSH user; in Python files
+it reads strings and comments only. It does not detect personal names or
+obfuscated addresses.
 """
 import ast
 import importlib.util
+import io
 import json
 from pathlib import Path
 import re
 import sys
+import tokenize
 import tomllib
 import unicodedata
 
@@ -38,6 +41,8 @@ VERSION = re.compile(r'v?\d+(?:\.\d+)*(?:-[0-9a-z-]+(?:\.[0-9a-z-]+)*)?\Z')
 # A single-label pin such as actions/checkout@<full commit SHA>.
 COMMIT = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 DIST_TAGS = {"latest", "next"}
+# Default branch names after owner/repo@; any other dotless ref needs a `uses:` key.
+DEFAULT_BRANCHES = {"main", "master", "trunk", "develop", "head"}
 # An OCI image digest: the image name, then @sha256: and 64 hex digits (or sha512, 128).
 DIGESTS = {"sha256": re.compile(r':[0-9a-f]{64}(?![0-9A-Za-z])'), "sha512": re.compile(r':[0-9a-f]{128}(?![0-9A-Za-z])')}
 # RFC 5321 address literals: IPv4, or a tag such as IPv6 followed by dcontent.
@@ -62,6 +67,8 @@ NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "codex@openai.com", "git@github.co
 URI_SCHEME = re.compile(r'(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\Z')
 # The value of a workflow `uses:` key is an action reference by schema.
 USES_KEY = re.compile(r'\s*(?:-\s+)?uses:\s+\Z')
+# pip-style VCS URLs put a revision after the path: git+https://host/owner/repo.git@main.
+VCS_SCHEME = re.compile(r'(?<![A-Za-z0-9+.-])(?:git|hg|svn|bzr)\+[a-z]+:\Z')
 
 
 def label_char(char):
@@ -98,6 +105,24 @@ def neutral_domain(domain):
         domain == reserved or domain.endswith("." + reserved) for reserved in RESERVED_DOMAINS)
 
 
+def python_text(text):
+    """Python source with names, operators and numbers blanked, so only strings and comments are screened.
+
+    Matrix multiplication and decorators are operators, not addresses. Untokenizable
+    source is screened whole.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return text
+    rows = [list(row) for row in io.StringIO(text).readlines()]
+    for token in tokens:
+        (start_row, start), (end_row, end) = token.start, token.end
+        if token.type in (tokenize.NAME, tokenize.OP, tokenize.NUMBER) and start_row == end_row:
+            rows[start_row - 1][start:end] = " " * (end - start)
+    return "".join("".join(row) for row in rows)
+
+
 def check_emails(relative, text):
     for number, line in enumerate(text.splitlines(), 1):
         for match in re.finditer("@", line):
@@ -130,14 +155,17 @@ def check_emails(relative, text):
                 # No top-level domain is all-numeric (RFC 3696), so owner/action@feature.1
                 # or pkg@beta.1 names a ref or tag; dotted IPv4 already reads as a version.
                 continue
-            if "." not in domain and (domain in DIST_TAGS or "/" in local and not local.startswith("/")):
-                # A repository or package reference such as actions/checkout@main or pkg@latest;
-                # URL user info keeps its leading // in the local part and stays screened.
+            if "/" in local and not local.startswith("/") and (
+                    USES_KEY.fullmatch(before) or "." not in domain and domain in DEFAULT_BRANCHES):
+                # A repository reference: any ref after a `uses:` key, or a default branch as in
+                # actions/checkout@main. Elsewhere a slash is a valid local-part character before
+                # an intranet host and .one may be a real top-level domain, so both stay screened;
+                # URL user info keeps its leading // in the local part.
                 continue
-            if "/" in local and not local.startswith("/") and USES_KEY.fullmatch(before):
-                # A dotted ref such as feature.one after a `uses:` key; elsewhere an alphabetic
-                # last label such as .one may be a real top-level domain and stays screened.
-                continue
+            if "." not in domain and domain in DIST_TAGS:
+                continue  # a package dist-tag such as pkg@latest
+            if local.startswith("//") and "/" in local[2:] and VCS_SCHEME.search(before):
+                continue  # a revision after a VCS URL path, not user info
             if local.startswith("//") and URI_SCHEME.search(before):
                 local = local[2:]  # ssh://git@github.com/owner/repo.git names git@github.com
             neutral = neutral_domain(domain) or f"{local.lower()}@{domain}" in NEUTRAL_ADDRESSES
@@ -182,7 +210,7 @@ def main():
         data = path.read_bytes()
         text = data.decode("utf-8")
         require(not re.search(r"/(?:Users|home)/[A-Za-z0-9_.-]+/|[A-Za-z]:\\Users\\", text), f"Machine-specific path: {relative}")
-        check_emails(relative, text)
+        check_emails(relative, python_text(text) if path.suffix == ".py" else text)
         require(not re.search(r"(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{24,}|-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----)", text), f"Possible credential: {relative}")
         if path.suffix == ".py":
             ast.parse(text, filename=str(relative))
