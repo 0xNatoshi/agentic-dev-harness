@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read-only origin binding and conservative suspension checks (Python 3.8+)."""
 import datetime
+import itertools
 import json
 import re
 import subprocess
@@ -165,7 +166,7 @@ NEGATIVE = {'no', 'not', 'never', 'don', 'avoid', 'nor', 'pas', 'jamais', 'ne', 
 # a condition such as 'once the owner signs off' is never read as a permitted method.
 METHOD_TOKENS = POSITIVE | NEGATIVE | {
     'merge', 'merges', 'merging', 'fusion', 'fusions', 'squash', 'rebase', 'rebases', 'fast', 'forward', 'ff',
-    'three', 'way', '3', 'octopus', 'recursive', 'ort', 'resolve', 'subtree', 'commit', 'commits', 'git', 'method',
+    'noff', 'three', 'way', '3', 'octopus', 'recursive', 'ort', 'resolve', 'subtree', 'commit', 'commits', 'git', 'method',
     'methods', 'strategy', 'strategies', 'do', 'does', 't', 'the', 'a', 'an', 'and', 'or', 'but', 'instead',
     'rather', 'than', 'of', 'over', 'with', 'via', 'de', 'des', 'les', 'le', 'la', 'du', 'd', 'l', 'ou', 'et',
     'mais', 'plutôt', 'que', 'qu', 'au', 'lieu', 'par', 'ie', 'by', 'default', 'défaut', 'create', 'creates',
@@ -181,7 +182,7 @@ METHOD_CONTENT = {'rebase', 'rebases', 'rebasing', 'squash', 'commit', 'commits'
 # every merge strategy (three-way, recursive, ort, ...) produces a merge commit.
 METHOD_KEYS = {
     'squash': 'squash', 'rebase': 'rebase', 'rebases': 'rebase', 'fast': 'ff', 'forward': 'ff', 'ff': 'ff',
-    'three': 'commit', '3': 'commit', 'octopus': 'commit', 'recursive': 'commit', 'ort': 'commit',
+    'noff': 'commit', 'three': 'commit', '3': 'commit', 'octopus': 'commit', 'recursive': 'commit', 'ort': 'commit',
     'resolve': 'commit', 'subtree': 'commit', 'commit': 'commit', 'commits': 'commit'}
 BARE_TOKENS = METHOD_TOKENS | MECHANICS_CONTENT | {'them', 'it'}
 # A hold sentence right after a cleared method rule may qualify that rule.
@@ -241,10 +242,16 @@ def trim(blocks):
 
 
 def label(text):
-    """A list item such as '**Merges:**' or 'Merging' that titles the items after it."""
+    """A list item such as '**Merges:**' or '[ ] Pull request merges' that titles the items after it.
+
+    A short unterminated merge phrase without polarity words is a title, not a rule.
+    """
+    text = re.sub(r'^\[[ xX]\]\s*', '', text)
     if re.fullmatch(r'(\*\*|__)[^*_]+\1:?', text) or text.rstrip(' *_').endswith(':'):
         return True
-    return len(text.split()) <= 2 and bool(re.search(MERGE_WORD, text))
+    words = re.findall(r'[^\W_]+', text.casefold())
+    return (len(words) <= 5 and not terminated(text) and not set(words) & (NEGATIVE | POSITIVE)
+            and bool(re.search(MERGE_WORD, text)))
 
 
 def terminated(block):
@@ -258,20 +265,24 @@ def units(lines):
 
     Context is the heading path, unterminated lead-in blocks, parent list items
     and a table's header row. Sibling list items and table data rows never give
-    each other context. A fenced block is one unit.
+    each other context, except that a label item titles every later sibling and
+    an unterminated sibling reads with a neighbour that has pause wording. A
+    fenced block is one unit.
     """
-    headings = []  # (level, text) of the current heading path
+    headings = []  # (level, text, occurrence) of the current heading path
+    occurrences = itertools.count()
     lead = []      # unterminated blocks that introduce what follows
-    items = []     # (indent, text) of the open list item chain
+    items = []     # (indent, text, title) of the open list item chain
     header = None  # first row of the current table
     block, kind, indent = [], None, 0
     fence = None   # (marker, context, lines) of an open fenced block
 
     def section():
-        return tuple(t for _, t in headings)
+        # Occurrence numbers keep two headings with the same text apart.
+        return tuple(n for _, _, n in headings)
 
     def context(extra=()):
-        path = ' '.join(t for _, t in headings)[-CONTEXT_LIMIT:]
+        path = ' '.join(t for _, t, _ in headings)[-CONTEXT_LIMIT:]
         parts, size = [], 0
         for part in reversed(lead + list(extra)):
             if size >= CONTEXT_LIMIT:
@@ -291,18 +302,23 @@ def units(lines):
             sibling = None
             while items and items[-1][0] >= indent:
                 sibling = items.pop()
-            parents = [t for _, t in items]
-            if sibling and sibling[0] == indent and label(sibling[1]):
-                parents.append(sibling[1])  # '- **Merges:**' labels the next sibling
-            pair = section(), context(parents), text
-            items.append((indent, text))
+            parents = [t for _, t, _ in items]
+            title, near = None, []
+            if sibling and sibling[0] == indent:
+                # '- **Merges:**' titles the siblings after it until another label.
+                title = sibling[1] if label(sibling[1]) else sibling[2]
+                # '- Use squash merges' then '- blocked' may say what is blocked.
+                if not terminated(sibling[1]) and re.search(PAUSE_WORD, sibling[1] + ' ' + text):
+                    near = [sibling[1]]
+            pair = section(), context(parents + ([title] if title else []) + near), text
+            items.append((indent, text, title))
             return pair
         if items and indent:
             # Indented content continues the list item above it.
-            return section(), context(t for i, t in items if i < indent), text
+            return section(), context(t for i, t, _ in items if i < indent), text
         if items:
             # Unterminated open items still introduce the block after the list.
-            lead = trim(lead + [t for _, t in items if not terminated(t)])
+            lead = trim(lead + [t for _, t, _ in items if not terminated(t)])
             items = []
         if current == 'row':
             pair = section(), context([header] if header else []), text
@@ -319,7 +335,7 @@ def units(lines):
         while headings and headings[-1][0] >= level:
             headings.pop()
         pair = section(), context(), text
-        headings.append((level, text[:CONTEXT_LIMIT]))
+        headings.append((level, text[:CONTEXT_LIMIT], next(occurrences)))
         lead, items, header = [], [], None
         return pair
 
@@ -349,7 +365,7 @@ def units(lines):
             if pair:
                 yield pair
             if opening:
-                fence = opening.group(1), context(t for _, t in items), [opening.group(2).strip()]
+                fence = opening.group(1), context(t for _, t, _ in items), [opening.group(2).strip()]
             elif heading:
                 yield enter_heading(len(heading.group(1)), stripped)
             continue
@@ -384,8 +400,9 @@ def permitted_method(clause):
     merges, rebase merges or merge commits' bans all three. 'and' starts a new
     segment only before a polarity word, so 'do not use squash merges and use
     merge commits' permits one method while GitHub's 'Squash and merge' label
-    stays one name even before 'only'.
+    stays one name even before 'only'. 'no-ff' names a method, not a ban.
     """
+    clause = re.sub(r'\bno-ff\b', 'noff', clause, flags=re.IGNORECASE)
     words = re.findall(r'[^\W_]+', clause)
     if not set(words) <= METHOD_TOKENS:
         return None
