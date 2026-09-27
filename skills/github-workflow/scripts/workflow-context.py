@@ -271,6 +271,22 @@ def label(text):
     return len(text.split()) <= 2 and bool(re.search(MERGE_WORD, text))
 
 
+LEAD_LIMIT = 120
+# A negated list item that introduces its siblings: a bare negation, or one
+# that points forward ('- Do not do the following' above '- merge pull requests').
+NEGATED_LEAD = re.compile(
+    r'.*\b(?:not|never|no|avoid|don[’\x27]t|jamais|pas|ne)\b(?:\s+(?:do|ever|faire|faites|fais))?'
+    r'|.*\b(?:not|never|no|avoid|don[’\x27]t|jamais|pas|ne)\b.*'
+    r'\b(?:following|below|these|those|this|suivante?s?|ci[\s-]dessous|ces|ceci)')
+
+
+def negated_lead(text):
+    plain = text.strip(' \t*_`:')
+    # Lead-ins are short; the bound also keeps the backtracking pattern linear.
+    return (len(plain) <= LEAD_LIMIT and not terminated(text) and not re.search(MERGE_WORD, plain)
+            and bool(NEGATED_LEAD.fullmatch(plain)))
+
+
 def terminated(block):
     return block.rstrip(' \t*_`"\'»”’)]').endswith(('.', '!', '?'))
 
@@ -292,6 +308,7 @@ def units(lines, hold_found):
     headings = []  # (level, text) of the current heading path
     lead = []      # unterminated blocks that introduce what follows
     items = []     # (indent, text) of the open list item chain
+    intros = {}    # indent -> latest negated lead-in item, for its later siblings
     header = None  # first row of the current table
     block, kind, indent = [], None, 0
     fence = None   # (marker, context, lines) of an open fenced block
@@ -355,11 +372,17 @@ def units(lines, hold_found):
             sibling = None
             while items and items[-1][0] >= indent:
                 sibling = items.pop()
+            for deeper in [i for i in intros if i > indent]:
+                del intros[deeper]
             parents = [t for _, t in items]
+            if indent in intros:
+                parents.append(intros[indent])  # '- Do not do the following' introduces later siblings
             if sibling and sibling[0] == indent and label(sibling[1]):
                 parents.append(sibling[1])  # '- **Merges:**' labels the next sibling
             pair = context(parents), text
             items.append((indent, text))
+            if negated_lead(text):
+                intros[indent] = text
             extend_run(text)
             return pair
         if items and indent:
@@ -370,6 +393,7 @@ def units(lines, hold_found):
             # Unterminated open items still introduce the block after the list.
             lead = trim(lead + [t for _, t in items if not terminated(t)])
             items = []
+            intros.clear()
         if current == 'row':
             pair = context([header] if header else []), text
             # Adjacent lists and tables share one run, as a whole-file reading would.
@@ -390,6 +414,7 @@ def units(lines, hold_found):
         pair = context(), text
         headings.append((level, text[:CONTEXT_LIMIT]))
         lead, items, header = [], [], None
+        intros.clear()
         end_run()
         return pair
 
@@ -443,6 +468,10 @@ def upstream_source(before, after):
     if len(sources) != 1 or len(SOURCE_WORD.findall(after)) > 1 or WIDEN.search(before + after):
         return False
     between, rest = after[:sources[0].start()], after[sources[0].end():]
+    if ',' in between and not re.search(r'\b(?:or|and|et|ou)\b[^,]*\Z', between):
+        # 'Never merge, fetch from upstream' is two instructions; only a list
+        # closed by 'or' or 'and' coordinates its verbs with the merge.
+        return False
     return bool(UPSTREAM_BETWEEN.fullmatch(between) and UPSTREAM_END.fullmatch(rest))
 
 
