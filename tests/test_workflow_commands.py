@@ -743,6 +743,14 @@ gh pr view \\
                 findings = check_repository(root)
                 self.assertEqual([(item.line, item.message) for item in findings], [(4, "gh pr view needs a valued --repo")])
 
+    def test_here_document_headers_preserve_real_continuations(self):
+        for recipient in ("cat", '"${python_cmd[@]}" -'):
+            with self.subTest(recipient=recipient), tempfile.TemporaryDirectory(prefix="workflow-here-continuation-") as directory:
+                body = f"```bash\n{recipient} <<" + "\\\n'EOF'\ngh pr view 1\nEOF\ngh issue view 2\n```\n"
+                root = self.root(directory, references={"boundary.md": body})
+                findings = check_repository(root)
+                self.assertEqual([(item.line, item.message) for item in findings], [(6, "gh issue view needs a valued --repo")])
+
     def test_ambiguous_here_document_consumers_and_delimiters_fail_explicitly(self):
         for header in (
             "bash <<'EOF'",

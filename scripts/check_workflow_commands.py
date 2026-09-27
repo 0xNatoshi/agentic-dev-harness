@@ -21,6 +21,11 @@ import sys
 
 GUIDE = Path("skills/github-workflow")
 SHELL_FENCES = {"", "bash", "sh", "shell", "zsh", "console"}
+# Keep physical comments, quotes and escapes intact before joining shell lines.
+SHELL_SPANS = re.compile(
+    r''' '[^']*' | "(?:\\.|[^"\\])*" | \\. | (?P<comment>(?<![^\s;&|()])\#.*$) | (?P<here>(?<!<)<<(?!<)-?) ''',
+    re.VERBOSE,
+)
 # Recognized command options from gh 2.86 help. Unknown commands/options fail
 # closed until their documented contract is added. Inherited flags are added
 # by _options; the merge-method placeholder is guidance syntax, not a CLI flag.
@@ -647,10 +652,7 @@ def _here_document(command):
     """Recognize the bounded body grammar without interpreting its contents."""
     # Preserve quotes here: ordinary shlex tokenization removes the distinction
     # between a redirect and a quoted string that merely contains '<<'.
-    spans = re.finditer(
-        r''' '[^']*' | "(?:\\.|[^"\\])*" | \\. | (?<![^\s;&|()])\#.*$ | (?P<here>(?<!<)<<(?!<)-?) ''',
-        command, re.VERBOSE,
-    )
+    spans = SHELL_SPANS.finditer(command)
     if not any(span.lastgroup == "here" for span in spans):
         return None, None
     header = re.fullmatch(
@@ -708,13 +710,14 @@ def scan_document(file, text):
             else:
                 pending = stripped
                 pending_line = number
-            # A trailing backslash inside a header comment does not continue
-            # the shell line; the next physical line already belongs to its body.
-            here_document, here_error = _here_document(pending)
-            if pending.endswith("\\") and here_document is None and here_error is None:
+            # A backslash in a comment cannot join physical lines. An actual
+            # continuation may still split a here-document header itself.
+            has_comment = any(span.lastgroup == "comment" for span in SHELL_SPANS.finditer(pending))
+            if pending.endswith("\\") and not has_comment:
                 pending = pending[:-1] + " "
                 continue
             is_probe = _interpreter_probe(lines, number)
+            here_document, here_error = _here_document(pending)
             if here_error:
                 findings.append(Diagnostic(file, pending_line, here_error))
             if here_document is not None:
