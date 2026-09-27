@@ -30,6 +30,9 @@ SCENARIOS = (
     "target_am",
     "incomplete_rebase_apply",
     "invalid_head_name",
+    "update_refs_empty",
+    "update_refs_truncated",
+    "update_refs_invalid_oid",
     "free",
 )
 STATUS = {
@@ -39,6 +42,9 @@ STATUS = {
     "inventory_error": 2,
     "incomplete_rebase_apply": 2,
     "invalid_head_name": 2,
+    "update_refs_empty": 2,
+    "update_refs_truncated": 2,
+    "update_refs_invalid_oid": 2,
     "free": 0,
     "other_rebase": 0,
     "detached_rebase_merge": 0,
@@ -99,12 +105,21 @@ class BranchCleanupTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, "Fixture rebase unexpectedly succeeded")
             self.assertIn("refs/heads/target", (self.gitdir(worktree) / "rebase-merge" / "update-refs").read_text())
             return
-        if scenario.startswith("detached_rebase"):
+        if scenario.startswith(("detached_rebase", "update_refs_")):
             self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
             self.conflicting_commits(worktree)
             backend = "rebase-apply" if scenario == "detached_rebase_apply" else "rebase-merge"
             self.start_rebase(worktree, backend)
             self.assertEqual((self.gitdir(worktree) / backend / "head-name").read_text().strip(), "detached HEAD")
+            # A lost or damaged update record must not read as "target is not listed".
+            oid = self.base
+            records = {
+                "update_refs_empty": "",
+                "update_refs_truncated": f"refs/heads/other\n{oid}\n",
+                "update_refs_invalid_oid": "refs/heads/other\nnot-an-object-id\n" + "0" * 40 + "\n",
+            }
+            if scenario in records:
+                (self.gitdir(worktree) / backend / "update-refs").write_text(records[scenario])
             return
         if scenario in (
             "unknown_state", "missing_worktree", "wrong_repository", "incomplete_rebase_apply", "invalid_head_name"

@@ -83,12 +83,24 @@ check_operation_dir() {
         printf 'Cannot read %s update-refs in %s\n' "$operation" "$gitdir" >&2
         exit 2
       }
-      if grep -Fxq -- "$ref" "$updates"; then
-        printf 'Branch is in use by %s --update-refs in %s; retain it.\n' "$operation" "$worktree" >&2
-        exit 1
-      else
-        [ "$?" -eq 1 ] || exit 2
-      fi
+      # Git writes one ref, old OID, new OID triplet per branch. A record that
+      # is empty, truncated or malformed cannot prove the branch is absent.
+      awk -v ref="$ref" '
+        NR % 3 == 1 { if ($0 == ref) found = 1; if ($0 !~ /^refs\//) bad = 1; next }
+        (length($0) != 40 && length($0) != 64) || /[^0-9a-f]/ { bad = 1 }
+        END { if (bad || NR == 0 || NR % 3 != 0) exit 2; exit found ? 1 : 0 }
+      ' "$updates"
+      case $? in
+        0) ;;
+        1)
+          printf 'Branch is in use by %s --update-refs in %s; retain it.\n' "$operation" "$worktree" >&2
+          exit 1
+          ;;
+        *)
+          printf 'Malformed %s update-refs in %s\n' "$operation" "$gitdir" >&2
+          exit 2
+          ;;
+      esac
     fi
     # git am uses rebase-apply with an applying marker and no head-name; it
     # applies onto the worktree's own HEAD, which the attached check covers.
