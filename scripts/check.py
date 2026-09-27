@@ -23,6 +23,7 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 from build import payloads, version  # noqa: E402
+from check_workflow_commands import check_repository  # noqa: E402
 
 
 def require(condition, detail):
@@ -128,7 +129,7 @@ def python_text(text):
         (start_row, start), (end_row, end) = token.start, token.end
         if (
             token.type in (tokenize.NAME, tokenize.OP, tokenize.NUMBER)
-            or tokenize.tok_name[token.type] in {"FSTRING_START", "FSTRING_END"}
+            or tokenize.tok_name[token.type] in {"FSTRING_START", "FSTRING_END", "TSTRING_START", "TSTRING_END"}
         ) and start_row == end_row:
             rows[start_row - 1][start:end] = " " * (end - start)
         elif token.type == tokenize.STRING:
@@ -261,6 +262,9 @@ def main():
     # Distributed neutral profiles must not propagate a project's dated hold.
     for name in ["profiles/AGENTS.template.md", "profiles/CLAUDE.template.md", "profiles/hermes-development.md"]:
         require(context.scan_text((ROOT / name).read_text(encoding="utf-8")) == 0, f"Unexpected suspension in source profile: {name}")
+    workflow_findings = check_repository(ROOT)
+    if workflow_findings:
+        raise SystemExit("\n".join(str(finding) for finding in workflow_findings))
     print(json.dumps({"source_checks": "passed", "version": release, "package_payload_files": len(package), "runtime_template": project["repository_template_version"]}))
 
 
