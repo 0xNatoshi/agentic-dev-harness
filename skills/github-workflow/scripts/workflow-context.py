@@ -390,7 +390,7 @@ def permitted_method(clause):
     if not set(words) <= METHOD_TOKENS:
         return None
     segments = []
-    labels = re.sub(r'\b(squash|rebase)\s+and\s+(?=merge)', r'\1 & ', clause, flags=re.IGNORECASE)
+    labels = re.sub(r'\b(squash|rebase)\s+and\s+(?=merg(?:e|ing))', r'\1 & ', clause, flags=re.IGNORECASE)
     for part in re.split(r',|\b(?:but|mais|instead|plutôt)\b', labels):
         pieces = re.split(r'\b(?:and|et)\b', part)
         segments.append(pieces[0])
