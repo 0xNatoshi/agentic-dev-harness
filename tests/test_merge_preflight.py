@@ -278,6 +278,8 @@ TEXT_CASES = (
     Case("kept method permitted and same method banned", 2, "Use squash merges and never use squash merges."),
     Case("cleared GitHub label ban and permitted label", 0, "Do not use squash and merge and use rebase and merge."),
     Case("kept method swap then bare merge ban", 2, "Do not use squash merges and use merge commits and never merge."),
+    Case("kept GitHub label banned before only", 2, "Never use Squash and merge only."),
+    Case("kept GitHub label banned then permitted only", 2, "Never use Squash and merge; use Squash and merge only."),
     Case("kept permitted method cancelled by bare never", 2, "Never squash-merge; use merge commits, never."),
     Case("kept permitted method cancelled by bare not", 2, "No fast-forward merges; use merge commits, not."),
     Case("kept only method cancelled by but not", 2, "No rebase merges; squash merges only, but not."),
@@ -320,8 +322,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 235 or len({case.name for case in ALL_CASES}) != 235:
-    raise RuntimeError("Merge fixture inventory must contain 235 unique cases")
+if len(ALL_CASES) != 237 or len({case.name for case in ALL_CASES}) != 237:
+    raise RuntimeError("Merge fixture inventory must contain 237 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

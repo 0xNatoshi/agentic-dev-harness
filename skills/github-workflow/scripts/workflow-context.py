@@ -383,13 +383,15 @@ def permitted_method(clause):
     neither polarity word continues the previous one, so 'never use squash
     merges, rebase merges or merge commits' bans all three. 'and' starts a new
     segment only before a polarity word, so 'do not use squash merges and use
-    merge commits' permits one method while 'squash and merge' stays one name.
+    merge commits' permits one method while GitHub's 'Squash and merge' label
+    stays one name even before 'only'.
     """
     words = re.findall(r'[^\W_]+', clause)
     if not set(words) <= METHOD_TOKENS:
         return None
     segments = []
-    for part in re.split(r',|\b(?:but|mais|instead|plutôt)\b', clause):
+    labels = re.sub(r'\b(squash|rebase)\s+and\s+(?=merge)', r'\1 & ', clause, flags=re.IGNORECASE)
+    for part in re.split(r',|\b(?:but|mais|instead|plutôt)\b', labels):
         pieces = re.split(r'\b(?:and|et)\b', part)
         segments.append(pieces[0])
         for piece in pieces[1:]:
