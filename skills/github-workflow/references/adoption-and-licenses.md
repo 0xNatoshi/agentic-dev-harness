@@ -108,10 +108,10 @@ Selecting/preparing the default template requires no further decision. Public gr
 Before release, verify the active template against its snapshot:
 
 ```bash
-cmp -s "<skill-root>/templates/AGENTS.md" "<skill-root>/templates/history/AGENTS-v6.3.md"
+cmp -s "<skill-root>/templates/AGENTS.md" "<skill-root>/templates/history/AGENTS-v6.4.md"
 ```
 
-Exit 0 means equal; 1 means different; >1 is a read error. Resolve differences/errors before distribution. PowerShell may compare byte arrays if `cmp` is unavailable; a preview/version label is insufficient. Keep and update the skill's **What's new** section. Package v6.3.1 translates personal documentation; the already English repository template remains v6.3 unchanged.
+Exit 0 means equal; 1 means different; >1 is a read error. Resolve differences/errors before distribution. PowerShell may compare byte arrays if `cmp` is unavailable; a preview/version label is insufficient. Keep and update the skill's **What's new** section. Package v6.5.0 adds initiative and written collaboration; its active repository template is v6.4. Preserve older snapshots unchanged.
 
 For v5.1/v5.2 or another older repository:
 

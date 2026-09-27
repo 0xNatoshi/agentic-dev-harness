@@ -4,7 +4,9 @@ This repository maintains portable development instructions and build/check tool
 
 The local gate consists of `python3 scripts/check.py`, `python3 -m unittest discover -s tests -v` and `python3 scripts/build.py`. Tests use real disposable Git repositories and simulated gh responses. They exercise merge preflight routing/suspension/Pages behavior, attached/rebase/bisect branch guards and package integrity. CI runs the gate on Linux. Consult the run for the exact commit; static documentation is not proof that a future revision passed.
 
-The imported v6.3.1 distribution was checked on macOS, including native offline Codex/Hermes loading and Claude import/link resolution. Those historical checks are not v6.4.0 destination installation evidence. The new common profile is neutral and omits the prior user's display name; destination preferences must be preserved during installation.
+The imported v6.3.1 distribution was checked on macOS, including native offline Codex/Hermes loading and Claude import/link resolution. Those historical checks are not v6.5.0 destination installation evidence. The new common profile is neutral and omits the prior user's display name; destination preferences must be preserved during installation.
+
+The v6.5.0 initiative/collaboration rules also need fresh-session loading checks. Source integrity and scenario reviews establish the distributed policy and its consistency, not every future model decision. Record current installation receipts separately from these historical facts.
 
 Still requiring environment-specific verification:
 

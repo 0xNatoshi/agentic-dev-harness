@@ -1,4 +1,4 @@
-# Personal Codex Desktop installation on Windows — v6.4.0
+# Personal Codex Desktop installation on Windows — v6.5.0
 
 Use these steps from the extracted ZIP produced by `python3 scripts/build.py`. Paths below are relative to that package root, not this guide's source location in the repository.
 
@@ -21,12 +21,12 @@ The preflight requires Git, gh, Git Bash/Bash with awk/grep/mktemp and **Python 
 
 ## Back up and compare versions
 
-Before editing, create a new private `%LOCALAPPDATA%\dev-harness\backups\v6.4.0-codex-<timestamp>` directory and record its absolute path:
+Before editing, create a new private `%LOCALAPPDATA%\dev-harness\backups\v6.5.0-codex-<timestamp>` directory and record its absolute path:
 
 ```powershell
 $backupParent = Join-Path $env:LOCALAPPDATA 'dev-harness\backups'
 New-Item -ItemType Directory -Path $backupParent -Force -ErrorAction Stop | Out-Null
-$backupRoot = Join-Path $backupParent ('v6.4.0-codex-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
+$backupRoot = Join-Path $backupParent ('v6.5.0-codex-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
 if (Test-Path -LiteralPath $backupRoot) { throw 'Backup path already exists' }
 New-Item -ItemType Directory -Path $backupRoot -ErrorAction Stop | Out-Null
 $backupRoot
@@ -34,7 +34,7 @@ $backupRoot
 
 Copy every file/link that will change, preserving type/tree: active instructions, adjacent AGENTS.md, config.toml, targeted role files and the complete skill/history. Inventory paths/types/link targets/SHA-256/file counts and verify the backup by readback. The local receipt records absolute paths, before/after hashes, recognized provenance/version, created/retired files and merge diffs. Keep authentication, secrets and unrelated profile content out of the export. Preserve earlier backups.
 
-The **personal package is v6.4.0; the active repository template remains v6.3**, byte-identical to v6.3. This is a language correction, not a project-block migration. Compare marker and actual bytes against authentic sources; a version number alone is insufficient. Preserve newer/unknown local policy and merge only compatible additions. For v6.3.1 or older with a verified base, use a three-way comparison: exact historical base / local file / package file, individually for instructions, skill and roles. Preserve local customizations, restrictions and imports. Without an authentic base, capture local files and compare manually; invent no history. Keep authentic local v5.1/v5.2 snapshots, which are not shipped here.
+The **personal package is v6.5.0; the active repository template is v6.4**. This revision changes initiative and written-collaboration behavior; project adoption remains a separate PR after its current task. Compare marker and actual bytes against authentic sources; a version number alone is insufficient. Preserve newer/unknown local policy and merge only compatible additions. For v6.4.0 or older with a verified base, use a three-way comparison: exact historical base / local file / package file, individually for instructions, skill and roles. Preserve local customizations, restrictions and imports. Without an authentic base, capture local files and compare manually; invent no history. Keep authentic local v5.1/v5.2 snapshots, which are not shipped here.
 
 ## Install targeted files
 
