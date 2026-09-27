@@ -5,7 +5,7 @@
 Development version: 6.5.0. No release tag has been published for this version.
 
 - Bind documented GitHub commands to origin and an explicit PR/run, capture PR URLs, and select a working Python interpreter for portable examples.
-- Add a standalone workflow-command verifier and mutation fixtures for repository binding, required operands, shell redirections and portable interpreter use; use the supported API for default squash titles.
+- Add a standalone workflow-command verifier and mutation fixtures for repository binding, all targeted PR/run operands, command-specific options, shell redirections and portable interpreter use including module mode; use the supported API for default squash titles.
 - Add the approved contributor grant-back to the proprietary template for new adoptions only, with an exact-text source assertion. Existing licenses remain unchanged unless their owner decides otherwise.
 - Define portable conversation reports, resolved-objection records, authenticated GitHub noreply evidence and documentation-with-code review scope.
 - Require one recorded active owner per shared template family across branches, worktrees and runtimes, with comment-based proposals and explicit handoff.

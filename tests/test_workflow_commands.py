@@ -125,6 +125,107 @@ class WorkflowCommandTests(unittest.TestCase):
                 root = self.root(directory, references={"examples.md": "`" + command + "`\n"})
                 self.assertTrue(any(expected in item.message for item in check_repository(root)))
 
+    def test_all_targeted_pr_and_run_commands_require_a_selector(self):
+        commands = {
+            "pr": ("checkout", "checks", "close", "comment", "diff", "edit", "lock", "merge",
+                   "ready", "reopen", "revert", "review", "unlock", "update-branch", "view"),
+            "run": ("cancel", "delete", "download", "rerun", "view", "watch"),
+        }
+        for family, subcommands in commands.items():
+            for subcommand in subcommands:
+                with self.subTest(family=family, subcommand=subcommand), tempfile.TemporaryDirectory(prefix="workflow-targets-") as directory:
+                    command = f'gh {family} {subcommand} --repo "$workflow_host/$workflow_repo"'
+                    root = self.root(directory, references={"examples.md": f"```bash\n{command}\n```\n"})
+                    result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("skills/github-workflow/references/examples.md:2:", result.stderr)
+                    self.assertIn("PR selector" if family == "pr" else "run ID", result.stderr)
+                    (root / "skills/github-workflow/references/examples.md").write_text(f"```bash\n{command} 25\n```\n", encoding="utf-8")
+                    result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_review_and_download_options_never_supply_a_selector(self):
+        cases = (
+            ('pr review --approve', "PR selector"),
+            ('pr review --request-changes --body "needs a test"', "PR selector"),
+            ('run download --dir artifacts --name build --pattern "*.zip"', "run ID"),
+        )
+        for tail, expected in cases:
+            with self.subTest(command=tail), tempfile.TemporaryDirectory(prefix="workflow-target-options-") as directory:
+                family, subcommand, options = tail.split(" ", 2)
+                command = f'gh {family} {subcommand} --repo "$workflow_host/$workflow_repo" {options}'
+                root = self.root(directory, references={"examples.md": f"`{command}`\n"})
+                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("skills/github-workflow/references/examples.md:1:", result.stderr)
+                self.assertIn(expected, result.stderr)
+                (root / "skills/github-workflow/references/examples.md").write_text(f"`{command} 25`\n", encoding="utf-8")
+                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_python_module_mode_requires_the_selected_interpreter(self):
+        commands = (
+            "python3 -m unittest", "python3 -munittest", "python3 -B -m unittest",
+            "python3 -u -I -X dev -m unittest", "python3 2>/dev/null -m unittest",
+        )
+        for command in commands:
+            with self.subTest(command=command), tempfile.TemporaryDirectory(prefix="workflow-python-module-") as directory:
+                root = self.root(directory, references={"examples.md": f"```bash\n{command}\n```\n"})
+                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("skills/github-workflow/references/examples.md:2:", result.stderr)
+                self.assertIn("direct python3 invocation", result.stderr)
+                selected = command.replace("python3", '"${python_cmd[@]}"', 1)
+                (root / "skills/github-workflow/references/examples.md").write_text(f"```bash\n{selected}\n```\n", encoding="utf-8")
+                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_options_are_specific_to_the_gh_subcommand(self):
+        invalid = (
+            'pr view --repo "$workflow_host/$workflow_repo" 25 --head main',
+            'pr view --repo "$workflow_host/$workflow_repo" --approve 25',
+            'run watch --repo "$workflow_host/$workflow_repo" --pattern "*.zip" 25',
+            'issue view --repo "$workflow_host/$workflow_repo" 25 --checkout',
+            'repo view "$workflow_host/$workflow_repo" --description text',
+            'repo edit "$workflow_host/$workflow_repo" --json description',
+            'pr merge --repo "$workflow_host/$workflow_repo" 25 --title text',
+        )
+        for tail in invalid:
+            with self.subTest(command=tail), tempfile.TemporaryDirectory(prefix="workflow-wrong-option-") as directory:
+                root = self.root(directory, references={"examples.md": f"`gh {tail}`\n"})
+                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("skills/github-workflow/references/examples.md:1:", result.stderr)
+                self.assertIn("unsupported gh option", result.stderr)
+        valid = (
+            'pr list --repo "$workflow_host/$workflow_repo" --head main',
+            'pr status --repo "$workflow_host/$workflow_repo" --json createdBy',
+            'run list --repo "$workflow_host/$workflow_repo" --branch main',
+            'pr review --repo "$workflow_host/$workflow_repo" --comment 25',
+            'pr lock --repo "$workflow_host/$workflow_repo" --reason resolved 25',
+            'pr close --repo "$workflow_host/$workflow_repo" --comment done 25',
+            'run download --repo "$workflow_host/$workflow_repo" -D artifacts 25',
+            'repo edit "$workflow_host/$workflow_repo" --description text --template',
+        )
+        for tail in valid:
+            with self.subTest(command=tail), tempfile.TemporaryDirectory(prefix="workflow-valid-option-") as directory:
+                root = self.root(directory, references={"examples.md": f"`gh {tail}`\n"})
+                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_unknown_subcommands_fail_closed(self):
+        cases = (
+            ('pr future-command --repo "$workflow_host/$workflow_repo" 25', "unsupported gh command"),
+            ('repo future-command "$workflow_host/$workflow_repo"', "unsupported gh command"),
+        )
+        for tail, expected in cases:
+            with self.subTest(command=tail), tempfile.TemporaryDirectory(prefix="workflow-option-contract-") as directory:
+                root = self.root(directory, references={"examples.md": f"`gh {tail}`\n"})
+                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("skills/github-workflow/references/examples.md:1:", result.stderr)
+                self.assertIn(expected, result.stderr)
+
     def test_reviewed_false_greens_fail_the_standalone_cli(self):
         cases = [
             ('gh pr view --repo "$workflow_host/$workflow_repo" --json body 2>/dev/null', "PR selector"),
