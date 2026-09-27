@@ -1,4 +1,4 @@
-# Development harness — v6.5.0
+# Agentic development harness — v6.5.0
 
 Versioned development workflow, agent profiles and safe delivery tooling for Codex, Claude Code and Hermes
 
@@ -16,10 +16,10 @@ The [workflow skill](skills/github-workflow/SKILL.md) includes scripts, referenc
 
 ## Version and recovery
 
-The package is v6.5.0, adding proactive technical judgment, incidental issue capture, written collaboration, verified agent attribution and observed model/provider provenance. The project template is v6.4. Authentic template snapshots are retained, including instructions to preserve destination-only v5.1/v5.2 history. The common policy is neutral; merge personal preferences during installation instead of overwriting them.
+The package is v6.5.0; the project template is v6.4. Package policy includes proactive technical judgment, incidental issue capture, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill. Authentic template snapshots are retained, including instructions to preserve destination-only v5.1/v5.2 history. The common policy is neutral; merge personal preferences during installation instead of overwriting them.
 
 MANIFEST.json hashes every payload except itself. The ZIP is reproducibly generated from the versioned source. Read [STATUS.md](STATUS.md) for actual scope and outstanding destination checks. The package contains no private backup, provider credentials or full Hermes SOUL.
 
 Installation guides record backups under `%LOCALAPPDATA%\dev-harness\backups`. Restore only files still matching their installed hashes or merge later edits. The [root license](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md) remain applicable.
 
-Maintain changes, reviews and handoffs in the private [source repository](https://github.com/0xNatoshi/dev-harness). Building this package does not publish a release or install a cleanup automation.
+Maintain changes, reviews and handoffs in the private [source repository](https://github.com/0xNatoshi/agentic-dev-harness). Building this package does not publish a release or install a cleanup automation.

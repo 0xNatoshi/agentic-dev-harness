@@ -22,7 +22,72 @@ SCENARIOS = (
     "wrong_repository",
     "inventory_error",
     "other_rebase",
+    "detached_rebase_merge",
+    "detached_rebase_apply",
+    "detached_rebase_update_refs",
+    "other_rebase_update_refs",
+    "other_am",
+    "target_am",
+    "incomplete_rebase_apply",
+    "invalid_head_name",
+    "update_refs_empty",
+    "update_refs_truncated",
+    "update_refs_invalid_oid",
+    "update_refs_invalid_ref",
+    "update_refs_nul",
+    "update_refs_wide_oid",
+    "am_marker_only",
+    "am_counter_extra_line",
+    "am_counter_range",
+    "head_name_extra_line",
+    "head_name_symlink",
+    "operation_dir_symlink",
+    "am_invalid_head",
+    "invalid_head_detached_rebase",
+    "am_missing_resume_record",
+    "am_author_incomplete",
+    "update_refs_alias",
+    "update_refs_symref_cycle",
+    "head_name_alias",
+    "symbolic_branch",
     "free",
+)
+STATUS = {
+    "unknown_state": 2,
+    "missing_worktree": 2,
+    "wrong_repository": 2,
+    "inventory_error": 2,
+    "incomplete_rebase_apply": 2,
+    "invalid_head_name": 2,
+    "update_refs_empty": 2,
+    "update_refs_truncated": 2,
+    "update_refs_invalid_oid": 2,
+    "update_refs_invalid_ref": 2,
+    "update_refs_nul": 2,
+    "update_refs_wide_oid": 2,
+    "am_marker_only": 2,
+    "am_counter_extra_line": 2,
+    "am_counter_range": 2,
+    "head_name_extra_line": 2,
+    "head_name_symlink": 2,
+    "operation_dir_symlink": 2,
+    "am_invalid_head": 2,
+    "invalid_head_detached_rebase": 2,
+    "update_refs_symref_cycle": 2,
+    "am_missing_resume_record": 2,
+    "am_author_incomplete": 2,
+    "symbolic_branch": 2,
+    "free": 0,
+    "other_rebase": 0,
+    "detached_rebase_merge": 0,
+    "detached_rebase_apply": 0,
+    "other_am": 0,
+}
+
+
+# The records git am writes before it stops, with a neutral identity.
+AUTHOR_SCRIPT = (
+    "GIT_AUTHOR_NAME='Fixture'\n" "GIT_AUTHOR_EMAIL='fixture" "@" "example.invalid'\n" "GIT_AUTHOR_DATE='@0 +0000'\n"
 )
 
 
@@ -61,15 +126,116 @@ class BranchCleanupTests(unittest.TestCase):
     def prepare(self, scenario: str) -> None:
         if scenario in ("free", "inventory_error"):
             return
-        branch = "other" if scenario == "other_rebase" else "target"
+        if scenario == "symbolic_branch":
+            # update-ref -d would follow the alias and delete the branch it names.
+            self.git("branch", "-D", "target")
+            self.git("branch", "real")
+            self.git("symbolic-ref", "refs/heads/target", "refs/heads/real")
+            return
+        if scenario in ("update_refs_alias", "head_name_alias"):
+            # Git follows the alias when it rewrites or restores the recorded name.
+            self.git("symbolic-ref", "refs/heads/alias", "refs/heads/target")
+        if scenario == "update_refs_symref_cycle":
+            self.git("symbolic-ref", "refs/heads/loop-a", "refs/heads/loop-b")
+            self.git("symbolic-ref", "refs/heads/loop-b", "refs/heads/loop-a")
+        branch = "other" if scenario.startswith("other_") else "target"
         if branch == "other":
             self.git("branch", "other")
         worktree = self.root / "linked worktree"
-        if scenario in ("unknown_state", "missing_worktree", "wrong_repository"):
+        if scenario.endswith("update_refs"):
+            # target sits inside the rebased range, so Git will rewrite it at the end.
+            detach = ["--detach"] if scenario.startswith("detached") else []
+            self.git("worktree", "add", "-q", *detach, str(worktree), "target" if detach else branch)
+            (worktree / "extra").write_text("extra\n")
+            self.git("add", "extra", directory=worktree)
+            self.git("commit", "-qm", "extra", directory=worktree)
+            self.git("branch", "-f", "target", "HEAD", directory=worktree)
+            self.conflicting_commits(worktree)
+            result = self.git("rebase", "--update-refs", self.default, directory=worktree, check=False)
+            self.assertNotEqual(result.returncode, 0, "Fixture rebase unexpectedly succeeded")
+            self.assertIn("refs/heads/target", (self.gitdir(worktree) / "rebase-merge" / "update-refs").read_text())
+            return
+        if scenario.startswith(("detached_rebase", "update_refs_")):
             self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
-            if scenario == "unknown_state":
-                gitdir = Path(self.git("rev-parse", "--absolute-git-dir", directory=worktree).stdout.strip())
-                (gitdir / "rebase-merge").mkdir()
+            self.conflicting_commits(worktree)
+            backend = "rebase-apply" if scenario == "detached_rebase_apply" else "rebase-merge"
+            self.start_rebase(worktree, backend)
+            self.assertEqual((self.gitdir(worktree) / backend / "head-name").read_text().strip(), "detached HEAD")
+            # A lost or damaged update record must not read as "target is not listed".
+            oid = self.base
+            records = {
+                "update_refs_empty": "",
+                "update_refs_truncated": f"refs/heads/other\n{oid}\n",
+                "update_refs_invalid_oid": "refs/heads/other\nnot-an-object-id\n" + "0" * 40 + "\n",
+                "update_refs_invalid_ref": f"refs/heads/other bad\n{oid}\n{oid}\n",
+                "update_refs_nul": f"refs/heads/target\0\n{oid}\n{oid}\n",
+                # A SHA-256-width object ID is malformed in this SHA-1 repository.
+                "update_refs_wide_oid": "refs/heads/other\n" + "0" * 64 + "\n" + "0" * 64 + "\n",
+                "update_refs_alias": f"refs/heads/other\n{oid}\n{oid}\nrefs/heads/alias\n{oid}\n{oid}\n",
+                "update_refs_symref_cycle": f"refs/heads/loop-a\n{oid}\n{oid}\n",
+            }
+            if scenario in records:
+                (self.gitdir(worktree) / backend / "update-refs").write_text(records[scenario])
+            return
+        if scenario in (
+            "unknown_state", "missing_worktree", "wrong_repository", "incomplete_rebase_apply", "invalid_head_name",
+            "am_marker_only", "am_counter_extra_line", "am_counter_range", "head_name_extra_line",
+            "head_name_symlink", "operation_dir_symlink", "am_invalid_head", "invalid_head_detached_rebase",
+            "head_name_alias", "am_missing_resume_record", "am_author_incomplete",
+        ):
+            self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
+            if scenario in ("am_missing_resume_record", "am_author_incomplete"):
+                # Counters alone, or an author without a date, cannot be resumed by git am.
+                gitdir = self.gitdir(worktree)
+                self.write_am_state(gitdir, resume_records=scenario == "am_author_incomplete",
+                                    author=AUTHOR_SCRIPT.rpartition("GIT_AUTHOR_DATE")[0])
+                return
+            if scenario in ("am_invalid_head", "invalid_head_detached_rebase"):
+                # Valid operation records on a HEAD that names no commit are untrusted.
+                gitdir = self.gitdir(worktree)
+                if scenario == "am_invalid_head":
+                    self.write_am_state(gitdir)
+                else:
+                    (gitdir / "rebase-merge").mkdir()
+                    (gitdir / "rebase-merge" / "head-name").write_text("detached HEAD\n")
+                (gitdir / "HEAD").write_text("0" * 40 + "\n")
+                return
+            if scenario == "head_name_alias":
+                (self.gitdir(worktree) / "rebase-merge").mkdir()
+                (self.gitdir(worktree) / "rebase-merge" / "head-name").write_text("refs/heads/alias\n")
+                return
+            if scenario == "operation_dir_symlink":
+                # The linked directory holds Git's exact literal, but its source is untrusted.
+                target = self.root / "detached-state"
+                target.mkdir()
+                (target / "head-name").write_text("detached HEAD\n")
+                (self.gitdir(worktree) / "rebase-merge").symlink_to(target, target_is_directory=True)
+                return
+            am = ("am_marker_only", "am_counter_extra_line", "am_counter_range")
+            if scenario in ("unknown_state", "incomplete_rebase_apply", "invalid_head_name", "head_name_extra_line",
+                            "head_name_symlink", *am):
+                state = "rebase-apply" if scenario in ("incomplete_rebase_apply", *am) else "rebase-merge"
+                (self.gitdir(worktree) / state).mkdir()
+                if scenario == "am_marker_only":
+                    # A bare applying marker without am's patch counters is truncated state.
+                    (self.gitdir(worktree) / state / "applying").write_text("")
+                if scenario in ("am_counter_extra_line", "am_counter_range"):
+                    # Git writes one number per counter with 1 <= next <= last.
+                    counters = {"am_counter_extra_line": ("1\njunk\n", "1\n"), "am_counter_range": ("2\n", "1\n")}
+                    (self.gitdir(worktree) / state / "applying").write_text("")
+                    (self.gitdir(worktree) / state / "next").write_text(counters[scenario][0])
+                    (self.gitdir(worktree) / state / "last").write_text(counters[scenario][1])
+                if scenario == "head_name_extra_line":
+                    # Command substitution would strip the extra line and accept the literal.
+                    (self.gitdir(worktree) / state / "head-name").write_text("detached HEAD\n\n")
+                if scenario == "head_name_symlink":
+                    # The link target holds Git's exact literal, but its source is untrusted.
+                    literal = self.root / "detached-literal"
+                    literal.write_text("detached HEAD\n")
+                    (self.gitdir(worktree) / state / "head-name").symlink_to(literal)
+                if scenario == "invalid_head_name":
+                    # Only Git's exact literal is accepted; a near miss stays untrusted.
+                    (self.gitdir(worktree) / state / "head-name").write_text("detached HEAD \n")
             else:
                 worktree.rename(self.root / "moved worktree")
                 if scenario == "missing_worktree":
@@ -81,6 +247,16 @@ class BranchCleanupTests(unittest.TestCase):
         self.git("worktree", "add", "-q", str(worktree), branch)
         if scenario == "attached":
             return
+        if scenario.endswith("_am"):
+            self.conflicting_commits(worktree)
+            patches = self.root / "patches"
+            self.git("format-patch", "-q", "-1", "-o", str(patches), "HEAD")
+            result = self.git("am", str(next(patches.iterdir())), directory=worktree, check=False)
+            self.assertNotEqual(result.returncode, 0, "Fixture am unexpectedly succeeded")
+            state = self.gitdir(worktree) / "rebase-apply"
+            self.assertTrue((state / "applying").is_file())
+            self.assertFalse((state / "head-name").exists())
+            return
         if scenario == "bisect":
             for number in range(1, 6):
                 (worktree / "file").write_text(f"{number}\n")
@@ -91,20 +267,37 @@ class BranchCleanupTests(unittest.TestCase):
             gitdir = Path(self.git("rev-parse", "--absolute-git-dir", directory=worktree).stdout.strip())
             self.assertEqual((gitdir / "BISECT_START").read_text().strip(), branch)
         else:
-            (worktree / "file").write_text("branch\n")
-            self.git("commit", "-qam", "branch change", directory=worktree)
-            (self.repo / "file").write_text("default\n")
-            self.git("commit", "-qam", "default change")
-            arguments = ["rebase"]
-            if scenario == "rebase_apply":
-                arguments.append("--apply")
-            arguments.append(self.default)
-            result = self.git(*arguments, directory=worktree, check=False)
-            self.assertNotEqual(result.returncode, 0, "Fixture rebase unexpectedly succeeded")
-            gitdir = Path(self.git("rev-parse", "--absolute-git-dir", directory=worktree).stdout.strip())
+            self.conflicting_commits(worktree)
             state = "rebase-apply" if scenario == "rebase_apply" else "rebase-merge"
-            self.assertEqual((gitdir / state / "head-name").read_text().strip(), f"refs/heads/{branch}")
+            self.start_rebase(worktree, state)
+            self.assertEqual((self.gitdir(worktree) / state / "head-name").read_text().strip(), f"refs/heads/{branch}")
         self.assertIn("detached", self.git("worktree", "list", "--porcelain").stdout)
+
+    def write_am_state(self, gitdir: Path, resume_records: bool = True, author: str = None) -> None:
+        state = gitdir / "rebase-apply"
+        state.mkdir()
+        for name, value in (("applying", ""), ("next", "1\n"), ("last", "1\n")):
+            (state / name).write_text(value)
+        if resume_records:
+            (state / "final-commit").write_text("fixture\n")
+            (state / "author-script").write_text(AUTHOR_SCRIPT if author is None else author)
+
+    def gitdir(self, worktree: Path) -> Path:
+        return Path(self.git("rev-parse", "--absolute-git-dir", directory=worktree).stdout.strip())
+
+    def conflicting_commits(self, worktree: Path) -> None:
+        (worktree / "file").write_text("branch\n")
+        self.git("commit", "-qam", "branch change", directory=worktree)
+        (self.repo / "file").write_text("default\n")
+        self.git("commit", "-qam", "default change")
+
+    def start_rebase(self, worktree: Path, backend: str) -> None:
+        arguments = ["rebase"]
+        if backend == "rebase-apply":
+            arguments.append("--apply")
+        arguments.append(self.default)
+        result = self.git(*arguments, directory=worktree, check=False)
+        self.assertNotEqual(result.returncode, 0, "Fixture rebase unexpectedly succeeded")
 
     def check_scenario(self, scenario: str) -> None:
         self.prepare(scenario)
@@ -127,11 +320,8 @@ class BranchCleanupTests(unittest.TestCase):
         result = run(["bash", "-c", documented_command()], self.repo, environment)
         current = self.git("rev-parse", "--verify", "refs/heads/target", check=False)
         retained = current.returncode == 0 and current.stdout.strip() == head
-        should_retain = scenario not in ("free", "other_rebase")
-        expected_status = (
-            2 if scenario in ("unknown_state", "missing_worktree", "wrong_repository", "inventory_error")
-            else 1 if should_retain else 0
-        )
+        expected_status = STATUS.get(scenario, 1)
+        should_retain = expected_status != 0
         self.assertEqual(
             (result.returncode, retained), (expected_status, should_retain),
             f"{scenario}: stdout={result.stdout!r}, stderr={result.stderr!r}",

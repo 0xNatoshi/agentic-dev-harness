@@ -4,6 +4,7 @@
 
 Development version: 6.5.0. No release tag has been published for this version.
 
+- Bound review cycles by acceptance, demonstrated regressions and material risk; require a root-design checkpoint after repeated unresolved cycles, targeted rechecks and justified full reviews while preserving every delivery gate.
 - Add the approved contributor grant-back to the proprietary template for new adoptions only, with an exact-text source assertion. Existing licenses remain unchanged unless their owner decides otherwise.
 - Define portable conversation reports, resolved-objection records, authenticated GitHub noreply evidence and documentation-with-code review scope.
 - Require one recorded active owner per shared template family across branches, worktrees and runtimes, with comment-based proposals and explicit handoff.
@@ -14,6 +15,7 @@ Development version: 6.5.0. No release tag has been published for this version.
 - Explicitly process human, agent and automated reviewer feedback, including chatgpt-codex-connector, before merge.
 - Align common, Claude and Hermes profiles; advance the project template to v6.4 with authentic history.
 - Compare the staged license blob with the official text, probe Python like `merge-preflight.sh`, and exit 2 when the comparison cannot run; cover the documented command with an offline test.
+- Let the branch guard accept detached-HEAD rebases and `git am` in any worktree, retain branches listed in a rebase's `update-refs` or named there through a symbolic ref, refuse symbolic branch names, and keep untrusted operation state blocking.
 - Reject ambiguous package destinations, generated-manifest collisions and Windows-reserved path components before writing output. The v6.4.0 installation payload and published tag are unchanged.
 
 ## 6.4.0
