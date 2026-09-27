@@ -64,7 +64,10 @@ class SourceCheckTests(unittest.TestCase):
                         "_" + "@".join(["first.last", "personal-mail.net"]) + "_",
                         "@".join(['"first.last"', "personal-mail.net"]),
                         "@".join(["first!", "personal-mail.net"]), "@".join(["first=", "personal-mail.net"]),
-                        "`" + "@".join(["first.last", "personal-mail.net"]) + "`"]:
+                        "`" + "@".join(["first.last", "personal-mail.net"]) + "`",
+                        "@".join(["!", "personal-mail.net"]), "@".join(["{|}", "personal-mail.net"]),
+                        "@".join(['"first\\""', "personal-mail.net"]), "@".join(["<me>", "personal-mail.net"]),
+                        "_" + "@".join(["noreply", "anthropic.com"]), "@".join(["!git", "github.com"])]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
@@ -91,6 +94,8 @@ class SourceCheckTests(unittest.TestCase):
             "`" + "@".join(["noreply", "anthropic.com"]) + "`",
             "**" + "@".join(["git", "github.com"]) + "**",
             "imports `@AGENTS.md` and `@../.codex/AGENTS.md`",
+            "_" + "@".join(["noreply", "anthropic.com"]) + "_",
+            "mailto:" + "@".join(["noreply", "anthropic.com"]),
             "actions/checkout@v4.2.2",
             "package@1.2.3",
         ]

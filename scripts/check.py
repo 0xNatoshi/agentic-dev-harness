@@ -26,20 +26,33 @@ def require(condition, detail):
 
 
 # An alphabetic top-level label keeps version pins such as action@v4.2.2 out.
-# A quoted local part ("first.last"@...) is valid mail syntax too.
-# RFC 5322 dot-atom characters; angle brackets stay outside so "Name <a@b>" splits.
-EMAIL = re.compile(r'(?:"[^"\n]+"|[A-Za-z0-9.!#$%&\'*+/=?^_`{|}~-]+)@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})')
+DOMAIN = re.compile(r'@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})')
+# The local part is the token before @, including RFC quoted strings and
+# <placeholder> segments, so punctuation or quoting cannot hide an address;
+# a quoted string never spans whitespace, @ or commas, so `"a", "b@c"` reads as b.
+# Code and Markdown delimiters end it. The domain decides; only exact service
+# addresses are neutral. RFC 5321 caps local parts at 64 octets, so a bounded
+# look-back keeps long lines linear.
+LOCAL = re.compile(r'(?:"(?:[^"\\\s@,]|\\.)*"|<[^<>@\s]*>|[^\s<>()\[\],;:"\'`*~{}@])*\Z')
+LOOK_BACK = 256
 NEUTRAL_DOMAINS = {"example.invalid", "example.com", "example.org", "users.noreply.github.com"}
 NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "git@github.com"}
 
 
 def check_emails(relative, text):
     for number, line in enumerate(text.splitlines(), 1):
-        for match in EMAIL.finditer(line):
-            # Markdown imports such as `@AGENTS.md` have no letter or digit before the @.
-            if not re.search(r"[A-Za-z0-9]", match.group(0).partition("@")[0]):
-                continue
-            neutral = match.group(1).lower() in NEUTRAL_DOMAINS or re.sub(r"^[^a-z0-9]+", "", match.group(0).lower()) in NEUTRAL_ADDRESSES
+        for match in DOMAIN.finditer(line):
+            window = line[max(0, match.start() - LOOK_BACK):match.start()]
+            token = LOCAL.search(window).group(0)
+            before = window[:len(window) - len(token)]
+            if not token and (not before or before[-1] in " \t`(["):
+                continue  # `@AGENTS.md`-style imports and @mentions have no local part
+            # _emphasis_ counts only when it also closes right after the address.
+            local = token.lstrip("_")
+            if not line[match.end():].startswith(token[:len(token) - len(local)]):
+                local = token
+            domain = match.group(1).lower()
+            neutral = domain in NEUTRAL_DOMAINS or f"{local.lower()}@{domain}" in NEUTRAL_ADDRESSES
             # Report the location only, so the gate never echoes an address.
             require(neutral, f"Email address outside the neutral allowlist: {relative}:{number}")
 
