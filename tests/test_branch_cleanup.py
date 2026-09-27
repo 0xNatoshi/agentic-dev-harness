@@ -40,6 +40,7 @@ SCENARIOS = (
     "am_counter_range",
     "head_name_extra_line",
     "head_name_symlink",
+    "operation_dir_symlink",
     "free",
 )
 STATUS = {
@@ -59,6 +60,7 @@ STATUS = {
     "am_counter_range": 2,
     "head_name_extra_line": 2,
     "head_name_symlink": 2,
+    "operation_dir_symlink": 2,
     "free": 0,
     "other_rebase": 0,
     "detached_rebase_merge": 0,
@@ -140,9 +142,16 @@ class BranchCleanupTests(unittest.TestCase):
         if scenario in (
             "unknown_state", "missing_worktree", "wrong_repository", "incomplete_rebase_apply", "invalid_head_name",
             "am_marker_only", "am_counter_extra_line", "am_counter_range", "head_name_extra_line",
-            "head_name_symlink",
+            "head_name_symlink", "operation_dir_symlink",
         ):
             self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
+            if scenario == "operation_dir_symlink":
+                # The linked directory holds Git's exact literal, but its source is untrusted.
+                target = self.root / "detached-state"
+                target.mkdir()
+                (target / "head-name").write_text("detached HEAD\n")
+                (self.gitdir(worktree) / "rebase-merge").symlink_to(target, target_is_directory=True)
+                return
             am = ("am_marker_only", "am_counter_extra_line", "am_counter_range")
             if scenario in ("unknown_state", "incomplete_rebase_apply", "invalid_head_name", "head_name_extra_line",
                             "head_name_symlink", *am):

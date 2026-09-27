@@ -83,7 +83,8 @@ check_operation_dir() {
   operation=$1
   directory="$gitdir/$operation"
   if [ -e "$directory" ] || [ -L "$directory" ]; then
-    [ -d "$directory" ] && [ -r "$directory" ] && [ -x "$directory" ] || {
+    # A linked directory could hold another worktree's state; Git never writes one.
+    [ -d "$directory" ] && [ ! -L "$directory" ] && [ -r "$directory" ] && [ -x "$directory" ] || {
       printf 'Cannot read %s state in %s\n' "$operation" "$gitdir" >&2
       exit 2
     }
