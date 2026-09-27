@@ -642,7 +642,11 @@ def scan_normalized(text):
 
 
 def hidden_splits(text):
-    """Count in-word invisible characters near merge or pause vocabulary, up to two."""
+    """Count in-word invisible characters, up to two, in text holding merge or pause vocabulary.
+
+    Splits count file-wide: padding (visible or invisible) between two splits
+    that need different readings must not hide one of them.
+    """
     hidden = ''.join(filter(invisible, set(text)))
     vocabulary = re.compile(r'merg|fusion|suspen|paus|hold|attente')
     strip = {ord(c): None for c in hidden}
@@ -656,10 +660,7 @@ def hidden_splits(text):
         if not (index and text[index - 1].isalnum()):
             continue
         following = visible.search(text, index + 1)
-        if not (following and following.group().isalnum()):
-            continue
-        window = text[max(0, index - 250):index + 250].translate(strip)
-        if vocabulary.search(re.sub(r'\s+', '', window).casefold()):
+        if following and following.group().isalnum():
             count += 1
             if count > 1:
                 break

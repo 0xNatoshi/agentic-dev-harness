@@ -196,6 +196,10 @@ TEXT_CASES = (
     Case("kept tab-indented child", 2, "  - Merging\n\t- paused"),
     Case("kept hold lead-in over blocks", 2, "Until I approve:\n\nA\n\nB\n\nC\n\nNo fast-forward merges; use merge commits."),
     Case("caught distant invisible splits", 2, "Do​not touch anything in this repository at all, or mer​ge anything, until I approve."),
+    Case("caught invisible splits across an invisible run", 2,
+         "Do\u200bnot" + "\u2060" * 249 + "mer\u200bge until approval."),
+    Case("caught invisible splits across visible padding", 2,
+         "Do\u200bnot " + "x " * 200 + "mer\u200bge until approval."),
     Case("conservative method ban alone", 2, "- No merge commits."),
     Case("kept method rule with sign-off condition", 2, "Never squash-merge; use rebase merges once the owner signs off."),
     Case("kept method rule once approved", 2, "No squash merges; merge commits only once approved."),
@@ -366,8 +370,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 272 or len({case.name for case in ALL_CASES}) != 272:
-    raise RuntimeError("Merge fixture inventory must contain 272 unique cases")
+if len(ALL_CASES) != 274 or len({case.name for case in ALL_CASES}) != 274:
+    raise RuntimeError("Merge fixture inventory must contain 274 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
