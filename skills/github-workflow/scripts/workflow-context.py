@@ -2,6 +2,7 @@
 """Read-only origin binding and conservative suspension checks (Python 3.8+)."""
 import collections
 import datetime
+import itertools
 import json
 import re
 import subprocess
@@ -124,18 +125,29 @@ APPROVAL_WORD = r'\b(?:approv\w*|agreement|consent|permission|authorization|auth
 # Restrictions that carry pause or approval wording. Unlike a bare negation
 # ('- Do not add dependencies' beside '- Merge requests use squash'), they are
 # also read across the items of one list or the rows of one table.
-HOLD_FREE = (
-    MERGE_WORD + r'[^.!?]{0,120}' + PAUSE_WORD
-    + r'|' + PAUSE_WORD + r'[^.!?]{0,120}' + MERGE_WORD
-    + r'|' + MERGE_WORD + r'\s+(?:only|seulement|uniquement|après|after|requires?|needs?|(?:is|are)\s+subject\s+to)\b[^.!?]{0,90}' + APPROVAL_WORD
-    + r'|' + APPROVAL_WORD + r'[^.!?]{0,90}\b(?:before|avant)\s+(?:de\s+|toute?\s+|any\s+)?' + MERGE_WORD
-    + r'|\bbefore\s+' + MERGE_WORD + r'[^.!?]{0,90}\b(?:obtain|get|seek|receive|wait\s+for)\b[^.!?]{0,90}' + APPROVAL_WORD
-    + r'|' + MERGE_WORD + r'[^.!?]{0,90}\b(?:wait\w*|attend\w*)\b[^.!?]{0,90}' + APPROVAL_WORD)
-SIBLING_HOLD = re.compile(HOLD_FREE)
-# Every HOLD_FREE match holds a merge word and a pause or approval word, and
-# its earlier items end fewer than RUN_WINDOW characters before its last one,
-# so a list or table is read in bounded windows.
-HOLD_WORD = re.compile(PAUSE_WORD + r'|' + APPROVAL_WORD)
+# Each branch lists the word classes of RUN_WORDS it needs.
+HOLD_BRANCHES = (
+    (MERGE_WORD + r'[^.!?]{0,120}' + PAUSE_WORD, 'mp'),
+    (PAUSE_WORD + r'[^.!?]{0,120}' + MERGE_WORD, 'mp'),
+    (MERGE_WORD + r'\s+(?:only|seulement|uniquement|après|after|requires?|needs?|(?:is|are)\s+subject\s+to)\b[^.!?]{0,90}' + APPROVAL_WORD, 'mqa'),
+    (APPROVAL_WORD + r'[^.!?]{0,90}\b(?:before|avant)\s+(?:de\s+|toute?\s+|any\s+)?' + MERGE_WORD, 'mab'),
+    (r'\bbefore\s+' + MERGE_WORD + r'[^.!?]{0,90}\b(?:obtain|get|seek|receive|wait\s+for)\b[^.!?]{0,90}' + APPROVAL_WORD, 'mboa'),
+    (MERGE_WORD + r'[^.!?]{0,90}\b(?:wait\w*|attend\w*)\b[^.!?]{0,90}' + APPROVAL_WORD, 'mwa'))
+HOLD_FREE = '|'.join(pattern for pattern, _ in HOLD_BRANCHES)
+# Word classes of HOLD_BRANCHES. A phrase such as 'on hold' may be split across
+# two items, so its last word counts on its own.
+RUN_WORDS = {
+    'm': re.compile(MERGE_WORD),
+    'p': re.compile(PAUSE_WORD + r'|\b(?:hold|attente)\b'),
+    'a': re.compile(APPROVAL_WORD + r'|\b(?:off|light)\b'),
+    'q': re.compile(r'\b(?:only|seulement|uniquement|après|after|requires?|needs?|subject)\b'),
+    'b': re.compile(r'\b(?:before|avant)\b'),
+    'o': re.compile(r'\b(?:obtain|get|seek|receive|wait)\b'),
+    'w': re.compile(r'\b(?:wait\w*|attend\w*)\b')}
+RUN_BRANCHES = tuple((re.compile(pattern), words) for pattern, words in HOLD_BRANCHES)
+# A HOLD_BRANCHES match has no sentence punctuation and, for ordinary word
+# lengths, starts fewer than RUN_WINDOW characters before its last item, so a
+# list or table is read in bounded windows.
 RUN_WINDOW = 300
 FREE = re.compile(
     HOLD_FREE
@@ -263,7 +275,11 @@ def terminated(block):
     return block.rstrip(' \t*_`"\'»”’)]').endswith(('.', '!', '?'))
 
 
-def units(lines, read_run):
+def strip_markers(value):
+    return DATED.sub('', EXAMPLE.sub('', re.sub(r'\s+', ' ', value)))
+
+
+def units(lines, hold_found):
     """Yield (section, context, unit) for each Markdown block and its wrapped lines.
 
     Section is the heading path above the unit.
@@ -272,8 +288,8 @@ def units(lines, read_run):
     and a table's header row. Sibling list items and table data rows never give
     each other context. A fenced block is one unit.
 
-    read_run receives the recent items of one list, or rows of one table,
-    joined, whenever a restriction spread over them could end in the newest one.
+    hold_found is called once when a pause or approval restriction spreads over
+    the items of one list or the rows of one table.
     """
     headings = []  # (level, text) of the current heading path
     lead = []      # unterminated blocks that introduce what follows
@@ -281,8 +297,9 @@ def units(lines, read_run):
     header = None  # first row of the current table
     block, kind, indent = [], None, 0
     fence = None   # (marker, context, lines) of an open fenced block
-    run = collections.deque()  # (text, merge, hold) of recent items of the current list or table
-    run_size, run_merges, run_holds, run_table = 0, 0, 0, False
+    run = collections.deque()  # (text, words) of recent items of the current list or table
+    run_words = collections.Counter()  # RUN_WORDS classes across the run
+    run_size, run_table, run_held = 0, False, False
 
     def section():
         return tuple(t for _, t in headings)
@@ -298,25 +315,42 @@ def units(lines, read_run):
         return (path + ' ' + ' '.join(reversed(parts))[-CONTEXT_LIMIT:]).strip()
 
     def extend_run(text, table):
-        nonlocal run_size, run_merges, run_holds, run_table
+        nonlocal run_size, run_table, run_held
         if run_table != table:
             end_run()
         run_table = table
+        if run_held:
+            return
+        # Sized on the text the patterns read, so padding or example markers
+        # cannot push an earlier item out of the window.
+        text = strip_markers(text)
         # Keep at least RUN_WINDOW characters of earlier items before the new one.
         while len(run) > 1 and run_size - len(run[0][0]) - 1 >= RUN_WINDOW:
-            old, merge, hold = run.popleft()
-            run_size, run_merges, run_holds = run_size - len(old) - 1, run_merges - merge, run_holds - hold
-        merge, hold = bool(re.search(MERGE_WORD, text)), bool(HOLD_WORD.search(text))
-        run.append((text, merge, hold))
-        run_size, run_merges, run_holds = run_size + len(text) + 1, run_merges + merge, run_holds + hold
-        # Only a restriction that ends in the new item is new; earlier ones were read before.
-        if len(run) > 1 and (merge or hold) and run_merges and run_holds:
-            read_run(' '.join(item for item, _, _ in run))
+            old, words = run.popleft()
+            run_size -= len(old) + 1
+            run_words.subtract(words)
+        words = ''.join(key for key, pattern in RUN_WORDS.items() if pattern.search(text))
+        run.append((text, words))
+        run_size += len(text) + 1
+        run_words.update(words)
+        # Only a restriction that ends in the new item is new; earlier ones were
+        # read before. It cannot cross sentence punctuation, and each branch is
+        # tried only when the run holds every word class it needs.
+        if len(run) == 1 or not set(words) & set('mpa'):
+            return
+        earlier = ' '.join(item for item, _ in itertools.islice(run, len(run) - 1))
+        start = max(earlier.rfind('.'), earlier.rfind('!'), earlier.rfind('?')) + 1
+        joined = (earlier + ' ' + text)[start:]
+        if any(all(run_words[key] for key in needed) and pattern.search(joined)
+               for pattern, needed in RUN_BRANCHES):
+            run_held = True
+            hold_found()
 
     def end_run():
-        nonlocal run_size, run_merges, run_holds
+        nonlocal run_size
         run.clear()
-        run_size = run_merges = run_holds = 0
+        run_words.clear()
+        run_size = 0
 
     def flush():
         nonlocal block, kind, lead, items, header
@@ -565,16 +599,10 @@ def scan_normalized(text):
     if CROSS_PAUSE.search(joined):
         return 2
 
-    def strip_markers(value):
-        return DATED.sub('', EXAMPLE.sub('', re.sub(r'\s+', ' ', value)))
     # Free-form restrictions are read per Markdown unit so that sibling list
     # items and separate sentences are not joined into one false restriction.
     records, held = [], []
-
-    def read_run(run):
-        if not held and SIBLING_HOLD.search(strip_markers(run)):
-            held.append(run)
-    for section, context, unit in units(outside, read_run):
+    for section, context, unit in units(outside, lambda: held.append(True)):
         unit = strip_markers(unit)
         result = free_restriction(strip_markers(context), unit)
         if result is True:

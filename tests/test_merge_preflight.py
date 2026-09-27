@@ -298,6 +298,13 @@ TEXT_CASES = (
     Case("kept pause two items away", 2, "- Merging pull requests into main from feature branches\n- CI green\n- blocked"),
     Case("kept pause past another label", 2, "- Merging\n- **Docs:**\n- blocked"),
     Case("kept table rows pause", 2, "| Item |\n|---|\n| Merging |\n| blocked |"),
+    Case("kept padded table rows pause", 2,
+         "| Topic | Status |\n|---|---|\n" + "".join(
+             f"| {left:<150} | {right:<150} |\n" for left, right in [("Merging", ""), ("Owner", ""), ("", "blocked")])),
+    Case("kept pause past padded item", 2, "- Merging\n- Owner:" + " " * 320 + "Thib\n- blocked"),
+    Case("kept pause past marker examples", 2,
+         "- Merging\n- " + "Autonomous merge suspended — request dated <date> " * 7 + "\n- blocked"),
+    Case("kept pause phrase split across items", 2, "- Merging\n- on\n- hold"),
     Case("cleared method item beside CI wait item", 0, "- Merge requests use squash\n- Wait for CI before tagging"),
     Case("cleared marker example beside list item", 0,
          "- Use the `Autonomous merge suspended — request dated <date>` marker\n- Read prose restrictions too"),
@@ -343,8 +350,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 255 or len({case.name for case in ALL_CASES}) != 255:
-    raise RuntimeError("Merge fixture inventory must contain 255 unique cases")
+if len(ALL_CASES) != 259 or len({case.name for case in ALL_CASES}) != 259:
+    raise RuntimeError("Merge fixture inventory must contain 259 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
@@ -422,4 +429,13 @@ class ScanTimeTests(unittest.TestCase):
         spec.loader.exec_module(module)
         start = time.monotonic()
         self.assertEqual(module.scan_text("merge" + "\u200b" * 80000 + " x"), 0)
+        self.assertLess(time.monotonic() - start, 3)
+
+    def test_alternating_list_run_stays_bounded(self) -> None:
+        # Reading every window of a merge / approval list with the full pattern took 7 s here.
+        spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        start = time.monotonic()
+        self.assertEqual(module.scan_text("- merge\n- go\n" * 10000), 0)
         self.assertLess(time.monotonic() - start, 3)
