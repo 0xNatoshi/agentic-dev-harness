@@ -226,6 +226,102 @@ class WorkflowCommandTests(unittest.TestCase):
                 self.assertIn("skills/github-workflow/references/examples.md:1:", result.stderr)
                 self.assertIn(expected, result.stderr)
 
+    def test_required_option_values_are_reported_for_each_command(self):
+        cases = (
+            ('pr list --repo "$workflow_host/$workflow_repo" --head', "--head"),
+            ('pr list --repo "$workflow_host/$workflow_repo" --head=', "--head"),
+            ('pr list --repo "$workflow_host/$workflow_repo" --head=</dev/null', "--head"),
+            ('pr list --repo "$workflow_host/$workflow_repo" --head=</dev/null>/dev/null', "--head"),
+            ('pr list --repo "$workflow_host/$workflow_repo" --head=>output', "--head"),
+            ('pr list --repo "$workflow_host/$workflow_repo" --head " "', "--head"),
+            ('pr list --repo "$workflow_host/$workflow_repo" --head --base main', "--head"),
+            ('pr view --repo "$workflow_host/$workflow_repo" 25 --json', "--json"),
+            ('run list --repo "$workflow_host/$workflow_repo" --branch', "--branch"),
+            ('issue create --repo "$workflow_host/$workflow_repo" --title', "--title"),
+            ('repo edit "$workflow_host/$workflow_repo" --description', "--description"),
+            ('pr review --repo "$workflow_host/$workflow_repo" 25 --body-file', "--body-file"),
+        )
+        for tail, flag in cases:
+            with self.subTest(command=tail), tempfile.TemporaryDirectory(prefix="workflow-missing-value-") as directory:
+                root = self.root(directory, references={"examples.md": f"`gh {tail}`\n"})
+                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("skills/github-workflow/references/examples.md:1:", result.stderr)
+                self.assertIn(f"{flag} needs a value", result.stderr)
+
+    def test_value_diagnostics_preserve_documentation_operands_and_stdin(self):
+        with tempfile.TemporaryDirectory(prefix="workflow-value-operands-") as directory:
+            root = self.root(directory, references={"examples.md": '''```bash
+gh pr create --repo "$workflow_host/$workflow_repo" --title "<type>(scope): summary" --body-file <file>
+gh issue develop <n> --repo "$workflow_host/$workflow_repo" --name <type>/<n>-<slug> --base <default> --checkout
+gh pr review --repo "$workflow_host/$workflow_repo" 25 --body-file -
+gh pr comment --repo "$workflow_host/$workflow_repo" 25 --body-file=-
+gh pr list --repo "$workflow_host/$workflow_repo" --head=2>/dev/null
+gh pr create --repo "$workflow_host/$workflow_repo" --title="<type>(scope): summary" --body-file=<file>
+```\n'''})
+            self.assertEqual(check_repository(root), [])
+            reference = root / "skills/github-workflow/references/examples.md"
+            reference.write_text('```bash\ngh pr list --repo "$workflow_host/$workflow_repo" --head --base\n```\n', encoding="utf-8")
+            findings = check_repository(root)
+            self.assertEqual(len(findings), 2, [str(item) for item in findings])
+            self.assertTrue(any("--head needs a value" in item.message for item in findings))
+            self.assertTrue(any("--base needs a value" in item.message for item in findings))
+            reference.write_text('```bash\ngh pr view --repo "$workflow_host/$workflow_repo" <input>output\n```\n', encoding="utf-8")
+            self.assertTrue(any("PR selector" in item.message for item in check_repository(root)))
+
+    def test_fallback_launchers_need_the_selected_interpreter(self):
+        for launcher in ("python3", "python", "py", "py -3"):
+            for arguments in ("scripts/check.py", "scripts/check", "/dev/null", "app.zip", "app_dir", "-m unittest", "-c 'print(1)'", "-"):
+                for layout in ("```bash\n%s\n```\n", "`%s`\n", "%s\n"):
+                    command = f"{launcher} {arguments}"
+                    with self.subTest(command=command, layout=layout), tempfile.TemporaryDirectory(prefix="workflow-fallback-") as directory:
+                        root = self.root(directory, references={"examples.md": layout % command})
+                        result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn("skills/github-workflow/references/examples.md:", result.stderr)
+                        self.assertIn(f"direct {launcher.split()[0]} invocation", result.stderr)
+                        selected = '"${python_cmd[@]}" ' + arguments
+                        (root / "skills/github-workflow/references/examples.md").write_text(layout % selected, encoding="utf-8")
+                        result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_compound_redirects_never_supply_a_selector_or_option_value(self):
+        for redirect in ("</dev/null>/dev/null", "<input>/dev/null", "<input>./output", "<input>-output"):
+            for command, expected in (("pr view", "PR selector"), ("run download", "run ID"), ("pr list", "--head needs a value")):
+                with self.subTest(redirect=redirect, command=command), tempfile.TemporaryDirectory(prefix="workflow-compound-redirect-") as directory:
+                    option = " --head" if command == "pr list" else ""
+                    example = f'gh {command} --repo "$workflow_host/$workflow_repo"{option} {redirect}'
+                    root = self.root(directory, references={"examples.md": f"`{example}`\n"})
+                    result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("skills/github-workflow/references/examples.md:1:", result.stderr)
+                    self.assertIn(expected, result.stderr)
+
+    def test_repeated_repo_options_keep_missing_values_visible(self):
+        for missing in ("--repo", "--repo=", '--repo ""', '--repo " "'):
+            for order in ('{origin} {missing}', '{missing} {origin}'):
+                with self.subTest(missing=missing, order=order), tempfile.TemporaryDirectory(prefix="workflow-repeated-repo-") as directory:
+                    options = order.format(origin='--repo "$workflow_host/$workflow_repo"', missing=missing)
+                    root = self.root(directory, references={"examples.md": f"`gh pr view 25 {options}`\n"})
+                    result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("needs a valued --repo", result.stderr)
+
+    def test_fallback_probes_require_the_complete_three_way_block(self):
+        invalid = (
+            "```bash\nelif command -v py >/dev/null 2>&1 && py -3 -c 'import sys; assert sys.version_info >= (3,8)' 2>/dev/null; then\n```\n",
+            "```bash\nelif command -v python >/dev/null 2>&1 && python -c 'import sys; assert sys.version_info >= (3,8)' 2>/dev/null; then\n```\n",
+            PROBE.replace("python_cmd=(py -3)", "python_cmd=(python)"),
+        )
+        for example in invalid:
+            with self.subTest(example=example), tempfile.TemporaryDirectory(prefix="workflow-fallback-probe-") as directory:
+                root = self.root(directory, references={"examples.md": PROBE})
+                self.assertEqual(check_repository(root), [])
+                (root / "skills/github-workflow/references/examples.md").write_text(example, encoding="utf-8")
+                findings = check_repository(root)
+                expected = "direct py invocation" if "py -3 -c" in example else "direct python invocation"
+                self.assertTrue(any(expected in item.message for item in findings), [str(item) for item in findings])
+
     def test_reviewed_false_greens_fail_the_standalone_cli(self):
         cases = [
             ('gh pr view --repo "$workflow_host/$workflow_repo" --json body 2>/dev/null', "PR selector"),
