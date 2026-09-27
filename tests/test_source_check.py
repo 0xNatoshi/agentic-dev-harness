@@ -58,6 +58,37 @@ class SourceCheckTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Unexpected suspension in source profile: profiles/AGENTS.template.md", result.stderr)
 
+    def test_source_gate_rejects_personal_email_without_echoing_it(self):
+        # Built at runtime so this file itself stays free of the pattern.
+        address = "@".join(["first.last", "personal-mail.net"])
+        with tempfile.TemporaryDirectory(prefix="harness-profile-email-") as directory:
+            root = Path(directory)
+            source = self.copy_source(root)
+            profile = source / "profiles/AGENTS.template.md"
+            text = profile.read_text(encoding="utf-8")
+            profile.write_text(text + f"\nContact: {address}\n", encoding="utf-8")
+            line = len((text + "\nContact:").splitlines())
+            environment, _ = fixture_environment(root)
+            result = run([sys.executable, "scripts/check.py"], source, environment)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(f"Email address outside the neutral allowlist: profiles/AGENTS.template.md:{line}", result.stderr)
+            self.assertNotIn(address, result.stdout + result.stderr)
+
+    def test_source_gate_accepts_neutral_email_forms(self):
+        addresses = [
+            "@".join(["fixture", "example.invalid"]),
+            "@".join(["<id>+<login>", "users.noreply.github.com"]),
+            "@".join(["noreply", "service.example.net"]),
+        ]
+        with tempfile.TemporaryDirectory(prefix="harness-neutral-email-") as directory:
+            root = Path(directory)
+            source = self.copy_source(root)
+            profile = source / "profiles/AGENTS.template.md"
+            profile.write_text(profile.read_text(encoding="utf-8") + "\n" + " ".join(addresses) + "\n", encoding="utf-8")
+            environment, _ = fixture_environment(root)
+            result = run([sys.executable, "scripts/check.py"], source, environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

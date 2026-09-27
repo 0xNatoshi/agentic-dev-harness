@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Check source integrity, portable links, syntax and repository privacy."""
+"""Check source integrity, portable links and syntax, and screen repository privacy.
+
+The privacy screen rejects machine-specific home paths, common credential
+formats and email addresses outside neutral example, GitHub noreply and
+service noreply forms. It does not detect personal names.
+"""
 import ast
 import importlib.util
 import json
@@ -17,6 +22,18 @@ from build import payloads, version  # noqa: E402
 def require(condition, detail):
     if not condition:
         raise ValueError(detail)
+
+
+EMAIL = re.compile(r"[A-Za-z0-9._%+<>-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)")
+NEUTRAL_DOMAINS = {"example.invalid", "example.com", "example.org", "users.noreply.github.com"}
+
+
+def check_emails(relative, text):
+    for number, line in enumerate(text.splitlines(), 1):
+        for match in EMAIL.finditer(line):
+            local = match.group(0).partition("@")[0].lower()
+            # Report the location only, so the gate never echoes an address.
+            require(match.group(1).lower() in NEUTRAL_DOMAINS or local == "noreply", f"Email address outside the neutral allowlist: {relative}:{number}")
 
 
 def check_links(name, text, available):
@@ -56,6 +73,7 @@ def main():
         data = path.read_bytes()
         text = data.decode("utf-8")
         require(not re.search(r"/(?:Users|home)/[A-Za-z0-9_.-]+/|[A-Za-z]:\\Users\\", text), f"Machine-specific path: {relative}")
+        check_emails(relative, text)
         require(not re.search(r"(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{24,}|-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----)", text), f"Possible credential: {relative}")
         if path.suffix == ".py":
             ast.parse(text, filename=str(relative))
