@@ -83,6 +83,11 @@ check_operation_dir() {
         printf 'Cannot read %s update-refs in %s\n' "$operation" "$gitdir" >&2
         exit 2
       }
+      # Control bytes such as NUL can be dropped by awk or read and hide a name.
+      LC_ALL=C tr -d '\000-\011\013-\037\177' < "$updates" | cmp -s - "$updates" || {
+        printf 'Malformed %s update-refs in %s\n' "$operation" "$gitdir" >&2
+        exit 2
+      }
       # Git writes one ref, old OID, new OID triplet per branch. A record that
       # is empty, truncated or malformed cannot prove the branch is absent.
       awk -v ref="$ref" '
@@ -114,6 +119,14 @@ check_operation_dir() {
     if [ "$operation" = rebase-apply ] && [ -f "$directory/applying" ] && [ ! -L "$directory/applying" ] &&
       [ ! -e "$directory/rebasing" ] && [ ! -L "$directory/rebasing" ] &&
       [ ! -e "$directory/head-name" ] && [ ! -L "$directory/head-name" ]; then
+      # git am always records its patch counters; a bare marker is truncated state.
+      for counter in next last; do
+        [ -f "$directory/$counter" ] && [ ! -L "$directory/$counter" ] && [ -r "$directory/$counter" ] &&
+          grep -Eqx '[0-9]+' "$directory/$counter" || {
+          printf 'Incomplete git am state in %s\n' "$gitdir" >&2
+          exit 2
+        }
+      done
       check_am_head
       return 0
     fi

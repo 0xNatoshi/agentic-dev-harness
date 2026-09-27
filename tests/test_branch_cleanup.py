@@ -34,6 +34,8 @@ SCENARIOS = (
     "update_refs_truncated",
     "update_refs_invalid_oid",
     "update_refs_invalid_ref",
+    "update_refs_nul",
+    "am_marker_only",
     "free",
 )
 STATUS = {
@@ -47,6 +49,8 @@ STATUS = {
     "update_refs_truncated": 2,
     "update_refs_invalid_oid": 2,
     "update_refs_invalid_ref": 2,
+    "update_refs_nul": 2,
+    "am_marker_only": 2,
     "free": 0,
     "other_rebase": 0,
     "detached_rebase_merge": 0,
@@ -120,17 +124,22 @@ class BranchCleanupTests(unittest.TestCase):
                 "update_refs_truncated": f"refs/heads/other\n{oid}\n",
                 "update_refs_invalid_oid": "refs/heads/other\nnot-an-object-id\n" + "0" * 40 + "\n",
                 "update_refs_invalid_ref": f"refs/heads/other bad\n{oid}\n{oid}\n",
+                "update_refs_nul": f"refs/heads/target\0\n{oid}\n{oid}\n",
             }
             if scenario in records:
                 (self.gitdir(worktree) / backend / "update-refs").write_text(records[scenario])
             return
         if scenario in (
-            "unknown_state", "missing_worktree", "wrong_repository", "incomplete_rebase_apply", "invalid_head_name"
+            "unknown_state", "missing_worktree", "wrong_repository", "incomplete_rebase_apply", "invalid_head_name",
+            "am_marker_only",
         ):
             self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
-            if scenario in ("unknown_state", "incomplete_rebase_apply", "invalid_head_name"):
-                state = "rebase-apply" if scenario == "incomplete_rebase_apply" else "rebase-merge"
+            if scenario in ("unknown_state", "incomplete_rebase_apply", "invalid_head_name", "am_marker_only"):
+                state = "rebase-apply" if scenario in ("incomplete_rebase_apply", "am_marker_only") else "rebase-merge"
                 (self.gitdir(worktree) / state).mkdir()
+                if scenario == "am_marker_only":
+                    # A bare applying marker without am's patch counters is truncated state.
+                    (self.gitdir(worktree) / state / "applying").write_text("")
                 if scenario == "invalid_head_name":
                     # Only Git's exact literal is accepted; a near miss stays untrusted.
                     (self.gitdir(worktree) / state / "head-name").write_text("detached HEAD \n")
