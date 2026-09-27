@@ -156,6 +156,8 @@ COMMIT_NOUN = re.compile(r'[\s-]+commits?\b')
 VERB_BEFORE = re.compile(
     r'\b(?:not|never|n[’\x27]t|to|please|cannot|can|may|must|should|shall|will|would|could|ne|pas|jamais)\s*$')
 ARTICLE_BEFORE = re.compile(r'\b(?:the|a|an|this|that|each|every|its|their|your|our|le|la|chaque)\s*$')
+# 'Never create a merge commit' still names the method, unlike 'the merge commit SHA'.
+CREATE_BEFORE = re.compile(r'\b(?:create|creates|creating|make|makes|making|use|uses|using)\s+(?:a|an|the)\s*$')
 POSITIVE = {'use', 'uses', 'using', 'always', 'prefer', 'prefers', 'only', 'utilise', 'utilisez', 'utiliser',
             'toujours', 'privilégier', 'privilégiez', 'uniquement', 'seulement'}
 NEGATIVE = {'no', 'not', 'never', 'don', 'avoid', 'nor', 'pas', 'jamais', 'ne', 'n', 'ni'}
@@ -175,11 +177,12 @@ MECHANICS_CONTENT = {
     'branch', 'branches', 'branche', 'cherry', 'pick', 'upstream', 'remote', 'sync', 'history', 'linear',
     'historique', 'linéaire'}
 METHOD_CONTENT = {'rebase', 'rebases', 'rebasing', 'squash', 'commit', 'commits', 'fast', 'forward', 'ff'}
-# One identity per merge method, so a rule that bans and permits the same method is caught.
+# One identity per merge method, so a rule that bans and permits the same method is caught;
+# every merge strategy (three-way, recursive, ort, ...) produces a merge commit.
 METHOD_KEYS = {
     'squash': 'squash', 'rebase': 'rebase', 'rebases': 'rebase', 'fast': 'ff', 'forward': 'ff', 'ff': 'ff',
-    'three': 'three-way', '3': 'three-way', 'octopus': 'octopus', 'recursive': 'recursive', 'ort': 'ort',
-    'resolve': 'resolve', 'subtree': 'subtree', 'commit': 'commit', 'commits': 'commit'}
+    'three': 'commit', '3': 'commit', 'octopus': 'commit', 'recursive': 'commit', 'ort': 'commit',
+    'resolve': 'commit', 'subtree': 'commit', 'commit': 'commit', 'commits': 'commit'}
 BARE_TOKENS = METHOD_TOKENS | MECHANICS_CONTENT | {'them', 'it'}
 # A hold sentence right after a cleared method rule may qualify that rule.
 FOLLOW_HOLD = re.compile(
@@ -428,7 +431,8 @@ def mechanics_only(unit):
             verb = VERB_BEFORE.search(before)
             if final and len(clause) - match.end() <= WORD_WINDOW and upstream_source(before, after):
                 continue
-            if prefix or METHOD_FLAG.match(after) or (commit and not verb and not ARTICLE_BEFORE.search(before)):
+            if prefix or METHOD_FLAG.match(after) or (commit and not verb and (
+                    not ARTICLE_BEFORE.search(before) or CREATE_BEFORE.search(before))):
                 method_clause = True
             elif not verb and (MECHANICS_NOUN.match(after) or commit):
                 continue
