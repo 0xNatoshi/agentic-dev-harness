@@ -38,6 +38,8 @@ VERSION = re.compile(r'v?\d+(?:\.\d+)*(?:-[0-9a-z-]+(?:\.[0-9a-z-]+)*)?\Z')
 # A single-label pin such as actions/checkout@<full commit SHA>.
 COMMIT = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 DIST_TAGS = {"latest", "next"}
+# An OCI image digest: the image name, then @sha256: and 64 hex digits (or sha512, 128).
+DIGESTS = {"sha256": re.compile(r':[0-9a-f]{64}(?![0-9A-Za-z])'), "sha512": re.compile(r':[0-9a-f]{128}(?![0-9A-Za-z])')}
 # RFC 5321 address literals: IPv4, or a tag such as IPv6 followed by dcontent.
 ADDRESS_LITERAL = re.compile(r'\[(?:[0-9.]+|[A-Za-z0-9-]*[A-Za-z0-9]:[!-Z^-~]+)\]')
 # The local part is the token before @, including RFC quoted strings and
@@ -104,6 +106,8 @@ def check_emails(relative, text):
             local = token.lstrip(WRAPPERS)
             wrapper = token[:len(token) - len(local)]
             domain = line[match.start() + 1:end].translate(IDNA_DOTS).lower()
+            if domain in DIGESTS and DIGESTS[domain].match(line, end):
+                continue
             if not local and "." not in domain:
                 # A single label with no local part is a mention such as `@codex review`.
                 continue

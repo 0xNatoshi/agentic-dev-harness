@@ -84,7 +84,11 @@ class SourceCheckTests(unittest.TestCase):
                         "https://" + "@".join(["person", "privatehost"]),
                         "@".join(["codex2", "openai.com"]), "@".join(["x-codex", "openai.com"]),
                         "@".join(["codex", "mail.openai.com"]), "@".join(["codex", "openai.com.evil"]),
-                        "@".join(["codex", "openai.co"]), "~" + "@".join(["codex", "openai.com"])]:
+                        "@".join(["codex", "openai.co"]), "~" + "@".join(["codex", "openai.com"]),
+                        # An @ inside a quoted local part is still a separator, so a
+                        # single-label host cannot hide there (conservative).
+                        "@".join(['"first', 'privatehost"', "example.com"]),
+                        "@".join(["image", "sha256:" + "0" * 63]), "@".join(["image", "sha512:" + "0" * 64])]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
@@ -134,6 +138,8 @@ class SourceCheckTests(unittest.TestCase):
             "@".join(["fixture", "docs.example"]),
             "@".join(["fixture", "machine.localhost"]),
             "Write to " + "@".join(["noreply", "anthropic.com"]) + ".",
+            "@".join(["FROM ubuntu", "sha256:" + "0123456789abcdef" * 4]),
+            "@".join(["image", "sha512:" + "0123456789abcdef" * 8]),
         ]
         with tempfile.TemporaryDirectory(prefix="harness-neutral-email-") as directory:
             root = Path(directory)
