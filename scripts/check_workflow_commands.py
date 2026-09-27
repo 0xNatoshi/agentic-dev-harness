@@ -2,8 +2,8 @@
 """Check executable workflow examples for explicit targets and interpreters.
 
 This intentionally recognizes the Bash and Markdown forms used by the workflow
-guide. It is not a general Bash parser. Active templates may be added by their
-own check; historical snapshots are never current guidance inputs.
+guide and active project instructions. It is not a general Bash parser.
+Historical snapshots are never current guidance inputs.
 """
 
 import argparse
@@ -60,6 +60,7 @@ FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 SHORTHAND = re.compile(r'gh\s+(?:pr|run|issue|repo)\s+\w+(?:[|/]\w+)+(?:\s+--repo\s+"\$workflow_host/\$workflow_repo")?')
 REDIRECTION = re.compile(r"^(?:&(?:>>|>)|\d*(?:<<<|<<-|<<|<>|<&|>>|>\||>&|<|>))(.*)$")
+PROJECT_COMMAND_ROW = re.compile(r"\s*\|\s*(?:Install|Build|Lint|Typecheck|Tests)\s*\|\s*`([^`]+)`\s*\|\s*")
 
 
 @dataclass(frozen=True)
@@ -147,7 +148,7 @@ def _without_redirections(args):
     return operands, incomplete
 
 
-def _options(args):
+def _options(args, *, extra_boolean_flags=()):
     """Return positional words, valued flags, missing values and unknown flags."""
     positional = []
     valued = {}
@@ -178,7 +179,7 @@ def _options(args):
                 valued[flag] = args[index]
             else:
                 missing.add(flag)
-        elif flag in BOOLEAN_FLAGS and not equal:
+        elif (flag in BOOLEAN_FLAGS or flag in extra_boolean_flags) and not equal:
             pass
         elif word.startswith("-"):
             # An unknown flag may consume the next word. Never let that word
@@ -214,7 +215,7 @@ def _direct_python(tail):
     return False, False
 
 
-def _analyze(command, file, line, *, inline=False, probe=False, origin_comparison=False):
+def _analyze(command, file, line, *, inline=False, probe=False, origin_comparison=False, project_python=False):
     if inline and SHORTHAND.fullmatch(command):
         return []
     try:
@@ -229,7 +230,7 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
         tail = _arguments(words, index + 1)
         if word == "python3":
             direct, unsupported = _direct_python(tail)
-            if direct and not probe:
+            if direct and not (probe or project_python):
                 findings.append(Diagnostic(file, line, "direct python3 invocation; use the selected python_cmd array"))
             elif unsupported:
                 findings.append(Diagnostic(file, line, "unsupported python3 invocation; cannot verify interpreter usage"))
@@ -240,7 +241,10 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
         family, subcommand = tail[:2]
         if "/" in subcommand or "|" in subcommand:
             continue
-        positional, valued, missing, unknown, incomplete = _options(tail[2:])
+        template_merge = file == "skills/github-workflow/templates/AGENTS.md" and family == "pr" and subcommand == "merge"
+        positional, valued, missing, unknown, incomplete = _options(
+            tail[2:], extra_boolean_flags=("--{{MERGE_METHOD}}",) if template_merge else (),
+        )
         if incomplete:
             findings.append(Diagnostic(file, line, "incomplete shell redirection in gh command"))
         for flag in sorted(unknown):
@@ -338,9 +342,17 @@ def scan_document(file, text):
             heading = heading_match.group(1)
         for inline_match in INLINE.finditer(source):
             snippet = inline_match.group(1).strip()
+            # The rendered root table declares this project's verified toolchain.
+            # It is not a portable skill recipe. Keep gh checks in these rows.
+            row = PROJECT_COMMAND_ROW.fullmatch(source)
+            project_python = (
+                file == "AGENTS.md" and heading == "Project commands"
+                and row is not None and row.group(1).strip() == snippet
+            )
             findings.extend(_analyze(
                 snippet, file, number, inline=True,
                 origin_comparison=_origin_comparison(file, heading, source, snippet),
+                project_python=project_python,
             ))
         if re.match(r"^\s*(?:gh|python3)\s+", source):
             findings.extend(_analyze(source, file, number))
@@ -350,13 +362,16 @@ def scan_document(file, text):
 
 
 def check_repository(root):
-    """Scan only active workflow guidance, never templates or history."""
+    """Scan guidance and current/root instructions, never historical snapshots."""
     root = Path(root)
     skill = GUIDE / "SKILL.md"
     references = GUIDE / "references"
     if not (root / references).is_dir():
         raise FileNotFoundError(f"workflow references directory missing: {root / references}")
-    files = [skill, *(path.relative_to(root) for path in sorted((root / references).glob("*.md")))]
+    files = [
+        skill, GUIDE / "templates/AGENTS.md", Path("AGENTS.md"),
+        *(path.relative_to(root) for path in sorted((root / references).glob("*.md"))),
+    ]
     return [finding for path in files for finding in scan_document(path.as_posix(), (root / path).read_text(encoding="utf-8"))]
 
 
