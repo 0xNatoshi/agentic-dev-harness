@@ -231,8 +231,14 @@ TEXT_CASES = (
     Case("cleared create merge commits", 0, "Never squash-merge; always create merge commits."),
     Case("cleared GitHub create label", 0, "Use `Squash and merge`, never `Create a merge commit`."),
     Case("cleared French faites method rule", 0, "Ne faites pas de merge commit ; utilisez le squash merge."),
-    Case("cleared hold in another section", 0,
+    Case("kept hold in another section", 2,
          "## Merging\n\nUse squash merges; never rebase merges.\n\n## Releases\n\nWait for CI before tagging."),
+    Case("kept hold in sibling subsection", 2,
+         "## Merging\n\n### Method\n\nNo fast-forward merges; use merge commits.\n\n### Process\n\nAsk the owner first."),
+    Case("kept hold in earlier sibling subsection", 2,
+         "## Merging\n\n### Process\n\nAsk the owner first.\n\n### Method\n\nNo fast-forward merges; use merge commits."),
+    Case("kept hold in sibling top-level section", 2,
+         "## Process\n\nWait until I say so.\n\n## Method\n\nNo fast-forward merges; use merge commits."),
     Case("kept parent heading hold on method rule", 2,
          "## Merges need the owner's OK\n\n### Method\n\nNo fast-forward merges; use merge commits."),
     Case("kept French parent heading hold", 2,
@@ -350,8 +356,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 259 or len({case.name for case in ALL_CASES}) != 259:
-    raise RuntimeError("Merge fixture inventory must contain 259 unique cases")
+if len(ALL_CASES) != 262 or len({case.name for case in ALL_CASES}) != 262:
+    raise RuntimeError("Merge fixture inventory must contain 262 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

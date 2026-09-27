@@ -280,9 +280,7 @@ def strip_markers(value):
 
 
 def units(lines, hold_found):
-    """Yield (section, context, unit) for each Markdown block and its wrapped lines.
-
-    Section is the heading path above the unit.
+    """Yield (context, unit) for each Markdown block and its wrapped lines.
 
     Context is the heading path, unterminated lead-in blocks, parent list items
     and a table's header row. Sibling list items and table data rows never give
@@ -300,9 +298,6 @@ def units(lines, hold_found):
     run = collections.deque()  # (text, words) of recent items of the current list or table
     run_words = collections.Counter()  # RUN_WORDS classes across the run
     run_size, run_table, run_held = 0, False, False
-
-    def section():
-        return tuple(t for _, t in headings)
 
     def context(extra=()):
         path = ' '.join(t for _, t in headings)[-CONTEXT_LIMIT:]
@@ -366,20 +361,20 @@ def units(lines, hold_found):
             parents = [t for _, t in items]
             if sibling and sibling[0] == indent and label(sibling[1]):
                 parents.append(sibling[1])  # '- **Merges:**' labels the next sibling
-            pair = section(), context(parents), text
+            pair = context(parents), text
             items.append((indent, text))
             extend_run(text, False)
             return pair
         if items and indent:
             # Indented content continues the list item above it.
             extend_run(text, False)
-            return section(), context(t for i, t in items if i < indent), text
+            return context(t for i, t in items if i < indent), text
         if items:
             # Unterminated open items still introduce the block after the list.
             lead = trim(lead + [t for _, t in items if not terminated(t)])
             items = []
         if current == 'row':
-            pair = section(), context([header] if header else []), text
+            pair = context([header] if header else []), text
             if header is None:
                 end_run()  # a new table
             extend_run(text, True)
@@ -387,7 +382,7 @@ def units(lines, hold_found):
             return pair
         header = None
         end_run()
-        pair = section(), context(), text
+        pair = context(), text
         body = re.sub(r'<!--|-->', ' ', text).strip() if current == 'comment' else text
         lead = [] if terminated(body) else trim(lead + [body])
         return pair
@@ -396,7 +391,7 @@ def units(lines, hold_found):
         nonlocal lead, items, header
         while headings and headings[-1][0] >= level:
             headings.pop()
-        pair = section(), context(), text
+        pair = context(), text
         headings.append((level, text[:CONTEXT_LIMIT]))
         lead, items, header = [], [], None
         end_run()
@@ -407,7 +402,7 @@ def units(lines, hold_found):
         if fence:
             marker, fenced_context, fenced = fence
             if re.fullmatch(r' {0,3}' + re.escape(marker[0]) + '{%d,}\\s*' % len(marker), line):
-                yield section(), fenced_context, ' '.join(fenced)
+                yield fenced_context, ' '.join(fenced)
                 fence = None
             elif stripped:
                 fenced.append(stripped)
@@ -441,7 +436,7 @@ def units(lines, hold_found):
             kind, indent = starts or 'para', len(line) - len(line.lstrip())
         block.append(line)
     if fence:
-        yield section(), fence[1], ' '.join(fence[2])
+        yield fence[1], ' '.join(fence[2])
     pair = flush()
     if pair:
         yield pair
@@ -601,26 +596,23 @@ def scan_normalized(text):
 
     # Free-form restrictions are read per Markdown unit so that sibling list
     # items and separate sentences are not joined into one false restriction.
-    records, held = [], []
-    for section, context, unit in units(outside, lambda: held.append(True)):
+    cleared, follows, held = False, False, []
+    for context, unit in units(outside, lambda: held.append(True)):
         unit = strip_markers(unit)
         result = free_restriction(strip_markers(context), unit)
         if result is True:
             return 2
         if result == 'cleared' and FOLLOW_HOLD.search(strip_markers(context)):
             return 2  # a heading, lead-in or parent item conditions the rule
-        records.append((section, unit, result == 'cleared'))
+        cleared = cleared or result == 'cleared'
+        follows = follows or bool(FOLLOW_HOLD.search(unit))
     if held:
         return 2  # a list or table carries a pause or approval restriction across items
-    # A hold or approval sentence in the section of a cleared rule, in the
-    # sections above or below it, or right after it, may qualify that rule
-    # without naming a merge. Prefix sets keep the check linear in section depth.
-    cleared = {section for section, _, done in records if done}
-    above = {path[:depth] for path in cleared for depth in range(len(path) + 1)}
-    for index, (section, unit, _) in enumerate(records):
-        inside = section in above or any(section[:depth] in cleared for depth in range(len(section)))
-        if (inside or (index and records[index - 1][2])) and FOLLOW_HOLD.search(unit):
-            return 2
+    # A hold or approval sentence anywhere in the file may qualify a cleared
+    # rule without naming a merge, even from a sibling section under the
+    # same parent heading.
+    if cleared and follows:
+        return 2
     return 1 if found else 0
 
 
