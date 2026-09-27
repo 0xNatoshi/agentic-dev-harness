@@ -34,10 +34,14 @@ DOTS = ".\u3002\uff0e\uff61"
 IDNA_DOTS = str.maketrans(DOTS[1:], "...")
 # Version pins such as action@v4.2.2 or pkg@1.2.3-beta.1 are semver-shaped, and their
 # last label is never an alphabetic top-level domain.
-VERSION = re.compile(r'v?\d+(?:\.\d+)+(?:-[0-9a-z-]+(?:\.[0-9a-z-]+)*)?\Z')
+VERSION = re.compile(r'v?\d+(?:\.\d+)*(?:-[0-9a-z-]+(?:\.[0-9a-z-]+)*)?\Z')
+# A single-label pin such as actions/checkout@<full commit SHA>.
+COMMIT = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
+# RFC 5321 address literals: IPv4, or a tag such as IPv6 followed by dcontent.
+ADDRESS_LITERAL = re.compile(r'\[(?:[0-9.]+|[A-Za-z0-9-]*[A-Za-z0-9]:[!-Z^-~]+)\]')
 # The local part is the token before @, including RFC quoted strings and
 # <placeholder> segments, so punctuation or quoting cannot hide an address;
-# a quoted string never spans whitespace, @ or commas, so `"a", "b@c"` reads as b.
+# a quoted string never spans whitespace, @ or commas, so `"a", "b@c.test"` reads as b.
 # Only characters that cannot appear unquoted in a local part end it. The domain
 # decides; only exact service addresses are neutral. RFC 5321 caps local parts
 # at 64 octets, so a bounded look-back keeps long lines linear.
@@ -58,7 +62,13 @@ def label_char(char):
 
 
 def domain_end(line, at):
-    """End of the dotted domain after the @ at index at, or None without two labels."""
+    """End of the domain or address literal after the @ at index at, or None without one.
+
+    Single-label domains such as intranet hosts are valid mail domains too.
+    """
+    literal = ADDRESS_LITERAL.match(line, at + 1)
+    if literal:
+        return literal.end()
     index = end = at + 1
     labels = 0
     while True:
@@ -73,7 +83,7 @@ def domain_end(line, at):
             index += 1
         else:
             break
-    return end if labels >= 2 else None
+    return end if labels else None
 
 
 def neutral_domain(domain):
@@ -93,6 +103,9 @@ def check_emails(relative, text):
             local = token.lstrip(WRAPPERS)
             wrapper = token[:len(token) - len(local)]
             domain = line[match.start() + 1:end].translate(IDNA_DOTS).lower()
+            if not local and "." not in domain:
+                # A single label with no local part is a mention such as `@codex review`.
+                continue
             if not line[end:].startswith(wrapper[::-1].translate(CLOSING)):
                 local = token
             elif not local and (not before or before[-1] in " \t([") and (
@@ -101,7 +114,7 @@ def check_emails(relative, text):
                 # token is a local part too, except a code span around a Markdown
                 # import such as `@AGENTS.md`.
                 continue
-            if VERSION.match(domain) and not domain.rpartition(".")[2].isalpha():
+            if (VERSION.match(domain) and not domain.rpartition(".")[2].isalpha()) or COMMIT.match(domain):
                 continue
             neutral = neutral_domain(domain) or f"{local.lower()}@{domain}" in NEUTRAL_ADDRESSES
             # Report the location only, so the gate never echoes an address.

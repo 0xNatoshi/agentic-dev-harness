@@ -78,7 +78,9 @@ class SourceCheckTests(unittest.TestCase):
                         "@".join(["first", "ex\u00e4mple.de"]), "@".join(["noreply", "anthropic.c\u00f6m"]),
                         "@".join(["user", "123.456.com"]), "@".join(["user", "1.2.3-evil.com"]),
                         "@".join(["first", "\u0909\u0926\u093e\u0939\u0930\u0923.\u092d\u093e\u0930\u0924"]),
-                        "@".join(["first", "personal-mail\u3002net"]), "@".join(["first", "example.com.personal-mail.net"])]:
+                        "@".join(["first", "personal-mail\u3002net"]), "@".join(["first", "example.com.personal-mail.net"]),
+                        "@".join(["person", "privatehost"]), "@".join(["person", "[192.168.1.10]"]),
+                        "@".join(["person", "[IPv6:2001:db8::1]"]), "@".join(["person", "ci-runner-7"])]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
@@ -113,6 +115,11 @@ class SourceCheckTests(unittest.TestCase):
             "package@1.2.3",
             "package@v1.2.3-beta.1",
             "package@4.2",
+            "actions/checkout@v5",
+            "actions/checkout@" + "0123456789abcdef" * 2 + "01234567",
+            "@".join(["fixture", "localhost"]),
+            "\"@codex review\" `@codex review` '@codex'",
+            "HEAD@{1} and main@{upstream}",
             "@".join(["fixture", "example.net"]),
             "@".join(["fixture", "mail.example.org"]),
             "@".join(["fixture", "host.test"]),
