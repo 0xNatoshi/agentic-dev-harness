@@ -170,9 +170,11 @@ METHOD_TOKENS = POSITIVE | NEGATIVE | {
     'creating', 'keep', 'make', 'faire', 'faites', 'fais', 'créer', 'créez', 'crée'}
 # A clause with no merge word inside a cleared rule may only restate git mechanics;
 # any other clause ('the owner signs off first') may condition the rule.
-BARE_TOKENS = METHOD_TOKENS | {
-    'onto', 'main', 'master', 'branch', 'branches', 'them', 'it', 'this', 'cherry', 'pick', 'upstream', 'remote',
-    'sync', 'history', 'linear', 'rebasing', 'branche', 'branches', 'historique', 'linéaire'}
+MECHANICS_CONTENT = {
+    'rebase', 'rebases', 'rebasing', 'squash', 'commit', 'commits', 'fast', 'forward', 'ff', 'onto', 'main', 'master',
+    'branch', 'branches', 'branche', 'cherry', 'pick', 'upstream', 'remote', 'sync', 'history', 'linear',
+    'historique', 'linéaire'}
+BARE_TOKENS = METHOD_TOKENS | MECHANICS_CONTENT | {'them', 'it'}
 # A hold sentence right after a cleared method rule may qualify that rule.
 FOLLOW_HOLD = re.compile(
     PAUSE_WORD + r'|' + APPROVAL_WORD + r'|\b(?:until|unless|wait\w*|hold\w*|jusqu\w*|attend\w*|tant\s+que'
@@ -401,7 +403,9 @@ def mechanics_only(unit):
         final = index + 1 >= len(pieces) or pieces[index + 1] in '.!?' or not re.search(r'\w', ''.join(pieces[index + 2:]))
         method_clause = False
         if not re.search(MERGE_WORD, clause):
-            if not set(re.findall(r'[^\W_]+', clause)) <= BARE_TOKENS:
+            words = set(re.findall(r'[^\W_]+', clause))
+            # 'Do not do it.' has no git content and may undo the rule.
+            if words and not (words <= BARE_TOKENS and words & MECHANICS_CONTENT):
                 return False
             continue
         for match in re.finditer(MERGE_WORD, clause):
@@ -492,12 +496,15 @@ def scan_normalized(text):
         result = free_restriction(strip_markers(context), unit)
         if result is True:
             return 2
+        if result == 'cleared' and FOLLOW_HOLD.search(strip_markers(context)):
+            return 2  # a heading, lead-in or parent item conditions the rule
         records.append((section, unit, result == 'cleared'))
-    # A hold or approval sentence in the section of a cleared rule, or right
-    # after it, may qualify that rule even when it names no merge.
+    # A hold or approval sentence in the section of a cleared rule, in its
+    # subsections, or right after it, may qualify that rule without naming a merge.
     cleared = {section for section, _, done in records if done}
     for index, (section, unit, _) in enumerate(records):
-        if (section in cleared or (index and records[index - 1][2])) and FOLLOW_HOLD.search(unit):
+        inside = any(section[:len(path)] == path for path in cleared)
+        if (inside or (index and records[index - 1][2])) and FOLLOW_HOLD.search(unit):
             return 2
     return 1 if found else 0
 

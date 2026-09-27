@@ -233,6 +233,20 @@ TEXT_CASES = (
     Case("cleared French faites method rule", 0, "Ne faites pas de merge commit ; utilisez le squash merge."),
     Case("cleared hold in another section", 0,
          "## Merging\n\nUse squash merges; never rebase merges.\n\n## Releases\n\nWait for CI before tagging."),
+    Case("kept parent heading hold on method rule", 2,
+         "## Merges need the owner's OK\n\n### Method\n\nNo fast-forward merges; use merge commits."),
+    Case("kept French parent heading hold", 2,
+         "## Fusions : le propriétaire dit oui d'abord\n\n### Méthode\n\n"
+         "Pas de fast-forward merge ; utilisez des merge commits."),
+    Case("kept subsection hold after method rule", 2,
+         "## Merging\n\nNo fast-forward merges; use merge commits.\n\n### Process\n\nAsk me first."),
+    Case("kept subsection owner OK after method rule", 2,
+         "## Merging\n\nNo fast-forward merges; use merge commits.\n\n### Process\n\nThe owner OKs each one."),
+    Case("kept later section hold after unheaded rule", 2,
+         "No fast-forward merges; use merge commits.\n\n---\n\n## Rules\n\nHuman sign-off first."),
+    Case("kept method rule undone by bare clause", 2, "No rebase merges; squash merges only. But not this."),
+    Case("kept method rule retracted", 2, "No rebase merges; squash merges only. Or rather, don't."),
+    Case("kept method rule negated by bare clause", 2, "Use merge commits; never squash-merge. Do not do it."),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -270,8 +284,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 199 or len({case.name for case in ALL_CASES}) != 199:
-    raise RuntimeError("Merge fixture inventory must contain 199 unique cases")
+if len(ALL_CASES) != 207 or len({case.name for case in ALL_CASES}) != 207:
+    raise RuntimeError("Merge fixture inventory must contain 207 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
