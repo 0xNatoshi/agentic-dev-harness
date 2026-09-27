@@ -216,6 +216,23 @@ TEXT_CASES = (
          "No fast-forward merges; use merge commits.\n\nRun the tests before pushing."),
     Case("cleared method ban then permitted method", 0, "Do not use squash merges; use merge commits."),
     Case("oversized input is not scanned", 2, "Use squash merges.\n" * 7000),
+    Case("kept condition clause after method rule", 2, "No rebase merges; use squash merges; the owner signs off first."),
+    Case("kept condition sentence after method rule", 2, "No squash merges. Use merge commits. The owner OKs each one first."),
+    Case("kept colon condition after method rule", 2, "No fast-forward merges; use merge commits: owner OK required."),
+    Case("kept final-say sentence after method rule", 2, "No rebase merges; use squash merges. The owner has the final say."),
+    Case("kept French condition clause after method rule", 2,
+         "Pas de rebase merge ; utilisez des squash merges ; le propriétaire tranche."),
+    Case("kept condition sentence after upstream rule", 2,
+         "- Never merge, rebase onto or cherry-pick wholesale from the upstream remote. The owner OKs each sync."),
+    Case("kept hold later in section of method rule", 2,
+         "No fast-forward merges; use merge commits.\n\nKeep history linear.\n\nWait until I approve."),
+    Case("kept hold before method rule", 2, "Wait until I approve.\n\nNo fast-forward merges; use merge commits."),
+    Case("kept owner OK after method rule", 2, "No fast-forward merges; use merge commits.\n\nThe owner must OK each one first."),
+    Case("cleared create merge commits", 0, "Never squash-merge; always create merge commits."),
+    Case("cleared GitHub create label", 0, "Use `Squash and merge`, never `Create a merge commit`."),
+    Case("cleared French faites method rule", 0, "Ne faites pas de merge commit ; utilisez le squash merge."),
+    Case("cleared hold in another section", 0,
+         "## Merging\n\nUse squash merges; never rebase merges.\n\n## Releases\n\nWait for CI before tagging."),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -253,8 +270,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 186 or len({case.name for case in ALL_CASES}) != 186:
-    raise RuntimeError("Merge fixture inventory must contain 186 unique cases")
+if len(ALL_CASES) != 199 or len({case.name for case in ALL_CASES}) != 199:
+    raise RuntimeError("Merge fixture inventory must contain 199 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

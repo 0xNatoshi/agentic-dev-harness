@@ -166,10 +166,17 @@ METHOD_TOKENS = POSITIVE | NEGATIVE | {
     'three', 'way', '3', 'octopus', 'recursive', 'ort', 'resolve', 'subtree', 'commit', 'commits', 'git', 'method',
     'methods', 'strategy', 'strategies', 'do', 'does', 't', 'the', 'a', 'an', 'and', 'or', 'but', 'instead',
     'rather', 'than', 'of', 'over', 'with', 'via', 'de', 'des', 'les', 'le', 'la', 'du', 'd', 'l', 'ou', 'et',
-    'mais', 'plutôt', 'que', 'qu', 'au', 'lieu', 'par', 'ie', 'by', 'default', 'défaut'}
+    'mais', 'plutôt', 'que', 'qu', 'au', 'lieu', 'par', 'ie', 'by', 'default', 'défaut', 'create', 'creates',
+    'creating', 'keep', 'make', 'faire', 'faites', 'fais', 'créer', 'créez', 'crée'}
+# A clause with no merge word inside a cleared rule may only restate git mechanics;
+# any other clause ('the owner signs off first') may condition the rule.
+BARE_TOKENS = METHOD_TOKENS | {
+    'onto', 'main', 'master', 'branch', 'branches', 'them', 'it', 'this', 'cherry', 'pick', 'upstream', 'remote',
+    'sync', 'history', 'linear', 'rebasing', 'branche', 'branches', 'historique', 'linéaire'}
 # A hold sentence right after a cleared method rule may qualify that rule.
 FOLLOW_HOLD = re.compile(
-    PAUSE_WORD + r'|' + APPROVAL_WORD + r'|\b(?:until|unless|wait\w*|hold\w*|jusqu\w*|attend\w*|tant\s+que)\b')
+    PAUSE_WORD + r'|' + APPROVAL_WORD + r'|\b(?:until|unless|wait\w*|hold\w*|jusqu\w*|attend\w*|tant\s+que'
+    r'|ok(?:s|ed)?|first|d\W?abord|final\s+say|dernier\s+mot|feu\s+vert|owner|maintainer|propriétaire|mainteneur)\b')
 # Pause wording is also read across Markdown blocks, as sibling headings or items can carry it.
 STRONG_PAUSE = r'\b(?:suspend\w*|paused?|on\s+hold|en\s+attente)\b'
 CROSS_PAUSE = re.compile(
@@ -201,7 +208,7 @@ WORD_WINDOW = 250
 MAX_MERGE_WORDS = 50
 # Instruction files are far smaller; a larger input is not scanned and stays ambiguous,
 # which also bounds the scan time on adversarial input.
-MAX_SCAN_CHARS = 128 * 1024
+MAX_SCAN_CHARS = 128 * 1024  # characters, not bytes
 
 
 def unquote(line):
@@ -234,7 +241,9 @@ def terminated(block):
 
 
 def units(lines):
-    """Yield (context, unit) for each Markdown block and its wrapped lines.
+    """Yield (section, context, unit) for each Markdown block and its wrapped lines.
+
+    Section is the heading path above the unit.
 
     Context is the heading path, unterminated lead-in blocks, parent list items
     and a table's header row. Sibling list items and table data rows never give
@@ -246,6 +255,9 @@ def units(lines):
     header = None  # first row of the current table
     block, kind, indent = [], None, 0
     fence = None   # (marker, context, lines) of an open fenced block
+
+    def section():
+        return tuple(t for _, t in headings)
 
     def context(extra=()):
         path = ' '.join(t for _, t in headings)[-CONTEXT_LIMIT:]
@@ -271,22 +283,22 @@ def units(lines):
             parents = [t for _, t in items]
             if sibling and sibling[0] == indent and label(sibling[1]):
                 parents.append(sibling[1])  # '- **Merges:**' labels the next sibling
-            pair = context(parents), text
+            pair = section(), context(parents), text
             items.append((indent, text))
             return pair
         if items and indent:
             # Indented content continues the list item above it.
-            return context(t for i, t in items if i < indent), text
+            return section(), context(t for i, t in items if i < indent), text
         if items:
             # Unterminated open items still introduce the block after the list.
             lead = trim(lead + [t for _, t in items if not terminated(t)])
             items = []
         if current == 'row':
-            pair = context([header] if header else []), text
+            pair = section(), context([header] if header else []), text
             header = header or text
             return pair
         header = None
-        pair = context(), text
+        pair = section(), context(), text
         body = re.sub(r'<!--|-->', ' ', text).strip() if current == 'comment' else text
         lead = [] if terminated(body) else trim(lead + [body])
         return pair
@@ -295,7 +307,7 @@ def units(lines):
         nonlocal lead, items, header
         while headings and headings[-1][0] >= level:
             headings.pop()
-        pair = context(), text
+        pair = section(), context(), text
         headings.append((level, text[:CONTEXT_LIMIT]))
         lead, items, header = [], [], None
         return pair
@@ -305,7 +317,7 @@ def units(lines):
         if fence:
             marker, fenced_context, fenced = fence
             if re.fullmatch(r' {0,3}' + re.escape(marker[0]) + '{%d,}\\s*' % len(marker), line):
-                yield fenced_context, ' '.join(fenced)
+                yield section(), fenced_context, ' '.join(fenced)
                 fence = None
             elif stripped:
                 fenced.append(stripped)
@@ -339,7 +351,7 @@ def units(lines):
             kind, indent = starts or 'para', len(line) - len(line.lstrip())
         block.append(line)
     if fence:
-        yield fence[1], ' '.join(fence[2])
+        yield section(), fence[1], ' '.join(fence[2])
     pair = flush()
     if pair:
         yield pair
@@ -388,6 +400,10 @@ def mechanics_only(unit):
         # 'Never merge from upstream; ever.' continues the clause after ';' or ':'.
         final = index + 1 >= len(pieces) or pieces[index + 1] in '.!?' or not re.search(r'\w', ''.join(pieces[index + 2:]))
         method_clause = False
+        if not re.search(MERGE_WORD, clause):
+            if not set(re.findall(r'[^\W_]+', clause)) <= BARE_TOKENS:
+                return False
+            continue
         for match in re.finditer(MERGE_WORD, clause):
             before = clause[max(0, match.start() - WORD_WINDOW):match.start()]
             after = clause[match.end():match.end() + WORD_WINDOW]
@@ -470,15 +486,19 @@ def scan_normalized(text):
         return DATED.sub('', EXAMPLE.sub('', re.sub(r'\s+', ' ', value)))
     # Free-form restrictions are read per Markdown unit so that sibling list
     # items and separate sentences are not joined into one false restriction.
-    cleared = False
-    for context, unit in units(outside):
+    records = []
+    for section, context, unit in units(outside):
         unit = strip_markers(unit)
-        if cleared and FOLLOW_HOLD.search(unit):
-            return 2
         result = free_restriction(strip_markers(context), unit)
         if result is True:
             return 2
-        cleared = result == 'cleared'
+        records.append((section, unit, result == 'cleared'))
+    # A hold or approval sentence in the section of a cleared rule, or right
+    # after it, may qualify that rule even when it names no merge.
+    cleared = {section for section, _, done in records if done}
+    for index, (section, unit, _) in enumerate(records):
+        if (section in cleared or (index and records[index - 1][2])) and FOLLOW_HOLD.search(unit):
+            return 2
     return 1 if found else 0
 
 
