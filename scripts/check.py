@@ -35,6 +35,7 @@ DOMAIN = re.compile(r'@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})')
 # look-back keeps long lines linear.
 LOCAL = re.compile(r'(?:"(?:[^"\\\s@,]|\\.)*"|<[^<>@\s]*>|[^\s<>()\[\],;:"\'`*~{}@])*\Z')
 LOOK_BACK = 256
+OPENING = re.compile(r'(?:\A|[ \t(\[])`*\Z')
 NEUTRAL_DOMAINS = {"example.invalid", "example.com", "example.org", "users.noreply.github.com"}
 NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "git@github.com"}
 
@@ -45,8 +46,11 @@ def check_emails(relative, text):
             window = line[max(0, match.start() - LOOK_BACK):match.start()]
             token = LOCAL.search(window).group(0)
             before = window[:len(window) - len(token)]
-            if not token and (not before or before[-1] in " \t`(["):
-                continue  # `@AGENTS.md`-style imports and @mentions have no local part
+            # `@AGENTS.md`-style imports and @mentions have no local part; a backtick
+            # is also a valid local-part character, so it only opens a code span
+            # after the start of the line, a space, a tab or an opening bracket.
+            if not token and OPENING.search(before):
+                continue
             # _emphasis_ counts only when it also closes right after the address.
             local = token.lstrip("_")
             if not line[match.end():].startswith(token[:len(token) - len(local)]):
