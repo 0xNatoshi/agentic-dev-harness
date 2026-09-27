@@ -3,7 +3,7 @@
 
 The privacy screen rejects machine-specific home paths, common credential
 formats and email addresses outside example domains, GitHub noreply,
-the Claude co-author trailer and the GitHub SSH user. It does not detect
+the Claude and Codex co-author trailers and the GitHub SSH user. It does not detect
 personal names or obfuscated addresses.
 """
 import ast
@@ -55,7 +55,7 @@ CLOSING = str.maketrans("{", "}")
 # Reserved for documentation and testing (RFC 2606, RFC 6761), subdomains included.
 RESERVED_DOMAINS = ("example.com", "example.net", "example.org", "example", "invalid", "test", "localhost")
 NEUTRAL_DOMAINS = {"users.noreply.github.com"}
-NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "git@github.com"}
+NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "codex@openai.com", "git@github.com"}
 
 
 def label_char(char):

@@ -81,7 +81,10 @@ class SourceCheckTests(unittest.TestCase):
                         "@".join(["first", "personal-mail\u3002net"]), "@".join(["first", "example.com.personal-mail.net"]),
                         "@".join(["person", "privatehost"]), "@".join(["person", "[192.168.1.10]"]),
                         "@".join(["person", "[IPv6:2001:db8::1]"]), "@".join(["person", "ci-runner-7"]),
-                        "https://" + "@".join(["person", "privatehost"])]:
+                        "https://" + "@".join(["person", "privatehost"]),
+                        "@".join(["codex2", "openai.com"]), "@".join(["x-codex", "openai.com"]),
+                        "@".join(["codex", "mail.openai.com"]), "@".join(["codex", "openai.com.evil"]),
+                        "@".join(["codex", "openai.co"]), "~" + "@".join(["codex", "openai.com"])]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
@@ -104,6 +107,7 @@ class SourceCheckTests(unittest.TestCase):
             "@".join(["fixture", "example.invalid"]),
             "@".join(["<id>+<login>", "users.noreply.github.com"]),
             "Claude <" + "@".join(["noreply", "anthropic.com"]) + ">",
+            "Co-authored-by: Codex <" + "@".join(["codex", "openai.com"]) + ">",
             "@".join(["git", "github.com"]) + ":owner/repo.git",
             "`" + "@".join(["noreply", "anthropic.com"]) + "`",
             "**" + "@".join(["git", "github.com"]) + "**",
