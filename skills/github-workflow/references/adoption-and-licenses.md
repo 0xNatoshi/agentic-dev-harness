@@ -59,45 +59,75 @@ Align metadata with the actual license without inventing rights or confusing Git
 
 ### Compare standard texts
 
-After filling legal fields, compare the delivered license byte for byte with the official MIT/PolyForm sources. Remove Choose a License's metadata header for MIT; prefix only the filled notice plus blank line for PolyForm. Set verified `LICENSE_KIND` (`MIT`/`PolyForm`), `LICENSE_PATH`, `LICENSE_YEAR`, `LICENSE_HOLDER`, export them, and run at the repository root:
+After filling legal fields, compare the delivered license byte for byte with the official MIT/PolyForm sources. Remove Choose a License's metadata header for MIT; prefix only the filled notice plus blank line for PolyForm. Set verified `LICENSE_KIND` (`MIT`/`PolyForm`), `LICENSE_PATH`, `LICENSE_YEAR`, `LICENSE_HOLDER`, export them, stage the final license, and run at the repository root:
 
 ```bash
-python3 - <<'PY'
+(
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; assert sys.version_info >= (3,8)' 2>/dev/null; then
+    python_cmd=(python3)
+  elif command -v py >/dev/null 2>&1 && py -3 -c 'import sys; assert sys.version_info >= (3,8)' 2>/dev/null; then
+    python_cmd=(py -3)
+  elif command -v python >/dev/null 2>&1 && python -c 'import sys; assert sys.version_info >= (3,8)' 2>/dev/null; then
+    python_cmd=(python)
+  else
+    printf '%s\n' 'Python 3.8+ not found; exact license comparison not run.' >&2
+    exit 2
+  fi
+  "${python_cmd[@]}" - <<'PY'
 import difflib
 import os
-from pathlib import Path
+import subprocess
+import sys
 from urllib.request import urlopen
 
 kind = os.environ["LICENSE_KIND"]
-path = Path(os.environ["LICENSE_PATH"])
+path = os.environ["LICENSE_PATH"]
 year = os.environ["LICENSE_YEAR"]
 holder = os.environ["LICENSE_HOLDER"]
+
+
+def not_run(reason):
+    print(f"{reason}; exact license comparison not run.", file=sys.stderr)
+    raise SystemExit(2)
+
+
 if not (len(year) == 4 and year.isdigit() and holder.strip()) or "{{" in holder:
-    raise SystemExit("Set a confirmed year and copyright holder first")
+    not_run("Set a confirmed year and copyright holder first")
+# Compare the staged blob: it is what gets delivered, whatever the checkout's line endings.
+staged = subprocess.run(["git", "show", ":" + path], capture_output=True)
+unstaged = subprocess.run(["git", "diff", "--quiet", "--", path])
+if staged.returncode != 0 or unstaged.returncode != 0:
+    not_run(f"Stage the final {path} first")
 urls = {
     "MIT": "https://raw.githubusercontent.com/github/choosealicense.com/gh-pages/_licenses/mit.txt",
     "PolyForm": "https://polyformproject.org/licenses/noncommercial/1.0.0.txt",
 }
-source = urlopen(urls[kind], timeout=30).read()
+try:
+    source = urlopen(urls[kind], timeout=30).read()
+except OSError as error:
+    not_run(f"Official text unavailable ({error})")
 if kind == "MIT":
     header, separator, body = source.partition(b"\n---\n")
     if not header.startswith(b"---\n") or not separator:
-        raise SystemExit("Unexpected MIT source format")
+        not_run("Unexpected MIT source format")
     expected = body.lstrip(b"\n").replace(b"[year]", year.encode()).replace(b"[fullname]", holder.encode())
 else:
     expected = f"Required Notice: Copyright (c) {year} {holder}\n\n".encode() + source
-actual = path.read_bytes()
+actual = staged.stdout
 if actual != expected:
     print("".join(difflib.unified_diff(
         expected.decode().splitlines(keepends=True),
-        actual.decode().splitlines(keepends=True),
-        fromfile="official-plus-confirmed-notice", tofile=str(path))), end="")
+        actual.decode(errors="replace").splitlines(keepends=True),
+        fromfile="official-plus-confirmed-notice", tofile=":" + path)), end="")
+    if b"\r\n" in actual:
+        print("The staged blob contains CRLF line endings; the official text uses LF.")
     raise SystemExit(1)
-print(f"Exact license text verified: {path}")
+print(f"Exact license text verified: staged {path}")
 PY
+)
 ```
 
-This requires Python 3; on Windows use `py -3` when appropriate. If unavailable, report that check unavailable and prepare an equivalent exact comparison before claiming conformity.
+The snippet probes `python3`, `py -3` and `python` in the order used by `merge-preflight.sh`. Exit 0 means the staged blob matches; 1 means a difference; 2 means the comparison was not run (no Python 3.8+, missing year or holder, unstaged license or unstaged changes, or an unavailable or unexpected official text) and never supports a conformity claim. Line endings are compared as committed: a checkout converted by `core.autocrlf` still passes, while a blob committed with CRLF fails.
 
 Network failures or differences block a successful official-comparison claim. Preserve the diff and resolve differences before delivering the standard template. The proprietary text is custom: check its rights against the chosen template without claiming an official external text. Check unresolved `{{...}}`, `[year]`, `[fullname]`, `TO FILL` in every delivered `LICENSE*` and README.md, then reconcile notices/metadata.
 
