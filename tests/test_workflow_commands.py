@@ -735,6 +735,14 @@ gh pr view \\
             root = self.root(directory, references={"boundary.md": "```bash\nprintf '%s' \"<<'EOF'\"\nprintf '%s' prefix\"<<EOF\"\nprintf done;# <<'EOF'\n```\n"})
             self.assertEqual(check_repository(root), [])
 
+    def test_here_document_header_comments_cannot_continue_past_the_body_boundary(self):
+        for recipient in ("cat", '"${python_cmd[@]}" -'):
+            with self.subTest(recipient=recipient), tempfile.TemporaryDirectory(prefix="workflow-here-comment-") as directory:
+                body = f"```bash\n{recipient} <<'EOF' # comment " + "\\\nEOF\ngh pr view 1\ncat <<'EOF'\nEOF\n```\n"
+                root = self.root(directory, references={"boundary.md": body})
+                findings = check_repository(root)
+                self.assertEqual([(item.line, item.message) for item in findings], [(4, "gh pr view needs a valued --repo")])
+
     def test_ambiguous_here_document_consumers_and_delimiters_fail_explicitly(self):
         for header in (
             "bash <<'EOF'",

@@ -708,11 +708,13 @@ def scan_document(file, text):
             else:
                 pending = stripped
                 pending_line = number
-            if pending.endswith("\\"):
+            # A trailing backslash inside a header comment does not continue
+            # the shell line; the next physical line already belongs to its body.
+            here_document, here_error = _here_document(pending)
+            if pending.endswith("\\") and here_document is None and here_error is None:
                 pending = pending[:-1] + " "
                 continue
             is_probe = _interpreter_probe(lines, number)
-            here_document, here_error = _here_document(pending)
             if here_error:
                 findings.append(Diagnostic(file, pending_line, here_error))
             if here_document is not None:
