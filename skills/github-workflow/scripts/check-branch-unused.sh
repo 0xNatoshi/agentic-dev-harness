@@ -56,13 +56,25 @@ check_operation_file() {
     exit 1
   fi
   # Git writes this exact literal as head-name when rebasing a detached HEAD.
-  [ "$operation" != bisect ] && [ "$state" = "detached HEAD" ] && return 0
+  if [ "$operation" != bisect ] && [ "$state" = "detached HEAD" ]; then
+    check_detached_head "$operation"
+    return 0
+  fi
   case "$state" in
     refs/heads/*) state_ref=$state ;;
     *) state_ref="refs/heads/$state" ;;
   esac
   git check-ref-format "$state_ref" >/dev/null 2>&1 || {
     printf 'Unknown %s state: %s\n' "$operation" "$file" >&2
+    exit 2
+  }
+}
+
+# A detached operation names no branch only while HEAD resolves to a real commit;
+# a truncated or dangling HEAD leaves the operation's base untrusted.
+check_detached_head() {
+  git -C "$worktree" rev-parse -q --verify 'HEAD^{commit}' >/dev/null || {
+    printf 'Unresolvable HEAD during %s in %s\n' "$1" "$worktree" >&2
     exit 2
   }
 }
@@ -76,6 +88,7 @@ check_am_head() {
   else
     # Status 1 is a detached HEAD; anything else cannot be trusted.
     [ "$?" -eq 1 ] || exit 2
+    check_detached_head "git am"
   fi
 }
 

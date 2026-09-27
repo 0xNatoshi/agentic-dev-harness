@@ -41,6 +41,8 @@ SCENARIOS = (
     "head_name_extra_line",
     "head_name_symlink",
     "operation_dir_symlink",
+    "am_invalid_head",
+    "invalid_head_detached_rebase",
     "free",
 )
 STATUS = {
@@ -61,6 +63,8 @@ STATUS = {
     "head_name_extra_line": 2,
     "head_name_symlink": 2,
     "operation_dir_symlink": 2,
+    "am_invalid_head": 2,
+    "invalid_head_detached_rebase": 2,
     "free": 0,
     "other_rebase": 0,
     "detached_rebase_merge": 0,
@@ -142,9 +146,21 @@ class BranchCleanupTests(unittest.TestCase):
         if scenario in (
             "unknown_state", "missing_worktree", "wrong_repository", "incomplete_rebase_apply", "invalid_head_name",
             "am_marker_only", "am_counter_extra_line", "am_counter_range", "head_name_extra_line",
-            "head_name_symlink", "operation_dir_symlink",
+            "head_name_symlink", "operation_dir_symlink", "am_invalid_head", "invalid_head_detached_rebase",
         ):
             self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
+            if scenario in ("am_invalid_head", "invalid_head_detached_rebase"):
+                # Valid operation records on a HEAD that names no commit are untrusted.
+                gitdir = self.gitdir(worktree)
+                if scenario == "am_invalid_head":
+                    (gitdir / "rebase-apply").mkdir()
+                    for name, value in (("applying", ""), ("next", "1\n"), ("last", "1\n")):
+                        (gitdir / "rebase-apply" / name).write_text(value)
+                else:
+                    (gitdir / "rebase-merge").mkdir()
+                    (gitdir / "rebase-merge" / "head-name").write_text("detached HEAD\n")
+                (gitdir / "HEAD").write_text("0" * 40 + "\n")
+                return
             if scenario == "operation_dir_symlink":
                 # The linked directory holds Git's exact literal, but its source is untrusted.
                 target = self.root / "detached-state"
