@@ -122,7 +122,7 @@ check_operation_dir() {
       # git am always records its patch counters; a bare marker is truncated state.
       for counter in next last; do
         [ -f "$directory/$counter" ] && [ ! -L "$directory/$counter" ] && [ -r "$directory/$counter" ] &&
-          grep -Eqx '[0-9]+' "$directory/$counter" || {
+          [ "$(grep -c '' "$directory/$counter")" = 1 ] && grep -Eqx '[0-9]+' "$directory/$counter" || {
           printf 'Incomplete git am state in %s\n' "$gitdir" >&2
           exit 2
         }
