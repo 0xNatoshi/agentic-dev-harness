@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Shared templates have one active owner across issues, PRs, branches and runtimes. Coordinate claims, comment proposals and explicit handoffs/releases in [#15](https://github.com/0xNatoshi/dev-harness/issues/15). Read its claim before edits; inactivity releases nothing. CONTRIBUTING.md defines the family and procedure.
+Shared templates have one active owner across issues, PRs, branches and runtimes. Coordinate claims, comment proposals and explicit handoffs/releases in [#15](https://github.com/0xNatoshi/agentic-dev-harness/issues/15). Read its claim before edits; inactivity releases nothing. CONTRIBUTING.md defines the family and procedure.
 
 <!-- github-workflow:start v6.5 — managed block from the github-workflow skill; preserve local safeguards and explicit approval requirements on update -->
 
