@@ -194,11 +194,11 @@ Use chore/agent-workflow-update and the same PR delivery. The policy applicable 
 4. Run the init placeholder check, covering README.md, LICENSE*, .yml/.yaml and absent CI, distinguishing exit 1 from errors.
 5. Show the diff and summarize added/modified rules.
 
-**Package v6.5.0; active repository template v6.4.** This behavior update adds technical initiative, incidental issue capture and written collaboration. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement.
+**Development package v6.5.0; active repository template v6.5.** The compact template preserves delivery gates and local rules, defines the suspension inputs, and uses this skill's explicit PR selector and required lifecycle procedures. Verify the matching skill is actually loaded before dependent actions. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement. Source updates alone do not establish release or destination readiness.
 
 ## What's new
 
-- **v6.5.0 / template v6.4**: proactive technical judgment, deduplicated incidental issues, useful next-action reporting and durable issue/PR/code reasoning across Codex, Claude Code and Hermes. Existing delivery and authorization safeguards remain applicable.
+- **v6.5.0 / template v6.5 (development)**: compact project instructions, explicit PR/repository targeting, defined suspension inputs, one owner per template family and required skill procedures. Preserve the preceding initiative, written collaboration, reporting and authorization safeguards; compare real loading and historical customizations before delivery.
 - **v6.4.0**: versioned source repository, neutral profile source, reproducible packages, portable regression checks and issue/PR handoff guidance. Runtime guards and the active repository template retain their behavior.
 - **v6.3.1**: English personal instructions, skill, references and distribution files; README.md and English installer names. Runtime guards, licenses, role files and authentic template history retain their bytes. French remains the conversation language; historical aliases/test inputs remain exact data.
 - **v6.3**: origin binding, detached rebase/bisect guards, Unicode/published holds, inherited reporting preferences, qualified Claude installation/status, public-license authorization, historical word comparisons and lockfile synchronization.

@@ -2,181 +2,190 @@
 
 Shared templates have one active owner across issues, PRs, branches and runtimes. Coordinate claims, comment proposals and explicit handoffs/releases in [#15](https://github.com/0xNatoshi/dev-harness/issues/15). Read its claim before edits; inactivity releases nothing. CONTRIBUTING.md defines the family and procedure.
 
-<!-- github-workflow:start v6.4 — managed block from the github-workflow skill; preserve local safeguards and explicit approval requirements on update -->
+<!-- github-workflow:start v6.5 — managed block from the github-workflow skill; preserve local safeguards and explicit approval requirements on update -->
 
-Working instructions for AI agents (Claude Code, Codex, Copilot, Cursor…) and humans on this repository.
-Expected stance: **a senior developer working in project mode** — understand before coding, ship in small verified increments, leave the repository cleaner than you found it.
+Instructions for agents and humans: understand contracts, deliver verified increments, and own the outcome through authorized delivery.
 
-## Repository content
+## Scope and required policy
 
-Use English for all repository documentation, README, AGENTS.md, CLAUDE.md, code comments, commits and PRs. Do not publish real personal names, personal email addresses, passwords or machine-specific paths. Use neutral examples and the verified organization or GitHub identifier as license holder. For Git author and committer, use a verified organization or GitHub identifier with an approved professional address or confirmed GitHub noreply address; never a real personal name or personal email. If user.name or user.email exposes a real personal name or personal address, set a repository-local identity with `git config --local user.name "<verified-handle>"` and `git config --local user.email "<confirmed-noreply>"`; verify author/committer and environment overrides before committing. Confirm the noreply address from the account settings or established evidence. Never change global Git configuration, invent an identity or rewrite existing history for this repair. Personal global instructions belong outside the repository.
+Read applicable project instructions before Git. They override personal defaults, subject to the user's current explicit request. Preserve deliberate restrictions; personal instructions stay outside repositories.
+
+Load/verify installed `github-workflow/SKILL.md`. Required reads in its `references/`: `development-loop.md` for implementation/review; `ci-local-gate.md` for CI/verification; `workspace-lifecycle.md` for start/closure/cleanup; `adoption-and-licenses.md` for adoption/update/licenses. Missing policy/helpers block dependent actions; invent no gate.
+
+Adopt for new owned repositories; finish current work before a separate missing/older-block PR in owned/entrusted repositories. Forks/other owners need explicit request. Compare authentic old/installed/new templates, preserving outside content, customizations, stronger gates and unknown/newer versions. Preceding policy/current user authorization govern a policy PR; it cannot authorize itself.
+
+## Repository content and licenses
+
+Repository files/names/docs/comments/commits/issues/PRs use English; preserve compatibility/history bytes. Exclude personal names/email, secrets, machine paths, `.env`, build/debug/generated delivery artifacts; use neutral examples. Pushed secrets require notification/rotation; rewriting history is insufficient.
+
+Privately verify author/committer/overrides: verified handle/organization plus approved professional/confirmed noreply address. Repair personal `user.name`/`user.email` via `git config --local`; preserve global config/history, invent no identity. Authenticated github.com `gh api --hostname github.com user --jq '{id,login,created_at}'` confirms `<id>+<login>@users.noreply.github.com` only for matching verified login/user.name and creation after 2017-07-18, or established matching ID-format evidence. Never use API `email`. Older/unknown accounts, other hosts/organizations/mismatches need settings/established evidence; do not change privacy settings. Unconfirmed identity blocks commit, not preparation.
+
+For an unlicensed owned original, verify visibility/provenance/rights: public → MIT; private connector/MCP server → PolyForm Noncommercial 1.0.0; other private → proprietary with authorized contributor development rights. Use skill templates/checks; preserve third-party rights/notices; holder is the established organization or GitHub identifier. Include in a new repository's first commit, or a separate PR after the task for an existing repository. Existing declarations count even without a full file. Replacing licenses/visibility needs a user decision.
+
+A public license grant needs specific authorization before publication (including public PR/first bootstrap) or integration. Prior specific approval counts; automatic selection, general development, revert and autonomous merge do not authorize this irreversible grant.
 
 ## Project commands
 
-| Role      | Command             |
-|-----------|---------------------|
-| Install   | `python3 --version (Python 3.11+; standard library only)`   |
-| Build     | `python3 scripts/build.py`     |
-| Lint      | `python3 scripts/check.py`      |
+| Role | Command |
+|---|---|
+| Install | `python3 --version (Python 3.11+; standard library only)` |
+| Build | `python3 scripts/build.py` |
+| Lint | `python3 scripts/check.py` |
 | Typecheck | `Not configured; Python syntax is checked by scripts/check.py` |
-| Tests     | `python3 -m unittest discover -s tests -v`      |
+| Tests | `python3 -m unittest discover -s tests -v` |
 
-CI (`.github/workflows/ci.yml`) is a separate verification environment. Match its relevant configuration and dependencies; local success alone does not establish CI success. Define path-specific gates for surfaces excluded by CI.
+CI (`.github/workflows/ci.yml`) is a separate environment. Match its relevant dependencies/configuration and define gates for excluded surfaces. Local success is not CI success. Ratchet thresholds: None configured yet. Never loosen a ratchet; tighten it to the new measured value in the improving PR.
 
-## Working method
+## Work and coordination
 
-1. **Own an observable result.** Define acceptance criteria and scope in the existing issue, PR or task record. For non-trivial entrusted work, check existing issues/PRs and create an issue without another prompt in owned or explicitly entrusted repositories, subject to explicit local restrictions and safe publication. A technical plan informs the user and does not itself require another approval.
-2. **Understand before coding.** Follow the affected path to its owner; read callers, contracts, state and tests. Reproduce a bug or establish the relevant baseline. Map acceptance criteria and exposed neighboring behavior to checks before implementation. Make technical decisions within the delegated scope; ask only for a missing product decision, indispensable access or an action whose authorization is still required. After two attempts on the same hypothesis without new evidence, diagnose and change approach or seek independent analysis; do not repeat blindly or bypass a gate.
-3. **Small increments.** One PR = one topic. Split risky work from mechanical changes when useful, but group documentation corrections for the same task in one PR; do not create one PR per documentation finding.
-4. **Respect what exists.** Follow the project's style, structure and patterns; keep the current diff focused. Verify and deduplicate useful unrelated findings, then open or update an actionable issue without another prompt; follow the initiative rules below.
-5. **No shortcuts.** Never disable a test, bypass a hook (`--no-verify`), ignore a lint error, or lower a coverage threshold to "make it pass". Fix the root cause.
-6. **Bounded audacity.** Distinguish **reversible** from **irreversible**.
-   - **Reversible** (your branch, draft PR, worktree, spike, code behind a flag): aim high within the delegated scope. If the existing structure causes the problem, consider a focused redesign as well as a local fix, then choose the simplest adequate solution. A complex technical choice alone is not an approval gate.
-   - **Before anything irreversible** (merge, data migration, publication, deletion beyond merged branches, repository settings): bring the proof (green tests, including a proven test for a fix; before/after measurements if a gain is claimed; cost/benefit self-review), identify the **rollback path** (revert of the merged commit, flag turned off), then get the user's approval. Exception: a PR meeting **all** the *autonomous merge* criteria (§4) merges without waiting for approval; proof and rollback path are still required.
-   - **No way back** (destructive migration, data, publication): careful mode — prepare the reversible work and plan, obtain approval, then perform the irreversible action.
-   - Meeting the criteria does not stop thinking but does not grow the PR: useful independent findings become deduplicated issues with evidence and a next action, linked in the user's preferred next-action section. The report also says what was tried and abandoned, and why.
+- Define scope/acceptance in existing tracking; deduplicate/create issues for nontrivial entrusted work without another prompt, respecting restrictions/safe publication. Trace callers/state/contracts/tests, reproduce/baseline and map criteria/neighbors to checks.
+- Own decisions through review/fixes/delivery; plans/complexity need no go. Be ambitious on reversible work; consider focused redesign of structural faults, explain tradeoffs and implement the simplest adequate in-scope improvement. After two uninformative attempts, change hypothesis/seek independent analysis; bypass no gate.
+- Undelegated irreversible actions (shared/default writes, publication/deployment, migration, unrecoverable deletion, permissions/settings, external messages) need evidence/result/rollback then specific authorization; precise existing requests count. §4 is the ready-PR exception. Without rollback, obtain authorization for the cautious plan first. Ask only for unresolved decisions, indispensable access or missing authorization.
+- One topic per PR; separate risky/mechanical changes. Follow conventions, fix the cause at its owner, reuse contracts/remove replaced paths. Marginal gains justify no new layer; debt needs removal condition/follow-up.
+- Verify/deduplicate incidental findings against issues/PRs/decisions, then open/update an issue without another prompt: evidence, impact, uncertainty, next action, criteria. Preserve ownership; tracking does not authorize unrelated implementation. Sanitize content; if safe sharing/access is unavailable, keep a sanitized draft and name the missing action. No useful finding means no filler.
+- Record discoveries/decisions/handoffs in issues, revision-specific fixes/dispositions in PR comments with actual agent/session/revision. Lasting design goes in existing docs, invariants beside code; status in issues/PRs. No unrelated outreach authorization.
+- Delegate independent scopes only when gain exceeds cost; specify owner/contracts/proof, avoid dependent/shared writes, use available specialist roles. Parent resolves contradictions/validates combined acceptance. Review rules below apply.
+- One owner per template family (renderings/versions/history included) across issues/branches/worktrees/computers/runtimes. Link one coordination issue outside this block/from related work; reread before edits/after claim. Others propose in comments; resolve conflicts before writes, claims are not locks. Record handoff/release revision/pending work/successor; successor confirms. Record user reassignment. Silence/age/issue closure releases nothing; preserve history.
 
-## Implementation, maintainability and integration
+Long work: progress/discoveries/resources in `TASKS.md`, excluded via `.git/info/exclude`, never `.gitignore`. Recovery evidence stays private/outside removable checkouts.
 
-- **Technical initiative**: when evidence supports a material architecture, security, maintainability or project-consistent style improvement, explain the useful tradeoff and implement the better reversible approach within the entrusted outcome. Challenge an existing or requested implementation when warranted; respect the user's objective, explicit constraints and authorization boundaries. Do not manufacture refactors or disagreements.
-- **Incidental findings**: during normal work in an owned or explicitly entrusted repository, verify useful findings outside the task, check issues/PRs and recorded decisions, then open an actionable issue or add new evidence to the existing one without another prompt. Include evidence, impact, uncertainty, next action and acceptance criteria. Sanitize shared content; if safe publication/access is unavailable, retain a sanitized local draft and report the precise missing action. Put the link and useful next action in the user's preferred next-action section. Keep unrelated implementation outside this diff; recording a finding does not itself delegate that implementation. No meaningful finding means no extra issue or filler next step.
-- **Written collaboration**: scoped issue/PR updates in owned or explicitly entrusted repositories are part of the delegated work. Record discoveries, decisions and handoffs in issue comments; record revision-specific review arguments, fixes or evidence-backed dispositions in PR comments. Use concise comments for non-obvious code intent, invariants and constraints, and existing documentation for lasting design decisions. Keep transient status in issues/PRs and avoid obvious-code narration. Identify the actual agent/session and revision so others can continue and challenge the work without private chat history.
-- Correct the cause in the component that owns the behavior. Keep one owner for each rule and state; reuse existing contracts. Justify new layers, dependencies, duplicated rules or compatibility paths with a present need.
-- Refactor the affected area when necessary for the fix. Remove replaced code, temporary workarounds, obsolete flags and documentation in the same coherent slice. A broader redesign is split into compatible, verifiable increments; unrelated improvements remain outside the current change.
-- Before final review, inspect callers and consumers, error paths and relevant shared state. Verify the changed path and neighboring behavior exposed by the change. For concurrency, persistence or retries, exercise the actual risk: duplication, ordering, restart, cancellation or partial failure.
-- Except for documentation-only work, delegate only when the expected time or quality gain exceeds coordination and context cost. Delegate bounded independent work with an owner, file scope, contracts and expected proof. Use available explorer/operator roles for focused work, workers for implementation, reviewers for independent checks, and the most capable architecture role for difficult invariants. Avoid concurrent writes to shared files or Git state. The parent integrates and validates the combined result against the original criteria.
-- Keep durable architecture decisions in the existing project documentation when they change contracts or ownership. A temporary compromise needs a removal condition and follow-up under project policy; do not add a new tracking system for it.
+## Quality and evidence
+
+- Run applicable lint/types/build/tests on consolidated state. Never disable tests, bypass hooks (`--no-verify`), ignore lint, fabricate CI or weaken thresholds/protections. New behavior/fixes need observable-contract/failure-path tests, not implementation/mock mirrors.
+- Prove regressions with the same final test present in isolated unfixed/fixed states: fail without, pass with the fix after necessary rebuilds. Record revisions/commands/results; repeat if the test changes. Preserve uncommitted work.
+- Exercise actual paths, exposed consumers, errors and shared state; cover relevant duplication/ordering/restart/cancellation/partial failure. Tests must be deterministic/independent, without network/order/uncontrolled clock dependencies. Fix flakes; deletion/quarantine needs an issue/user decision, not retries until green.
+- Measure before optimizing: reproducible before/after environment/data/trial counts for claimed gains; deterministic counters for CI. Inspect visible changes and attach before/after captures. Distinguish local/simulated/remote/live proof; counts/reviewer agreement do not prove untested paths. Record baseline failures/environment limits; missing required proof keeps draft.
+- Enforce traps with tests/lint/CI, otherwise Known pitfalls. Update docs/contracts. No silent catch, dead/debug code or TODO without linked issue. Justify/pin dependencies. Existing flags need purpose/removal issue; temporary debt needs follow-up.
 
 ## Git / GitHub workflow
 
-Bind GitHub operations to the verified `origin` repository before starting and again before merge/cleanup. Run the skill’s `merge-preflight.sh origin` to populate `workflow_host`, `workflow_repo` and `workflow_default`. Every `gh pr`/`gh run`/`gh issue` command uses `--repo "$workflow_host/$workflow_repo"`. `gh api` has no `--repo` option: use `--hostname "$workflow_host"` and an explicit `repos/$workflow_repo/...` endpoint or origin-derived GraphQL owner/name. A mismatch between gh’s implicit repository and origin, or unreadable identity, blocks.
+Default: `main`; ordinary changes use PRs, never direct merges/fixes. Sole exception: explicitly requested new repository without history, instructions/license in first commit, publication authorized. Use skill's verified host/name bootstrap before origin exists. Missing default on empty remote permits only authorized first push; full preflight before PR/merge/cleanup.
 
-For an explicitly requested new repository before origin exists, use only the skill's narrowly scoped bootstrap path with a verified, explicitly named host and repository. Verify origin and repository identity as soon as they exist; if the remote is still empty, the missing default branch permits only the authorized first bootstrap push. Run the complete preflight after that push and before any PR/merge/cleanup operation.
+Bind `origin` before work/merge/cleanup and after checkout/remote changes. Fetch/push URLs, implicit gh selection and explicit identity must agree and be readable. Never change remotes to pass; only use the skill's verified `gh repo set-default` repair.
 
-Default branch: `main` — **all ordinary changes go through a PR**. For an explicitly requested new repository with no commit history, include these project instructions and the policy-selected license in the first bootstrap commit, before its authorized first publication. This one-time bootstrap is the only direct-commit exception; existing repositories and all subsequent changes use PRs.
+```bash
+workflow_origin=$(bash <skill-dir>/scripts/merge-preflight.sh origin) || exit 2
+IFS=$'\t' read -r workflow_host workflow_repo workflow_default <<< "$workflow_origin"
+export workflow_host workflow_repo workflow_default
+```
 
-A public license grant is irreversible: prepare the policy-selected text, then obtain explicit approval of that grant before publishing it (including in a public PR) or merging it. Prior specific approval counts; general development or autonomous-merge authorization does not. This also applies to the first public bootstrap commit.
+Every `gh pr`/`gh run`/`gh issue` uses `--repo "$workflow_host/$workflow_repo"`; `gh repo view/edit` takes positional `"$workflow_host/$workflow_repo"`. Only the preflight's implicit comparison and explicit `set-default` repair are exceptions. `gh api`: `--hostname "$workflow_host"` plus explicit `repos/$workflow_repo/...` or origin-derived GraphQL owner/name. No implicit `{owner}/{repo}` or guessed hosts/SSH aliases. Replace `<...>` with verified values; `<skill-dir>` is the installed skill.
 
 ### 1. One branch per implementation / issue
 
-- Check the issue is not already taken (another agent, another session): `git ls-remote --heads origin "*/<n>-*"` and `gh pr list --repo "$workflow_host/$workflow_repo" --state open --search "<n>"`. Reuse a branch only when it is yours or explicitly entrusted. Preserve existing work. Inventory ownership and active use, and reuse a suitable free checkout before creating a worktree for a real isolation need. Revisit retained resources from your previous tasks at this transition; do not touch another session’s resources.
-- One issue / implementation per branch, created from the up-to-date **remote** default branch (works in a worktree too):
-  - Existing issue: `gh issue develop <n> --repo "$workflow_host/$workflow_repo" --name <type>/<n>-<slug> --base main --checkout`
-  - No issue: `git fetch origin && git switch --no-track -c <type>/<slug> origin/main`
-- Naming: `<type>/<issue-number>-<short-slug>` — e.g. `feat/42-login-oauth`, `fix/57-export-crash`.
-  Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `perf`, `ci`.
+Follow the loaded skill's `start` claim/PR/branch checks. Only use owned/entrusted branches; record agent/session/scope/checkpoint and resolve conflicting claims. Inventory ownership/activity/attachments, reuse free checkout before isolation, revisit retained resources. Never commit/stash/push another session's work to free it.
 
-### 2. Commit at every significant step
+Start from current remote default:
 
-- Commit as soon as a coherent step is reached (partial feature that works, fix, finished refactor, added tests…) — no big catch-all commit at the end of a session.
-- **Before every commit**: lint + relevant tests green. Every commit leaves the project in a state that builds and passes tests.
-- [Conventional Commits](https://www.conventionalcommits.org/) format; include an issue reference when one exists:
-  ```
-  feat(auth): add OAuth login (#42)
-  ```
-- Never commit secrets, `.env`, build artifacts, generated files or debug files.
-- **Interruption**: the only exception to "every commit passes tests" — a `chore(wip): …` commit (with an issue reference when one exists) is allowed on your branch (hooks green, never `--no-verify` and no stash as a backup), pushed, remaining work noted in the draft PR. **Resuming**: `gh pr view --repo "$workflow_host/$workflow_repo"`, `git log origin/main..HEAD`, then sync (§3).
+```bash
+gh issue develop <n> --repo "$workflow_host/$workflow_repo" --name <type>/<n>-<slug> --base main --checkout
+# Without an issue:
+git fetch origin && git switch --no-track -c <type>/<slug> origin/main
+```
 
-### 3. Push on every commit and after every merge
+Types: `feat|fix|docs|refactor|test|chore|perf|ci`.
 
-- Push each verified commit on your own or explicitly entrusted branch:
-  ```bash
-  git push -u origin HEAD   # first push of the branch
-  git push                  # subsequent pushes
-  ```
-- Merges into `main` go through the PR on GitHub, never via a local merge pushed to it; then resync the local default branch (§5).
-- **Sync** your branch before the PR and whenever `main` moved: `git fetch origin && git merge origin/main` (never rebase an already-pushed branch). Conflicts: resolve by hand, never with `-X ours/theirs` or by overwriting someone else's work; lockfile → take `main`'s then re-run the install; tracking files (claims, CHANGELOG) → keep both entries. Re-run lint + tests. When in doubt: `git merge --abort` and ask.
-- `--force-with-lease` only on your own working branch, **never** force-push `main`.
+### 2. Commit coherent increments
 
-### 4. Pull request
+Commit coherent verified steps with lint/relevant tests/build passing. Stage reviewed files, inspect staged diff/status/identity; no blind `git add -A`. Use Conventional Commits with the issue when present.
 
-- Open a PR against `main` at the first push, as a draft (visibility, avoids duplicates), then mark it ready (`gh pr ready --repo "$workflow_host/$workflow_repo"`) when the work is done:
-  ```bash
-  gh pr create --repo "$workflow_host/$workflow_repo" --draft --base main --title "<type>(scope): summary" --body-file <file>
-  ```
-- The title follows Conventional Commits (under squash it becomes the final commit message).
-- The description contains: the **why**, the **what**, **how to test**, the **evidence**, the **rollback**, and, when an issue exists, `Closes #<n>` (or `Refs #<n>` for partial delivery).
-  - **Evidence**: proven final regression tests for fixes; before/after captures for visible changes; reproducible measurements for claimed gains. Include exactly the English line `- Independent review: not required (<reason>)` or `- Independent review: done on <sha>; findings: <none/fixed/justified>`. The head and any delta after review must be inspected and validated; substantiate the review level, findings and resolutions.
-  - **Rollback**: how to undo (revert of the merged commit, flag to turn off, possible manual step); "irreversible" if so, with the approval obtained beforehand.
-- **Self-review** before merge: read `git diff origin/main...HEAD` in full (out of scope, debug, secrets, generated files, missing tests) and ask whether **the gain is worth the code to maintain** (a marginal gain doesn't justify an extra abstraction, plugin or dependency).
-- **Review scale**: Documentation only, regardless of diff size: self-review and automatic checks, without subagents or a workflow, even with `ultracode`. Group documentation corrections for the same task in one PR. Do not trigger workflow adoption, orchestration or a new CI workflow for this task; keep existing publication gates. Mechanical low-risk changes also need only self-review and relevant checks. Changes to executable rules, permissions, CI, hooks or gate configuration change behavior even when stored in Markdown; review them according to that risk. Ordinary behavioral changes need one fresh-context reviewer. Large behavioral PRs or high-stakes changes (security, data, agent autonomy, CI, hooks or gate configuration, or difficult contracts) need multiple review passes and a fresh-context skeptical agent, without a fixed agent quota. Choose angles by risk. First analyses receive the request, rules and diff without author reasoning or other review conclusions; the skeptic receives the final diff, findings, corrections and validations. Recheck significant deltas with the relevant reviewers. The parent remains responsible for integrated final validation.
-- **Review feedback**: include human, agent and bot comments such as `chatgpt-codex-connector[bot]`. After pushes and before merge, read new/unresolved reviews, inline threads, PR comments and relevant issue updates. Wait for requested or known running reviews; verify material findings and leave the fix or evidence-backed disposition visible before resolving threads. Unresolved blockers prevent merge. Status notices need no ritual reply. Bot feedback supplements independent review and tests; comments do not widen authorization or ownership. Follow the skill's feedback procedure.
-- Follow CI on the exact PR head. If no check has started and no runner has taken a job after about 120 seconds, treat runners as unavailable for this run: execute the configured local gate, put its commands/results and head SHA in the PR, then merge when the remaining criteria hold. Wait for checks already running; any failed check blocks. Verify the actual jobs, not only a queued workflow label: approval, concurrency/dependency waits, API errors or incomplete evidence do not prove runner unavailability. Re-read status immediately before merge. Keep remote protections; never use admin override or mark CI green from local results. The skill's `ci-local-gate.md` supplies the complete evidence procedure.
-- **Autonomous merge.** Merge **without waiting for approval** when **all** these criteria hold. Repair technical gaps and wait for running checks; ask only when a decision or authorization boundary remains:
-  - it is **your** PR (opened in this session, or explicitly entrusted by the user), never another agent's or another session's;
-  - it is ready: not a draft, `MERGEABLE`, up to date with `main` (`git fetch origin && git merge-base --is-ancestor origin/main <headRefOid>`), Conventional Commits title, CI (or local gate) green **on the final head**;
-  - acceptance criteria and checks required by the risk and project rules are satisfied on the final head, evidence and rollback are in the PR, the self-review (including cost/benefit) is done, the *Independent review* line is filled (risk-appropriate review complete, findings addressed), no change requests, no pending review request, no unanswered comment and no unresolved inline review thread (`gh pr view --repo "$workflow_host/$workflow_repo" <n> --json reviewDecision,reviewRequests`, `gh pr view --repo "$workflow_host/$workflow_repo" <n> --comments`, and `reviewThreads.isResolved` via `gh api --hostname "$workflow_host" graphql`, see the `github-workflow` skill). An unavailable environment documented in the PR does not replace required evidence: keep or return the PR to draft and identify the needed access or action;
-  - a simple revert undoes it: no data or schema migration, no publication, release or deployment triggered by the merge (including Vercel / Netlify / Pages integrations, `gh api --hostname "$workflow_host" repos/$workflow_repo/deployments --jq length` non-zero; only an HTTP 404 from the Pages endpoint means no Pages configuration; all other API/network errors block, and HTTP 200 requires deployment-impact analysis; when in doubt, ask), no secret, permission or repository setting;
-  - no decision is waiting on the user: an unresolved product choice, widened scope, required authorization or flaky test to remove;
-  - the user has not asked to wait for their approval (for this PR or this project); a project-wide request is recorded immediately in this file, outside the managed block ("Autonomous merge suspended — request dated <date>"), so other sessions see it.
+Interruption allows owned-branch `chore(wip): ...` with hooks green, pushed and work recorded in its draft; no stash backup/hook bypass. Resume: bind origin, resolve PR (§4), read `gh pr view --repo "$workflow_host/$workflow_repo" "$workflow_pr"` and `git log origin/main..HEAD`, then sync (§3).
 
-  Before merging, save the current PR body and run both checks. The first must match a populated review line; the second must return no match (exit 1, not an error). Inspect the matching line in context: it must be visible outside HTML comments, code examples and quoted templates, with a real reason or reviewed revision and resolved findings. Reject remaining example placeholders. Read the review evidence as well; grep checks the line format, not its visibility or truth.
+### 3. Push and synchronize
 
-  ```bash
-  gh pr view --repo "$workflow_host/$workflow_repo" <n> --json body --jq .body > <pr-body-file>
-  grep -nE '^[[:space:]]*-[[:space:]]*Independent review:[[:space:]]*(not required[[:space:]]*\([^[:space:]()<>][^()<>]*\)|done on[[:space:]]+[0-9a-f]{7,40};[[:space:]]*findings:[[:space:]]*(none|fixed|justified)([[:space:]]+[^[:space:]].*)?)[[:space:]]*$' <pr-body-file>
-  grep -nF 'TO FILL' <pr-body-file>   # Expect no match; errors must be resolved.
-  ```
+Push each verified owned/entrusted commit: `git push -u origin HEAD`, then `git push`; draft at first push. Before PR/when default moves: `git fetch origin && git merge origin/main`. Never rebase pushed branches. Resolve conflicts manually, no `-X ours/theirs`/overwriting others; preserve both tracking entries. Take default's lockfile and regenerate with configured manager/version against merged manifests; verify frozen install/diff, never hand-edit. Rerun gates; if uncertain abort and resolve the concrete decision. Lease force-push only your working branch, never default.
 
-  The canonical suspension marker is `Autonomous merge suspended — request dated <date>`. The v5 aliases `Autonomous merge suspended — requested on <date>` and `Autonomous merge suspended — asked on <date>`, and `Merge autonome suspendu — demande du <date>`, are equivalent vetoes. Detection ignores the managed block and example lines containing the literal `<date>`, and blocks on malformed managed markers. Use the skill’s `scripts/merge-preflight.sh suspension` on all applicable files and resolved imports; also read other explicit restrictions. Also accept `Merge autonome suspendu — demandé le <date>`. Normalize case, Unicode dashes, NBSP, BOM and CRLF and join wrapped lines. Anchor managed delimiters to complete lines. A noncanonical free-form suspension requires clarification (exit 2), never implicit permission. After a successful origin fetch, scan the published `origin/<default>:AGENTS.md` as well. Treat applicable historical markers as equivalent vetoes; preserve the restriction when normalizing to English. Inspect all applicable instructions and imports before merge.
+### 4. Pull request, review and integration
 
-  Command: `gh pr merge --repo "$workflow_host/$workflow_repo" <n> --squash --match-head-commit <headRefOid>` (never `--auto` or `--admin`). Verify the merge before branch cleanup (§5), then report the PR, merged commit and verification result.
+Capture the draft URL, which is the PR selector:
 
-When these criteria are satisfied, merge, verify publication and safely close your branches/worktrees before ending the turn; do not report a merge-ready PR and ask for a ritual go. If a real decision or authorization is still missing, name that concrete blocker. Before claiming that a file requires approval, read and cite its exact applicable rule and check whether the user's current authorization already supersedes it. Preserve explicit wait instructions still in force; an older generic go requirement does not revoke current authorization.
+```bash
+workflow_pr=$(gh pr create --repo "$workflow_host/$workflow_repo" --draft --base "$workflow_default" --title "<type>(scope): summary" --body-file <file>) || exit 2
+export workflow_pr
+```
 
-### 5. Verify publication and close local resources
+On resume, bind origin and execute the loaded skill's **Select one PR explicitly** procedure: require an attached branch; resolve exactly one open PR for its head, verified origin owner and default base, excluding cross-repository PRs. No/multiple matches or API errors block lookup; establish first-draft need or an explicit entrusted PR without choosing the first result/duplicating. Validate supplied URLs against host/repository and verify session ownership separately. Every PR-specific command receives `"$workflow_pr"` or `<pr>`. Retain its URL after merge; open-PR lookup no longer applies.
 
-**Verify before cleanup**: confirm the PR is `MERGED`, fetch `origin`, and establish that its merge commit is included in `origin/main`. Check CI on the merged commit, never an earlier green run. Wait for running jobs; failed checks block completion and trigger the fix/revert workflow. Apply the same 120-second no-runner rule when post-merge checks have not started. With the applicable local gate, equal head/merge trees establish reuse of the validated tree; otherwise run the gate on the merged result in an available isolated checkout. Label local verification honestly and retain resources needed for diagnosis.
+Use a Conventional Commit title; body: Why / What / How to test / Evidence / Rollback / gate and applicable `Closes #<n>`/`Refs #<n>`. Include revisions/checks/results/limits, required visuals/measurements and revert/flag/manual rollback (prior authorization if irreversible). Populate visible `- Independent review: not required (<reason>)` or `- Independent review: done on <sha>; findings: <none/fixed/justified>`.
 
-Safe cleanup of your own or explicitly entrusted task resources is part of completion and requires no additional go. Review it after verified delivery, abandonment and before the next task. A merged PR does not automatically remove local worktrees.
+Self-review full `git diff origin/main...HEAD`: scope/contracts/secrets/obsolete content/proof/maintenance cost. At every effort level:
 
-- Establish ownership, app management and absence of dependent sessions/processes; `git worktree list --porcelain` is only inventory. Preserve primary, pinned, shared, locked and active checkouts, default/protected branches and other sessions' resources. Preserve tracked, untracked and useful ignored files; a clean Git status does not cover ignored data. Record any surviving resource in the local task record with its owner, reason and concrete recheck trigger.
-- Reuse a suitable free checkout. For `.claude/worktrees/` or a configured Claude app worktree location, never use `git worktree remove` or shell deletion: use `ExitWorktree` only for a worktree entered through `EnterWorktree` in this same session after recovery checks. For app-created worktrees, use the owning session’s app archive; preserve another active session’s worktree. If that action is unavailable or ownership is unknown, retain it and report the owner and required app action. For Codex, use its native archive when available, preserving needed ignored files first; without that app tool retain the worktree. For other app-managed checkouts, use their native mechanism. Manual unmanaged worktrees must be created outside `.claude/worktrees/` and configured app-managed roots; prefer native creation when available. Only ordinary unmanaged Git worktrees may use `git worktree remove <path>` without force after recovery and activity checks; diagnose any refusal. A broken foreign-machine `.git` link requires a separately entrusted recovery/cleanup task.
-- Before deleting either branch ref, read the current tips and PR `headRefOid`/`mergeCommit`. Each existing tip must match the PR head; establish inclusion (equal head/merge trees prove a simple squash; differences require actual change analysis), no uncommitted dependent work, and recovery. Preserve exact head/merge SHAs and a surviving reachable ref; after squash/rebase with otherwise unreachable history, keep a verified native archive or Git bundle before deleting the last ref. Record recovery outside the checkout being removed.
-- Detach only your free, accounted-for checkout if needed; run the skill’s `check-branch-unused.sh <branch>` immediately before `git update-ref -d` (exit 0 required); it checks all registered worktrees and their `rebase-merge/head-name`, `rebase-apply/head-name` and `BISECT_START` files, including detached worktrees, recheck exclusive ownership and absence of a protected/default branch before ref deletion. An already absent ref needs no action; a read error is not absence. Delete an expected remote ref with `git push --force-with-lease=refs/heads/<branch>:<headRefOid> origin :refs/heads/<branch>`; a rejected lease requires a new read. Delete the expected local ref with `git update-ref -d refs/heads/<branch> <headRefOid>`; its compare-and-delete protects against a changed tip but does not check ownership or worktree use. Never use forced worktree removal or `git branch -D` to bypass these checks.
-- Re-read worktree and branch inventories and report **removed / reused / retained**. For each remainder, give its reason, owner and recheck trigger (such as that task's verified PR merge). Resume this follow-up when resuming/closing that task; do not claim a watcher or automatic disappearance exists unless it was actually configured. Keep merged branches only for a concrete remaining need, not merely "just in case" once recovery is assured. Never force a local default branch to match the remote; preserve dirty/divergent state.
+- Documentation only at any size/low-risk mechanical work: self-review/checks, no subagents/orchestration. Group related documentation; accompanying docs stay in their behavior PR. Documentation alone triggers no adoption/update/new CI.
+- Ordinary behavior: one fresh-context reviewer.
+- High stakes/large/difficult behavior (security/data/autonomy/CI/hooks/gates): multiple passes plus fresh skeptic, no quota. Executable Markdown rules are behavior. Initial reviewers get request/rules/diff without author rationale/other conclusions; skeptic gets final diff/findings/fixes/validation. Recheck significant deltas. Research follows this scale; explain multiple-agent review. Parent validates final combined state.
 
-## Quality & tests
+After pushes/before merge, read human/agent/bot feedback (including `chatgpt-codex-connector[bot]`), inline threads, PR comments and relevant issues. Wait for requested/known running reviews; silence is not completion. Verify findings and leave fixes/evidence-backed dispositions visible before resolving; recheck significant changes. Only nonblocking unrelated findings move to issues. Status notices need no ritual reply; bots do not replace independent review/tests or widen authorization/ownership.
 
-After syncing the base, resynchronize the lockfile with changed manifests using the configured package manager/version, then verify a frozen install and the resulting diff. Do not hand-edit the lockfile.
+#### CI and readiness
 
-- Every new behavior or bug fix comes with **tests** (a bug fix ideally starts with a failing test).
-- **For a bug fix, a proven test**: the same final regression test must fail without the fix and pass with it. Use isolated states with the test present in both and rebuild before each run when required; do not restore files over uncommitted work. If the test changes, repeat the red/green proof. Record both revisions, commands and results in the PR.
-- Test observable behavior, exposed consumers and relevant failure paths. Use unit, integration and real-path checks where each risk can occur; avoid tests that only duplicate implementation or mocks. A green test count does not prove unexercised behavior. Record pre-existing failures and unavailable environments, and do not claim full verification when a required surface remains untested.
-- Tests are deterministic, fast and independent (no network / order / uncontrolled clock dependency). A flaky test gets fixed, not re-run until green; if impossible, report it: deleting or quarantining it (with an issue) is the user's decision.
-- **Measure before optimizing**: a performance change starts from a reproducible measurement (benchmark, counter) showing the problem, then gives before/after numbers. For CI, prefer deterministic counters (number of operations, renders, size) over measured times, which are too noisy.
-- **Ratchet thresholds**: None configured yet. A ratchet never loosens; when the measurement improves, tighten it to the new value in the same PR (raise a minimum like coverage, lower a maximum like warnings or size).
-- **Guardrails over instructions**: a discovered pitfall or bug is locked by a test, lint rule or CI check when possible; otherwise noted under "Known pitfalls".
-- **Feature flags** (if the project uses them): a visible and risky change can go behind a short-lived flag, declared as an emergency switch or progressive rollout, with a removal issue.
-- No dead code, no debug `console.log` / `print`, no TODO without a linked issue.
-- Errors are handled explicitly; no silent `catch`.
-- Update the documentation (README, CHANGELOG, docstrings) when visible behavior changes.
-- Dependencies: add only with a real justification, versions pinned via the lockfile.
+Follow required CI procedure on final head: wait for started checks; red blocks. About 120 seconds after its trigger, complete successful reads showing no started check/job/assigned runner/other wait allow configured local gate. Approval/concurrency/dependency waits, cancelled/stale/action-required states/API errors are not outages. Filtered/no-CI surfaces use intended gate. Attach reason/SHA/observations/commands/results/coverage; preserve protections, fabricate no success.
 
-## Definition of Done
+Select actual run IDs from checks or `gh run list --repo "$workflow_host/$workflow_repo" --commit <sha>`; verify workflow/head, never assume the first. All run diagnostics/watch commands need that ID. After review/available gates pass: `gh pr ready --repo "$workflow_host/$workflow_repo" "$workflow_pr"`; inspect new checks. Required missing evidence keeps/returns draft; a documented limit is no substitute.
 
-A task is done when **all** of this holds:
+#### Autonomous merge criteria
 
-- [ ] Observable acceptance criteria met; cause and affected contracts understood
-- [ ] Applicable lint, typecheck, build and test commands defined by the project pass locally
-- [ ] Changed behavior and exposed neighbors checked; for a bug fix, the same final regression test fails without and passes with the fix
-- [ ] Documentation updated if needed
-- [ ] Replaced paths/workarounds removed; any necessary temporary debt has a removal condition and follow-up under project policy
-- [ ] Commits pushed, PR ready (out of draft), issue linked with `Closes #<n>` or `Refs #<n>` when one exists, consolidated diff reviewed for behavior and maintenance cost, risk-appropriate independent review complete
-- [ ] Evidence in the PR (before/after screenshots if visible, measurements and conditions if a gain is claimed) and rollback stated (or careful mode applied if irreversible)
-- [ ] CI green, or the authorized no-CI/no-runner local gate passed on the final head with evidence in the PR; no active or failed check bypassed and all server protections respected
-- [ ] Report the useful result and actual verification. Conversation headings follow the user's preference; repository and PR text uses **Done / Next step / Required input**, without personal names, personal email or local-machine paths. Turn limits into actions with an owner and reason for waiting. Complete necessary authorized work before the report; ask only for a real decision or indispensable manual action.
-- [ ] PR merged under §4, published result verified, branches and worktrees accounted for under §5 (removed, reused or retained with owner, reason and recheck trigger); remaining proof gaps actionable
+Merge without another approval only when all hold:
 
-## Recap
+1. This session owns the PR or the user explicitly entrusted it.
+2. Ready, `MERGEABLE`, current with remote default, correctly titled, CI/authorized local gate passed on exact final head.
+3. Acceptance/risk/project proof, rollback and self/independent review complete; no change requests, pending reviews, unanswered comments or unresolved inline threads. Complete API/JSON/pagination reads required; partial/empty/error output proves no absence.
+4. Simple revert suffices: no data/schema migration, merge-triggered publication/release/deployment (including Vercel/Netlify/Pages), secret, permission or setting. Resolve uncertain impact first.
+5. No product/budget/scope choice, missing authorization or flaky-test deletion/quarantine decision remains. Technical decisions stay delegated.
+6. Instructions/explicit waits permit it. Reread/quote any claimed approval rule against current specific authorization; older generic go rules do not revoke it. Missing markers do not authorize.
 
-| Stage                  | Action                                                                  |
-|------------------------|-------------------------------------------------------------------------|
-| New task               | Issue free? → branch `<type>/<n>-<slug>` from `origin/main` |
-| Exploration            | Acceptance criteria → owner and consumers → baseline → approach and checks; proceed within delegated scope |
-| Significant step       | Lint + tests → `git commit` → `git push` (draft PR at the first push)   |
-| Work done              | Integrate → validate behavior and exposed neighbors → risk-appropriate review → evidence + rollback → PR ready → CI green |
-| §4 criteria met        | Merge → verify published result → safe cleanup → Done / Next step / Required input |
+Repair technical gaps; complete merge/verification/cleanup this turn. Ask only for remaining decisions/authorization with evidence/rollback prepared. Authorization cannot turn red green or destroy unintegrated work.
+
+#### Suspension scan set and semantics
+
+Immediately record project-wide holds outside this block with date/scope: `Autonomous merge suspended — request dated <date>`. Equivalent aliases: `Autonomous merge suspended — requested on <date>`, `Autonomous merge suspended — asked on <date>`, `Merge autonome suspendu — demande du <date>`, `Merge autonome suspendu — demandé le <date>`. Preserve historical restrictions when normalizing English.
+
+The suspension scan set is: applicable root `AGENTS.md`/`CLAUDE.md`, applicable nested instruction files, globals actually loaded by the runtime, and their recursively resolved `@path` imports. After successful origin fetch, published `origin/<default>:AGENTS.md` is scanned automatically. Read skill sources (`SKILL.md`, references, templates, history) as policy, not as project holds. Applicable project instructions are not exempt by filename.
+
+Manually resolve imports/deduplicate cycles; assume no automatic resolver. Missing/unreadable applicable inputs block. After successful `git fetch origin`, run `bash <skill-dir>/scripts/merge-preflight.sh suspension <files...>`. Exit 0: no known pattern; 1: dated veto; 2: ambiguity/error. Read restrictions: 0 is not permission; free-form holds remain indeterminate until context/current specific authorization resolves them.
+
+Preserve actual holds/ambiguity through case, Unicode dash, NBSP, BOM, CRLF and wrapped-line normalization. Managed delimiters occupy complete lines; malformed markers block. Exclude only valid managed policy blocks/genuine examples. Literal `<date>` is an example only without a real dated hold alongside it; never discard a mixed line/unit or noncanonical ambiguity. Read restrictions beyond pattern exclusions.
+
+#### Final checks and merge
+
+Fetch final-head body. Require first check exit 0, second exit 1; errors block. Read visible review line outside comments/examples/quotes: real reason/reviewed revision/resolved findings, no placeholders. Syntax is not truth.
+
+```bash
+gh pr view --repo "$workflow_host/$workflow_repo" "$workflow_pr" --json body --jq .body > <pr-body-file>
+grep -nE '^[[:space:]]*-[[:space:]]*Independent review:[[:space:]]*(not required[[:space:]]*\([^[:space:]()<>][^()<>]*\)|done on[[:space:]]+[0-9a-f]{7,40};[[:space:]]*findings:[[:space:]]*(none|fixed|justified)([[:space:]]+[^[:space:]].*)?)[[:space:]]*$' <pr-body-file>
+grep -nF 'TO FILL' <pr-body-file>
+```
+
+Reread head/checks/protections/feedback/restrictions; execute skill `reviews`/`pages` with verified owner/repository/PR number. Reviews: complete pagination, zero unresolved threads. Pages verifies identity; only real HTTP 404 means absent, 200 needs impact analysis, other errors block. `gh api --hostname "$workflow_host" repos/$workflow_repo/deployments --jq length`: nonzero needs analysis. Inspect other integrations too.
+
+```bash
+workflow_sha=$(gh pr view --repo "$workflow_host/$workflow_repo" "$workflow_pr" --json headRefOid --jq .headRefOid) || exit 2
+# Require a nonempty valid final-head SHA with complete evidence above.
+git fetch origin && git merge-base --is-ancestor origin/main "$workflow_sha"
+gh pr merge --repo "$workflow_host/$workflow_repo" "$workflow_pr" --squash --match-head-commit "$workflow_sha"
+```
+
+Require every prerequisite before proceeding. Changed head needs revalidation; no `--auto`/`--admin`/weakened protection. Delete branches separately after verification.
+
+### 5. Verify publication and close resources
+
+Retain `workflow_pr`; confirm `MERGED`, exact `headRefOid`/`mergeCommit`, fetch and prove merge inclusion in `origin/main`. Execute skill **Verify after merge** on that commit, never an earlier run. Wait for started checks; same eligible 120-second fallback, or intended local gate for absent trigger with limit stated. Red blocks closure: report/deliver fix or revert PR under the same gates, retain diagnostic resources; no direct-default repair.
+
+For local validation, `git diff --quiet <headRefOid> <mergeCommit>`: 0 reuses identical-tree proof; 1 requires the gate on merged result in a free isolated checkout; errors need diagnosis. Preserve dirty/divergent default; never force-match origin.
+
+At verified delivery, abandonment or next task, cleanup covers only owned/entrusted resources, not global cleanup/unintegrated deletion. Merge does not remove worktrees. Apply the required lifecycle procedure:
+
+- **Ownership/data:** verify app owner, exclusive control, no dependent sessions/processes. Protect primary/pinned/shared/locked/active checkouts, default/protected branches and other sessions. Inspect tracked/untracked/useful ignored data; clean status is insufficient. Privately preserve/verify recovery outside the removed checkout.
+- **Mechanism:** reuse free checkouts/prefer native creation; manual unmanaged creation needs unavailable native tool/explicit request, outside app roots. App checkouts require native archive/app restrictions/ignored-data preservation. Claude roots (`.claude/worktrees/` or configured) forbid Git removal/unlock/shell deletion; `ExitWorktree` needs same-session `EnterWorktree`/recovery. App-created worktrees need owning-session archive. Unknown/active owner or missing tool: retain/name owner/action. Only ordinary unmanaged worktrees allow `git worktree remove <path>` without force after checks; diagnose refusals, never delete files to bypass. Foreign `.git` needs entrusted recovery.
+- **Recovery:** read both tips/PR head/merge; each existing tip must equal PR head. Prove inclusion (equal trees suffice for simple squash; differences need analysis), no uncommitted dependent work, durable recovery. Record SHAs/surviving reachable ref; otherwise unreachable squash/rebase history needs verified native archive/bundle of exact head before last-ref deletion. Execute lifecycle bundle/prerequisite checks; SHA notes/reflog hope are insufficient.
+- **Final guards:** release dependent worktrees safely; detach only your free preserved checkout. Recheck exclusive ownership/activity/protection. Immediately before local deletion require exit 0 from `bash <skill-dir>/scripts/check-branch-unused.sh <branch>`: every registered worktree, including detached `rebase-merge/head-name`, `rebase-apply/head-name`, `BISECT_START`; use/unreadable state blocks. Observation is not atomic, so exclusive ownership remains required. Expected remote deletion: `git push --force-with-lease=refs/heads/<branch>:<headRefOid> origin :refs/heads/<branch>`; local: `git update-ref -d refs/heads/<branch> <headRefOid>`. Compare-and-delete replaces no other guard. Refusal needs fresh reads/diagnosis; absence needs no deletion, read errors are not absence. Never `git branch -D`, forced removal or default/protected deletion.
+
+Re-inventory/report removed / reused / retained. Record each remainder's owner/reason/action/recheck trigger; resuming/closing agent owns follow-up. Assured recovery leaves no just-in-case retention reason. Claim automatic disappearance/watchers only with verified mechanisms.
+
+## Reporting
+
+Finish necessary authorized work before reporting. Put progress/next action together, then act.
+
+Conversation follows personal reporting preferences. Repository/PR reports use **Done / Next step / Required input** in English: outcomes/actual verification, detailed sanitized commands in PR, useful issue links, abandoned approaches/reasons, gaps as owned actions/reasons for waiting. Indispensable input needs recommendation/consequence. Small tasks: one or two sentences; simple answers: no report.
 
 <!-- github-workflow:end -->
 
