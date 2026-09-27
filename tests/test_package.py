@@ -72,20 +72,23 @@ class PackageTests(unittest.TestCase):
             ["extra/readme.md", "extra"],
             ["extra/notes.md", "EXTRA/NOTES.MD/child.txt"],
             ["extra/notes.md/child.txt", "EXTRA/NOTES.MD"],
+            ["extra/caf\u00e9.md", "extra/cafe\u0301.md"],
+            ["extra/caf\u00e9.md", "extra/CAFE\u0301.MD/child.txt"],
+            ["extra/cafe\u0301.md/child.txt", "extra/CAF\u00c9.md"],
         ]:
             with self.subTest(destinations=names):
                 self.assert_invalid_destinations(names)
 
     def test_rejects_nonportable_destination_components(self):
         components = ["notes" + char + "draft" for char in '<>:"\\|?*\x00\x1f']
-        components += ["notes.", "notes ", "CON", "prn.txt", "AUX", "NUL.tar.gz", "CoM1.md", "LPT9", "COM\u00b9.log", "LPT\u00b2", "COM\u00b3"]
+        components += ["notes.", "notes ", "CON", "prn.txt", "AUX", "NUL.tar.gz", "NUL .txt", "conin$.txt", "CONOUT$", "CoM1.md", "LPT9", "COM\u00b9.log", "LPT\u00b2", "COM\u00b3"]
         for component in components:
             for name in ["extra/" + component, "extra/" + component + "/readme.md"]:
                 with self.subTest(destination=name):
                     self.assert_invalid_destinations([name])
 
     def test_accepts_safe_neighboring_destinations(self):
-        destinations = ["extra/.hidden", "extra/COM10.txt", "extra/NUL-marker.md", "extra/notes..md", "extra/MANIFEST.json"]
+        destinations = ["extra/.hidden", "extra/COM0.txt", "extra/COM10.txt", "extra/NUL-marker.md", "extra/notes..md", "extra/MANIFEST.json", "extra/cafe.md", "extra/caf\u00e9.md"]
         with tempfile.TemporaryDirectory(prefix="harness-safe-paths-") as directory:
             source = self.copied_source(directory)
             mapping_path = source / "package-files.json"

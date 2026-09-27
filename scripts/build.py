@@ -8,6 +8,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import tempfile
+import unicodedata
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,9 +33,14 @@ def package_path(name):
         raise ValueError(f"Unsafe package path: {name}")
     for component in path.parts:
         device = component.split(".", 1)[0].rstrip(" ").upper()
-        if component.endswith((".", " ")) or re.fullmatch(r"CON|PRN|AUX|NUL|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3]", device):
+        if component.endswith((".", " ")) or re.fullmatch(r"CON|CONIN\$|CONOUT\$|PRN|AUX|NUL|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3]", device):
             raise ValueError(f"Windows-reserved package path: {name}")
     return path
+
+
+def destination_key(name):
+    # Canonical caseless comparison; preserve the original spelling in the ZIP.
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", name).casefold())
 
 
 def payloads(root=ROOT):
@@ -49,8 +55,8 @@ def payloads(root=ROOT):
         package_path(source)
         for name in destinations:
             path = package_path(name)
-            key = name.casefold()
-            parents = {parent.as_posix().casefold() for parent in path.parents if parent != PurePosixPath(".")}
+            key = destination_key(name)
+            parents = {destination_key(parent.as_posix()) for parent in path.parents if parent != PurePosixPath(".")}
             if key in files or key in directories or parents & files:
                 raise ValueError(f"Conflicting package destination: {name}")
             files.add(key)
