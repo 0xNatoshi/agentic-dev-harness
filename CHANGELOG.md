@@ -5,6 +5,7 @@
 Development version: 6.5.0. No release tag has been published for this version.
 
 - Condense the project template to v6.5 with required skill procedures, explicit command targeting, a defined instruction scan set and single template-family ownership; preserve old snapshots and repository-specific content during migration.
+- Distinguish Python string delimiters from literal privacy-screen content, preserving quoted address checks and physical diagnostic lines without reconstructing assembled values.
 - Bind documented GitHub commands to origin and an explicit PR/run, capture PR URLs, and select a working Python interpreter for portable examples.
 - Add a standalone workflow-command verifier and mutation fixtures for repository binding (including default-repository repair), explicit targets, command-specific options, required values and minimum/maximum operand counts, executable shorthand rejection, shell redirections and portable interpreter use including module mode, fallback launchers and interactive starts; distinguish supported execution prefixes from command arguments, reject coprocesses and ambiguous here-documents, recognize bounded literal bodies and use the supported API for default squash titles.
 - Bound review cycles by acceptance, demonstrated regressions and material risk; require a root-design checkpoint after repeated unresolved cycles, targeted rechecks and justified full reviews while preserving every delivery gate.
@@ -19,6 +20,7 @@ Development version: 6.5.0. No release tag has been published for this version.
 - Explicitly process human, agent and automated reviewer feedback, including chatgpt-codex-connector, before merge.
 - Align common, Claude and Hermes profiles; advance the project template to v6.4 with authentic history.
 - Compare the staged license blob with the official text, probe Python like `merge-preflight.sh`, and exit 2 when the comparison cannot run; cover the documented command with an offline test.
+- State in STATUS what the gate actually proves: exercised platforms and interpreters, privacy-check coverage, context-budget sizes, the missing installer and the non-reproducible historical macOS claim.
 - Reject email addresses, including single-label intranet hosts and bracketed address literals, outside reserved documentation domains (RFC 2606, RFC 6761), GitHub noreply, the Claude and Codex co-author trailers and the GitHub SSH user in the source privacy gate, reporting only file and line.
 - Let the branch guard accept detached-HEAD rebases and `git am` in any worktree, retain branches listed in a rebase's `update-refs` or named there through a symbolic ref, refuse symbolic branch names, and keep untrusted operation state blocking.
 - Reject ambiguous package destinations, generated-manifest collisions and Windows-reserved path components before writing output. The v6.4.0 installation payload and published tag are unchanged.

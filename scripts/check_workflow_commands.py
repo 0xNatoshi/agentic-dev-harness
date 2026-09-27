@@ -689,9 +689,10 @@ def scan_document(file, text):
                 if here_document is not None:
                     findings.append(Diagnostic(file, here_line, "unterminated here-document before the closing Markdown fence"))
                     here_document = None
-                if pending:
+                if pending_line:
                     findings.extend(_analyze(pending, file, pending_line))
                     pending = ""
+                    pending_line = 0
                 fence_mark = None
                 shell_fence = False
             continue
@@ -703,19 +704,23 @@ def scan_document(file, text):
                 if (source.lstrip("\t") if strip_tabs else source) == delimiter:
                     here_document = None
                 continue
-            stripped = source.rstrip()
-            if language == "console" and not pending and stripped.lstrip().startswith("$ "):
-                stripped = stripped.lstrip()[2:]
-            if pending:
-                pending += stripped.lstrip()
+            command_line = source
+            if language == "console" and not pending_line and command_line.lstrip().startswith("$ "):
+                command_line = command_line.lstrip()[2:]
+            if pending_line:
+                pending += command_line
             else:
-                pending = stripped
+                pending = command_line
                 pending_line = number
             # In a complete supported header, a final backslash can only be
             # comment data. Incomplete headers still use normal continuation.
             here_document, here_error = _here_document(pending)
-            if pending.endswith("\\") and here_document is None:
-                pending = pending[:-1] + " "
+            # Bash removes only an unpaired final backslash and the newline.
+            # Trailing whitespace prevents continuation; indentation on the
+            # next physical line remains part of the command.
+            backslashes = len(command_line) - len(command_line.rstrip("\\"))
+            if backslashes % 2 and here_document is None:
+                pending = pending[:-1]
                 continue
             is_probe = _interpreter_probe(lines, number)
             if here_error:
@@ -724,6 +729,7 @@ def scan_document(file, text):
                 here_line = pending_line
             findings.extend(_analyze(pending, file, pending_line, probe=is_probe))
             pending = ""
+            pending_line = 0
             continue
 
         heading_match = HEADING.match(source)
@@ -745,7 +751,7 @@ def scan_document(file, text):
             ))
         if re.match(r"^\s*(?:gh|python3|python|py)(?:\s|$)", source):
             findings.extend(_analyze(source, file, number))
-    if pending:
+    if pending_line:
         findings.extend(_analyze(pending, file, pending_line))
     if here_document is not None:
         findings.append(Diagnostic(file, here_line, "unterminated here-document at the end of the document"))

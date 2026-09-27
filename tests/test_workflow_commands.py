@@ -647,6 +647,40 @@ gh pr view \\
             findings = check_repository(root)
             self.assertTrue(any(item.line == 5 and "PR selector" in item.message for item in findings), [str(item) for item in findings])
 
+    def test_only_odd_terminal_backslash_runs_continue_a_shell_line(self):
+        fence = chr(96) * 3
+        for count in (1, 2, 3, 4):
+            with self.subTest(backslashes=count), tempfile.TemporaryDirectory(prefix="workflow-backslash-run-") as directory:
+                body = f"{fence}bash\nprintf '%s\\n' " + "\\" * count + '\ngh pr view --repo "$workflow_host/$workflow_repo"\n' + f"{fence}\n"
+                root = self.root(directory, references={"examples.md": body})
+                findings = check_repository(root)
+                expected = [] if count % 2 else [(3, "gh pr view needs an explicit PR selector")]
+                self.assertEqual([(item.line, item.message) for item in findings], expected)
+
+        for whitespace in (" ", "\t"):
+            with self.subTest(trailing_whitespace=repr(whitespace)), tempfile.TemporaryDirectory(prefix="workflow-backslash-space-") as directory:
+                body = f"{fence}bash\nprintf '%s\\n' \\" + whitespace + '\ngh pr view --repo "$workflow_host/$workflow_repo"\n' + f"{fence}\n"
+                root = self.root(directory, references={"examples.md": body})
+                findings = check_repository(root)
+                self.assertTrue(any(item.line == 3 and "PR selector" in item.message for item in findings), [str(item) for item in findings])
+
+    def test_real_continuations_keep_bash_word_and_whitespace_boundaries(self):
+        fence = chr(96) * 3
+        cases = (
+            ('gh pr view --repo "$workflow_host/$workflow_repo" \\\n  "$workflow_pr" --json body', []),
+            ('gh pr view --repo\\\n  "$workflow_host/$workflow_repo" "$workflow_pr"', []),
+            ('gh pr view --repo\\\n"$workflow_host/$workflow_repo" "$workflow_pr"', ["valued --repo"]),
+            ('gh pr view --repo "$workflow_host/$workflow_repo"\\\n"$workflow_pr" --json body', ["PR selector", "verified origin"]),
+        )
+        for command, expected in cases:
+            with self.subTest(command=command), tempfile.TemporaryDirectory(prefix="workflow-continuation-boundary-") as directory:
+                root = self.root(directory, references={"examples.md": f"{fence}bash\n{command}\n{fence}\n"})
+                findings = check_repository(root)
+                if expected:
+                    self.assertTrue(all(any(part in item.message for item in findings) for part in expected), [str(item) for item in findings])
+                else:
+                    self.assertEqual(findings, [])
+
     def test_execution_prefixes_and_groups_preserve_command_checks(self):
         wrappers = (
             "exec {}", "exec -cl {}", "exec -a name {}", "exec -aname {}",
