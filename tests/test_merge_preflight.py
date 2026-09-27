@@ -96,6 +96,45 @@ TEXT_CASES = (
     Case("start cannot swallow adjacent comments and veto", 2, "<!-- github-workflow:start v6.3 --> Autonomous merge suspended — request dated 2026-09-27 <!-- owner note -->\n<!-- github-workflow:end -->"),
     Case("start must be one complete comment", 2, "<!-- github-workflow:start v6.3 --> <!-- owner note -->\n<!-- github-workflow:end -->"),
     Case("orphan marker", 2, "<!-- github-workflow:end -->"),
+    # Free-form restrictions per Markdown unit and invisible characters.
+    Case("kept hold until I approve", 2, "Do not merge anything until I approve."),
+    Case("kept bare never merge", 2, "Never merge."),
+    Case("kept never without approval", 2, "Never merge without my approval."),
+    Case("kept branch-scoped no merges", 2, "- No merges to main this week."),
+    Case("kept wrapped bullet hold", 2, "- Do not merge\n  until I approve."),
+    Case("kept upstream with hold", 2, "- Never merge from the upstream remote until I approve."),
+    Case("kept upstream fork PRs", 2, "- Never merge PRs from the upstream fork."),
+    Case("kept upstream contributors", 2, "Never merge anything from upstream contributors."),
+    Case("kept squash-merge hold", 2, "Do not squash-merge anything until I confirm."),
+    Case("kept rebase merges then wait", 2, "Never use rebase merges; wait for my approval."),
+    Case("kept merge button", 2, "Never click the merge button."),
+    Case("kept heading then hold", 2, "## Merge policy\n\nOn hold until further notice."),
+    Case("kept bold lead then paused", 2, "**Merging**\n\nPaused until I approve."),
+    Case("kept paragraph lead then item", 2, "Merges\n- on hold"),
+    Case("kept parent item then child", 2, "- **Merging**\n  - paused"),
+    Case("kept colon lead-in list", 2, "Do not do the following until I approve:\n- merge pull requests\n- deploy"),
+    Case("kept indented paragraph under item", 2, "- **Merging**\n\n  Paused until I approve."),
+    Case("kept heading path", 2, "## Merging\n\n### Details\n\nPaused."),
+    Case("caught heading then wait for approval", 2, "## Merging\nWait for my approval."),
+    Case("caught item then wait for approval", 2, "- Merging:\n  - wait for my approval"),
+    Case("caught zero-width split veto", 1, "Autonomous merge sus\u200bpended — request dated 2026-09-27"),
+    Case("caught soft hyphen split veto", 1, "Autonomous merge sus\u00adpended — request dated 2026-09-27"),
+    Case("caught bidi override veto", 1, "Autonomous merge \u202esuspended\u202c — request dated 2026-09-27"),
+    Case("caught zero-width split hold", 2, "Do not mer\u200bge until I approve."),
+    Case("caught zero-width joined words veto", 1, "Autonomous\u200bmerge suspended — request dated 2026-09-27"),
+    Case("caught example followed by date", 2, "Autonomous merge suspended — request dated <date> 2026-09-27"),
+    Case("cleared upstream mechanics", 0, "- Never merge, rebase onto or cherry-pick wholesale from the upstream remote."),
+    Case("cleared sibling items", 0, "- Do not add dependencies\n- Merge requests use squash"),
+    Case("cleared lead with sibling items", 0, "Notes:\n- Do not add dependencies\n- Merge requests use squash"),
+    Case("cleared conflict markers", 0, "Do not leave merge conflict markers in files."),
+    Case("cleared merge strategies", 0, "No fast-forward merges; use merge commits."),
+    Case("cleared squash not rebase", 0, "Always squash-merge; never use rebase merges."),
+    Case("cleared merge commit run", 0, "With no run for the merge commit, inspect triggers."),
+    Case("cleared sibling secrets and squash", 0, "- No secrets in commits\n- Merges use the squash method"),
+    Case("cleared table rows", 0, "| Rule | Value |\n| --- | --- |\n| No secrets | always |\n| Merges | squash |"),
+    Case("conservative blank-separated", 2, "Do not add dependencies\n\nMerge requests use squash"),
+    Case("conservative heading", 2, "## Never commit secrets\nMerge PRs with squash."),
+    Case("conservative comment", 2, "<!-- do not merge this block -->"),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -133,8 +172,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 72 or len({case.name for case in ALL_CASES}) != 72:
-    raise RuntimeError("Merge fixture inventory must contain 72 unique cases")
+if len(ALL_CASES) != 110 or len({case.name for case in ALL_CASES}) != 110:
+    raise RuntimeError("Merge fixture inventory must contain 110 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

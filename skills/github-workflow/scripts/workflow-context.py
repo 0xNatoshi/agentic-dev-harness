@@ -88,16 +88,25 @@ def origin_context(expected=None):
     return host, actual_full, branch
 
 
-def normalize(text):
-    text = unicodedata.normalize('NFKC', text).replace('\ufeff', '')
-    text = ''.join('-' if unicodedata.category(c) == 'Pd' or c in '\u2212\u00ad' else c for c in text)
+# Default-ignorable code points outside category Cf (Unicode DerivedCoreProperties).
+IGNORABLE = re.compile('[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u3164\ufe00-\ufe0f\uffa0\ufff0-\ufff8'
+                       '\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]')
+
+
+def normalize(text, joiner=''):
+    """Casefold and map dashes; replace invisible characters with joiner."""
+    # A spaced soft hyphen is read as a dash; elsewhere it is invisible.
+    text = re.sub('(?<=\\s)\u00ad|\u00ad(?=\\s)', '-', text)
+    text = unicodedata.normalize('NFKC', text)
+    text = IGNORABLE.sub(joiner, ''.join(joiner if unicodedata.category(c) == 'Cf' else c for c in text))
+    text = ''.join('-' if unicodedata.category(c) == 'Pd' or c == '\u2212' else c for c in text)
     return text.replace('\r\n', '\n').replace('\r', '\n').casefold()
 
 
 START = re.compile(r'^\s*<!--\s*github-workflow:start\b(?:(?!-->).)*-->\s*$')
 END = re.compile(r'^\s*<!--\s*github-workflow:end\s*-->\s*$')
 PREFIX = r'(?:autonomous\s+merge\s+suspended\s*-\s*(?:request\s+dated|requested\s+on|asked\s+on)|merge\s+autonome\s+suspendu\s*-\s*(?:demande\s+du|demandé\s+le))'
-EXAMPLE = re.compile(PREFIX + r'\s*<date>')
+EXAMPLE = re.compile(PREFIX + r'\s*<date>(?!\s*\d)')
 DATED = re.compile(PREFIX + r'\s*(\d{4}-\d{2}-\d{2})(?![\w-])')
 MERGE_WORD = r'\b(?:merges?|merging|merger|mergez|fusions?|fusionner|fusionnement|fusionnez)\b'
 PAUSE_WORD = r'\b(?:suspend\w*|paused?|on\s+hold|disabled|forbidden|blocked|en\s+attente|interdit\w*|interdic\w*|bloqu\w*|désactiv\w*|différ\w*)\b'
@@ -108,32 +117,147 @@ FREE = re.compile(
     + r'|\b(?:do\s+not|don[’\x27]t|no|never|stop|hold|wait|attend\w*|ne\s+pas|pas\s+de|ne)\b[^.!?]{0,90}' + MERGE_WORD
     + r'|' + MERGE_WORD + r'\s+(?:only|seulement|uniquement|après|after|requires?|needs?|(?:is|are)\s+subject\s+to)\b[^.!?]{0,90}' + APPROVAL_WORD
     + r'|' + APPROVAL_WORD + r'[^.!?]{0,90}\b(?:before|avant)\s+(?:de\s+|toute?\s+|any\s+)?' + MERGE_WORD
-    + r'|\bbefore\s+' + MERGE_WORD + r'[^.!?]{0,90}\b(?:obtain|get|seek|receive|wait\s+for)\b[^.!?]{0,90}' + APPROVAL_WORD)
+    + r'|\bbefore\s+' + MERGE_WORD + r'[^.!?]{0,90}\b(?:obtain|get|seek|receive|wait\s+for)\b[^.!?]{0,90}' + APPROVAL_WORD
+    + r'|' + MERGE_WORD + r'[^.!?]{0,90}\b(?:wait\w*|attend\w*)\b[^.!?]{0,90}' + APPROVAL_WORD)
+
+# A flagged unit that only states git mechanics is cleared when none of these apply.
+HOLD_CONTEXT = re.compile(
+    PAUSE_WORD + r'|' + APPROVAL_WORD
+    + r'|\b(?:i|me|my|mine|we|us|our|je|j|moi|mon|ma|mes|nous|notre|nos|until|unless|without|before|wait\w*|stop\w*|hold\w*'
+    r'|confirm\w*|decision|decide\w*|notice|further|today|tomorrow|week|month|now|currently|temporar\w*'
+    r'|jusqu\w*|sans|avant|attend\w*|tant|décision|nouvel\w*|ordre)\b')
+SCOPE = re.compile(
+    r'\b(?:prs?|mrs?|pull[\s-]+requests?|merge[\s-]+requests?|demandes?\s+de\s+fusion|branch\w*|branche\w*'
+    r'|main|master|trunk|default|develop|production|release\w*)\b')
+NEVER_EXEMPT = re.compile(r'\bauto[\s-]*merg\w*|\bautomerg\w*|' + MERGE_WORD + r'[\s-]+(?:buttons?|queues?)\b')
+QUALIFIED = re.compile(
+    r'\b(?:squash|rebase|fast-forward|ff|no-ff|three-way|3-way|octopus|recursive|ort|resolve|subtree)[\s-]*merg\w*'
+    r'|' + MERGE_WORD + r'[\s-]+(?:conflicts?|commits?|bases?|markers?|drivers?|tools?|strateg\w*|messages?|parents?)\b'
+    r'|\b(?:conflits?|commits?)\s+de\s+fusion\b')
+UPSTREAM = re.compile(
+    r'\bupstream\s+(?:remote|repository|repo)\b|\b(?:remote|dépôt|depot)\s+upstream\b'
+    r'|\bfrom\s+(?:the\s+)?upstream\s*(?:[,.;:)]|$)')
+LIST_ITEM = re.compile(r'^(\s*)(?:[-*+]|\d{1,9}[.)])(?:\s|$)')
+HEADING = re.compile(r'^\s{0,3}(#{1,6})(?:\s|$)')
+FENCE = re.compile(r'^\s*(`{3,}|~{3,})')
+RULE = re.compile(r'^\s*(?:(?:-\s*){3,}|(?:=\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$')
 
 
+def terminated(block):
+    return block.rstrip(' \t*_`"\'\u00bb\u201d\u2019)]').endswith(('.', '!', '?'))
 
-def scan_text(text):
-    """0 clear, 1 dated canonical veto, 2 ambiguous/malformed evidence."""
+
+def units(lines):
+    """Yield (context, unit) for each Markdown block and its wrapped lines.
+
+    Context is the heading path, unterminated lead-in blocks and parent list
+    items. Sibling list items and table rows never give each other context.
+    """
+    headings = []  # (level, text) of the current heading path
+    lead = []      # unterminated blocks that introduce what follows
+    items = []     # (indent, text) of open list items
+    listed = False
+    block, kind, indent, fence = [], None, 0, None
+
+    def flush():
+        nonlocal block, kind, lead, items, listed
+        if not block:
+            return None
+        text = ' '.join(part.strip() for part in block)
+        current, block, kind = kind, [], None
+        path = [t for _, t in headings]
+        if current == 'item':
+            items = [x for x in items if x[0] < indent]
+            pair = (' '.join(path + lead + [t for _, t in items]), text)
+            items.append((indent, text))
+            listed = True
+            return pair
+        if items and indent:
+            # Indented content continues the list item above it.
+            return ' '.join(path + lead + [t for i, t in items if i < indent]), text
+        items = []
+        if listed and current != 'row':
+            lead, listed = [], False
+        pair = (' '.join(path + lead), text)
+        if current == 'row':
+            listed = True
+        elif current == 'para':
+            lead = [] if terminated(text) else lead + [text]
+        return pair
+
+    for line in lines:
+        stripped = line.strip()
+        if fence:
+            if re.fullmatch(re.escape(fence[0]) + '{%d,}' % len(fence), stripped):
+                fence = None
+            elif stripped:
+                yield ' '.join([t for _, t in headings] + lead), stripped
+            continue
+        if kind == 'comment' and not block[-1].rstrip().endswith('-->'):
+            block.append(line)
+            continue
+        heading = HEADING.match(line)
+        opening = FENCE.match(line)
+        if not stripped or RULE.match(line) or heading or opening:
+            pair = flush()
+            if pair:
+                yield pair
+            if opening:
+                fence = opening.group(1)
+            elif heading:
+                level = len(heading.group(1))
+                while headings and headings[-1][0] >= level:
+                    headings.pop()
+                yield ' '.join(t for _, t in headings), stripped
+                headings.append((level, stripped))
+                lead, items, listed = [], [], False
+            continue
+        item = LIST_ITEM.match(line)
+        starts = 'item' if item else 'row' if stripped.startswith('|') else 'comment' if stripped.startswith('<!--') else None
+        if kind is None or starts or kind in ('row', 'comment'):
+            pair = flush()
+            if pair:
+                yield pair
+            kind, indent = starts or 'para', len(line) - len(line.lstrip())
+        block.append(line)
+    pair = flush()
+    if pair:
+        yield pair
+
+
+def free_restriction(context, unit):
+    text = (context + ' ' + unit).strip()
+    if not FREE.search(text):
+        return False
+    if HOLD_CONTEXT.search(text) or SCOPE.search(text) or NEVER_EXEMPT.search(text):
+        return True
+    return bool(re.search(MERGE_WORD, QUALIFIED.sub(' ', unit))) and not UPSTREAM.search(unit)
+
+
+def scan_normalized(text):
     outside = []
     managed = False
-    for line in normalize(text).splitlines():
+    for line in text.splitlines():
         if START.match(line):
             if managed:
                 return 2
             managed = True
+            outside.append('')
         elif END.match(line):
             if not managed:
                 return 2
             managed = False
+            outside.append('')
         elif not managed:
             outside.append(line)
     if managed:
         return 2
     # Whitespace joining recognizes a marker or date wrapped over several lines.
-    text = re.sub(r'\s+', ' ', '\n'.join(outside))
-    text = EXAMPLE.sub('', text)
+    joined = re.sub(r'\s+', ' ', '\n'.join(outside))
+    joined = EXAMPLE.sub('', joined)
     found = False
     invalid_date = False
+
     def take_date(match):
         nonlocal found, invalid_date
         try:
@@ -142,10 +266,25 @@ def scan_text(text):
         except ValueError:
             invalid_date = True
         return ''
-    text = DATED.sub(take_date, text)
-    if invalid_date or FREE.search(text) or re.search(r'autonomous\s+merge\s+suspended|merge\s+autonome\s+suspendu', text):
+    joined = DATED.sub(take_date, joined)
+    if invalid_date or re.search(r'autonomous\s+merge\s+suspended|merge\s+autonome\s+suspendu', joined):
         return 2
+
+    def strip_markers(value):
+        return DATED.sub('', EXAMPLE.sub('', re.sub(r'\s+', ' ', value)))
+    # Free-form restrictions are read per Markdown unit so that sibling list
+    # items and separate sentences are not joined into one false restriction.
+    for context, unit in units(outside):
+        if free_restriction(strip_markers(context), strip_markers(unit)):
+            return 2
     return 1 if found else 0
+
+
+def scan_text(text):
+    """0 clear, 1 dated canonical veto, 2 ambiguous/malformed evidence."""
+    # Invisible characters may split a word or separate two words: check both readings.
+    results = [scan_normalized(normalize(text, joiner)) for joiner in ('', ' ')]
+    return 2 if 2 in results else 1 if 1 in results else 0
 
 
 def published_instructions(branch):

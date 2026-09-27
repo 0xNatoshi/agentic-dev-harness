@@ -13,6 +13,7 @@ Development version: 6.5.0. No release tag has been published for this version.
 - Explicitly process human, agent and automated reviewer feedback, including chatgpt-codex-connector, before merge.
 - Align common, Claude and Hermes profiles; advance the project template to v6.4 with authentic history.
 - Compare the staged license blob with the official text, probe Python like `merge-preflight.sh`, and exit 2 when the comparison cannot run; cover the documented command with an offline test.
+- Stop suspension-scan false positives from sibling list items, git merge mechanics and upstream-remote rules; read free-form restrictions per Markdown block with heading, lead-in and parent-item context; remove invisible format characters before matching; and treat a date after the `<date>` example as ambiguous.
 - Reject ambiguous package destinations, generated-manifest collisions and Windows-reserved path components before writing output. The v6.4.0 installation payload and published tag are unchanged.
 
 ## 6.4.0
