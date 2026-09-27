@@ -451,8 +451,9 @@ def mechanics_only(unit):
             methods = True
             permitted |= polarity[0]
             banned |= polarity[1]
-    # 'Do not use squash merges; use squash merges.' contradicts itself, so it stays blocking.
-    return not (permitted & banned) and (bool(permitted) or not methods)
+    # 'Do not use squash merges; use squash merges.' contradicts itself, and a ban naming
+    # no method ('use merge commits, never') may cancel any permission, so both stay blocking.
+    return not (permitted & banned) and 'merge' not in banned and (bool(permitted) or not methods)
 
 
 def free_restriction(context, unit):
