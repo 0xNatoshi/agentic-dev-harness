@@ -45,7 +45,7 @@ check_operation_file() {
     exit 1
   fi
   # Git writes this exact literal as head-name when rebasing a detached HEAD.
-  [ "$state" = "detached HEAD" ] && return 0
+  [ "$operation" != bisect ] && [ "$state" = "detached HEAD" ] && return 0
   case "$state" in
     refs/heads/*) state_ref=$state ;;
     *) state_ref="refs/heads/$state" ;;
@@ -76,10 +76,25 @@ check_operation_dir() {
       printf 'Cannot read %s state in %s\n' "$operation" "$gitdir" >&2
       exit 2
     }
+    # rebase --update-refs lists branches Git rewrites when the rebase ends.
+    updates="$directory/update-refs"
+    if [ -e "$updates" ] || [ -L "$updates" ]; then
+      [ -f "$updates" ] && [ ! -L "$updates" ] && [ -r "$updates" ] || {
+        printf 'Cannot read %s update-refs in %s\n' "$operation" "$gitdir" >&2
+        exit 2
+      }
+      if grep -Fxq -- "$ref" "$updates"; then
+        printf 'Branch is in use by %s --update-refs in %s; retain it.\n' "$operation" "$worktree" >&2
+        exit 1
+      else
+        [ "$?" -eq 1 ] || exit 2
+      fi
+    fi
     # git am uses rebase-apply with an applying marker and no head-name; it
     # applies onto the worktree's own HEAD, which the attached check covers.
-    if [ "$operation" = rebase-apply ] && [ -f "$directory/applying" ] &&
-      [ ! -e "$directory/rebasing" ] && [ ! -e "$directory/head-name" ] && [ ! -L "$directory/head-name" ]; then
+    if [ "$operation" = rebase-apply ] && [ -f "$directory/applying" ] && [ ! -L "$directory/applying" ] &&
+      [ ! -e "$directory/rebasing" ] && [ ! -L "$directory/rebasing" ] &&
+      [ ! -e "$directory/head-name" ] && [ ! -L "$directory/head-name" ]; then
       check_am_head
       return 0
     fi

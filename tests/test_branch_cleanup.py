@@ -24,6 +24,8 @@ SCENARIOS = (
     "other_rebase",
     "detached_rebase_merge",
     "detached_rebase_apply",
+    "detached_rebase_update_refs",
+    "other_rebase_update_refs",
     "other_am",
     "target_am",
     "incomplete_rebase_apply",
@@ -80,10 +82,23 @@ class BranchCleanupTests(unittest.TestCase):
     def prepare(self, scenario: str) -> None:
         if scenario in ("free", "inventory_error"):
             return
-        branch = "other" if scenario in ("other_rebase", "other_am") else "target"
+        branch = "other" if scenario.startswith("other_") else "target"
         if branch == "other":
             self.git("branch", "other")
         worktree = self.root / "linked worktree"
+        if scenario.endswith("update_refs"):
+            # target sits inside the rebased range, so Git will rewrite it at the end.
+            detach = ["--detach"] if scenario.startswith("detached") else []
+            self.git("worktree", "add", "-q", *detach, str(worktree), "target" if detach else branch)
+            (worktree / "extra").write_text("extra\n")
+            self.git("add", "extra", directory=worktree)
+            self.git("commit", "-qm", "extra", directory=worktree)
+            self.git("branch", "-f", "target", "HEAD", directory=worktree)
+            self.conflicting_commits(worktree)
+            result = self.git("rebase", "--update-refs", self.default, directory=worktree, check=False)
+            self.assertNotEqual(result.returncode, 0, "Fixture rebase unexpectedly succeeded")
+            self.assertIn("refs/heads/target", (self.gitdir(worktree) / "rebase-merge" / "update-refs").read_text())
+            return
         if scenario.startswith("detached_rebase"):
             self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
             self.conflicting_commits(worktree)
