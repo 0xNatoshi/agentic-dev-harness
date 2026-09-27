@@ -37,6 +37,8 @@ SCENARIOS = (
     "update_refs_nul",
     "am_marker_only",
     "am_counter_extra_line",
+    "am_counter_range",
+    "head_name_extra_line",
     "free",
 )
 STATUS = {
@@ -53,6 +55,8 @@ STATUS = {
     "update_refs_nul": 2,
     "am_marker_only": 2,
     "am_counter_extra_line": 2,
+    "am_counter_range": 2,
+    "head_name_extra_line": 2,
     "free": 0,
     "other_rebase": 0,
     "detached_rebase_merge": 0,
@@ -133,21 +137,25 @@ class BranchCleanupTests(unittest.TestCase):
             return
         if scenario in (
             "unknown_state", "missing_worktree", "wrong_repository", "incomplete_rebase_apply", "invalid_head_name",
-            "am_marker_only", "am_counter_extra_line",
+            "am_marker_only", "am_counter_extra_line", "am_counter_range", "head_name_extra_line",
         ):
             self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
-            am = ("am_marker_only", "am_counter_extra_line")
-            if scenario in ("unknown_state", "incomplete_rebase_apply", "invalid_head_name", *am):
+            am = ("am_marker_only", "am_counter_extra_line", "am_counter_range")
+            if scenario in ("unknown_state", "incomplete_rebase_apply", "invalid_head_name", "head_name_extra_line", *am):
                 state = "rebase-apply" if scenario in ("incomplete_rebase_apply", *am) else "rebase-merge"
                 (self.gitdir(worktree) / state).mkdir()
                 if scenario == "am_marker_only":
                     # A bare applying marker without am's patch counters is truncated state.
                     (self.gitdir(worktree) / state / "applying").write_text("")
-                if scenario == "am_counter_extra_line":
-                    # Git writes one number per counter; a trailing record is corrupt state.
+                if scenario in ("am_counter_extra_line", "am_counter_range"):
+                    # Git writes one number per counter with 1 <= next <= last.
+                    counters = {"am_counter_extra_line": ("1\njunk\n", "1\n"), "am_counter_range": ("2\n", "1\n")}
                     (self.gitdir(worktree) / state / "applying").write_text("")
-                    (self.gitdir(worktree) / state / "next").write_text("1\njunk\n")
-                    (self.gitdir(worktree) / state / "last").write_text("1\n")
+                    (self.gitdir(worktree) / state / "next").write_text(counters[scenario][0])
+                    (self.gitdir(worktree) / state / "last").write_text(counters[scenario][1])
+                if scenario == "head_name_extra_line":
+                    # Command substitution would strip the extra line and accept the literal.
+                    (self.gitdir(worktree) / state / "head-name").write_text("detached HEAD\n\n")
                 if scenario == "invalid_head_name":
                     # Only Git's exact literal is accepted; a near miss stays untrusted.
                     (self.gitdir(worktree) / state / "head-name").write_text("detached HEAD \n")

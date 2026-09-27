@@ -28,6 +28,12 @@ fi
 # -z keeps worktree paths unambiguous, including whitespace and newlines.
 git worktree list --porcelain -z > "$inventory_z" || exit 2
 
+# Git writes these state files as one record; command substitution would hide
+# extra lines and control bytes, so reject them before reading the value.
+single_record() {
+  [ "$(grep -c '' "$1")" = 1 ] && LC_ALL=C tr -d '\000-\011\013-\037\177' < "$1" | cmp -s - "$1"
+}
+
 check_operation_file() {
   operation=$1
   file=$2
@@ -38,6 +44,10 @@ check_operation_file() {
   state=$(cat "$file") || exit 2
   [ -n "$state" ] || {
     printf 'Empty %s state: %s\n' "$operation" "$file" >&2
+    exit 2
+  }
+  single_record "$file" || {
+    printf 'Malformed %s state: %s\n' "$operation" "$file" >&2
     exit 2
   }
   if [ "$state" = "$ref" ] || [ "$state" = "$branch" ]; then
@@ -122,11 +132,17 @@ check_operation_dir() {
       # git am always records its patch counters; a bare marker is truncated state.
       for counter in next last; do
         [ -f "$directory/$counter" ] && [ ! -L "$directory/$counter" ] && [ -r "$directory/$counter" ] &&
-          [ "$(grep -c '' "$directory/$counter")" = 1 ] && grep -Eqx '[0-9]+' "$directory/$counter" || {
+          single_record "$directory/$counter" && grep -Eqx '[0-9]{1,9}' "$directory/$counter" || {
           printf 'Incomplete git am state in %s\n' "$gitdir" >&2
           exit 2
         }
       done
+      # A stopped git am sits on patch next of last, so 1 <= next <= last.
+      next=$(cat "$directory/next") && last=$(cat "$directory/last") &&
+        [ "$next" -ge 1 ] && [ "$next" -le "$last" ] || {
+        printf 'Inconsistent git am state in %s\n' "$gitdir" >&2
+        exit 2
+      }
       check_am_head
       return 0
     fi
