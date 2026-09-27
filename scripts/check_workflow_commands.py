@@ -25,172 +25,213 @@ REPO_POSITIONALS = {"view", "edit"}
 # Recognized command options from gh 2.86 help. Unknown commands/options fail
 # closed until their documented contract is added. Inherited flags are added
 # by _options; the merge-method placeholder is guidance syntax, not a CLI flag.
+# Each tuple holds valued flags, Boolean flags and the maximum positional count;
+# None preserves the documented variadic issue-edit form.
 GH_OPTIONS = {
     'pr create': (
         '-a --assignee -B --base -b --body -F --body-file -H --head -l --label -m --milestone -p '
         '--project --recover -r --reviewer -T --template -t --title',
         '-d --draft --dry-run -e --editor -f --fill --fill-first --fill-verbose '
         '--no-maintainer-edit -w --web',
+        0,
     ),
     'pr list': (
         '--app -a --assignee -A --author -B --base -H --head -q --jq --json -l --label -L --limit '
         '-S --search -s --state -t --template',
         '-d --draft -w --web',
+        0,
     ),
     'pr status': (
         '-q --jq --json -t --template',
         '-c --conflict-status',
+        0,
     ),
     'pr checkout': (
         '-b --branch',
         '--detach -f --force --recurse-submodules',
+        1,
     ),
     'pr checks': (
         '-i --interval -q --jq --json -t --template',
         '--fail-fast --required --watch -w --web',
+        1,
     ),
     'pr close': (
         '-c --comment',
         '-d --delete-branch',
+        1,
     ),
     'pr comment': (
         '-b --body -F --body-file',
         '--create-if-none --delete-last --edit-last -e --editor -w --web --yes',
+        1,
     ),
     'pr diff': (
         '--color',
         '--name-only --patch -w --web',
+        1,
     ),
     'pr edit': (
         '--add-assignee --add-label --add-project --add-reviewer -B --base -b --body -F '
         '--body-file -m --milestone --remove-assignee --remove-label --remove-project '
         '--remove-reviewer -t --title',
         '--remove-milestone',
+        1,
     ),
     'pr lock': (
         '-r --reason',
         '',
+        1,
     ),
     'pr merge': (
         '-A --author-email -b --body -F --body-file --match-head-commit -t --subject',
         '--admin --auto -d --delete-branch --disable-auto -m --merge -r --rebase -s --squash '
         '--<method>',
+        1,
     ),
     'pr ready': (
         '',
         '--undo',
+        1,
     ),
     'pr reopen': (
         '-c --comment',
         '',
+        1,
     ),
     'pr revert': (
         '-b --body -F --body-file -t --title',
         '-d --draft',
+        1,
     ),
     'pr review': (
         '-b --body -F --body-file',
         '-a --approve -c --comment -r --request-changes',
+        1,
     ),
     'pr unlock': (
         '',
         '',
+        1,
     ),
     'pr update-branch': (
         '',
         '--rebase',
+        1,
     ),
     'pr view': (
         '-q --jq --json -t --template',
         '-c --comments -w --web',
+        1,
     ),
     'run cancel': (
         '',
         '--force',
+        1,
     ),
     'run delete': (
         '',
         '',
+        1,
     ),
     'run download': (
         '-D --dir -n --name -p --pattern',
         '',
+        1,
     ),
     'run list': (
         '-b --branch -c --commit --created -e --event -q --jq --json -L --limit -s --status -t '
         '--template -u --user -w --workflow',
         '-a --all',
+        0,
     ),
     'run rerun': (
         '-j --job',
         '-d --debug --failed',
+        1,
     ),
     'run view': (
         '-a --attempt -j --job -q --jq --json -t --template',
         '--exit-status --log --log-failed -v --verbose -w --web',
+        1,
     ),
     'run watch': (
         '-i --interval',
         '--compact --exit-status',
+        1,
     ),
     'issue close': (
         '-c --comment -r --reason',
         '',
+        1,
     ),
     'issue comment': (
         '-b --body -F --body-file',
         '--create-if-none --delete-last --edit-last -e --editor -w --web --yes',
+        1,
     ),
     'issue create': (
         '-a --assignee -b --body -F --body-file -l --label -m --milestone -p --project --recover '
         '-T --template -t --title',
         '-e --editor -w --web',
+        0,
     ),
     'issue delete': (
         '',
         '--yes',
+        1,
     ),
     'issue develop': (
         '-b --base --branch-repo -n --name',
         '-c --checkout -l --list',
+        1,
     ),
     'issue edit': (
         '--add-assignee --add-label --add-project -b --body -F --body-file -m --milestone '
         '--remove-assignee --remove-label --remove-project -t --title',
         '--remove-milestone',
+        None,
     ),
     'issue list': (
         '--app -a --assignee -A --author -q --jq --json -l --label -L --limit --mention -m '
         '--milestone -S --search -s --state -t --template',
         '-w --web',
+        0,
     ),
     'issue lock': (
         '-r --reason',
         '',
+        1,
     ),
     'issue reopen': (
         '-c --comment',
         '',
+        1,
     ),
     'issue status': (
         '-q --jq --json -t --template',
         '',
+        0,
     ),
     'issue transfer': (
         '',
         '',
+        2,
     ),
     'issue unlock': (
         '',
         '',
+        1,
     ),
     'issue view': (
         '-q --jq --json -t --template',
         '-c --comments -w --web',
+        1,
     ),
     'repo view': (
         '-b --branch -q --jq --json -t --template',
         '-w --web',
+        1,
     ),
     'repo edit': (
         '--add-topic --default-branch -d --description -h --homepage --remove-topic --visibility',
@@ -199,10 +240,12 @@ GH_OPTIONS = {
         '--enable-discussions --enable-issues --enable-merge-commit --enable-projects '
         '--enable-rebase-merge --enable-secret-scanning --enable-secret-scanning-push-protection '
         '--enable-squash-merge --enable-wiki --template',
+        1,
     ),
     'repo set-default': (
         '',
         '-u --unset -v --view',
+        1,
     ),
 }
 CONTROL = {";", ";;", ";&", ";;&", "&&", "||", "|", "|&", "&", "(", ")"}
@@ -237,7 +280,15 @@ def _tokens(command):
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
     lexer.whitespace_split = True
     lexer.commenters = "#"
-    raw = list(lexer)
+    raw = []
+    for word in lexer:
+        # shlex groups adjacent punctuation, such as ');' or ')&&'. Keep
+        # parentheses separate so array frames close and command boundaries
+        # remain visible to every consumer of this token stream.
+        if word and set(word) <= set(";&|()"):
+            raw.extend(re.findall(r"[()]|[;&|]+", word))
+        else:
+            raw.append(word)
     tokens = []
     index = 0
     while index < len(raw):
@@ -264,6 +315,18 @@ def _tokens(command):
 
 
 def _command_start(tokens, index):
+    arrays = []
+    for offset, word in enumerate(tokens[:index]):
+        if word and set(word) <= {"(", ")"}:
+            for character in word:
+                if character == "(":
+                    arrays.append(bool(offset and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*\+?=", tokens[offset - 1])))
+                elif arrays:
+                    arrays.pop()
+    # Array entries name executable/arguments; a nested $(...) executes a
+    # command and gets its own non-array parenthesis frame above.
+    if arrays and arrays[-1]:
+        return False
     prefix, incomplete = _without_redirections(tokens[:index])
     if incomplete:
         return False
@@ -322,7 +385,7 @@ def _option_value(flag, value):
 
 def _options(args, command):
     """Return positional words, valued flags, missing values and unknown flags."""
-    value_options, boolean_options = GH_OPTIONS[command]
+    value_options, boolean_options, _ = GH_OPTIONS[command]
     value_flags = set(value_options.split())
     boolean_flags = set(boolean_options.split()) | {"--help"}
     if not command.startswith("repo "):
@@ -378,6 +441,8 @@ def _direct_python(tail, *, windows_launcher=False):
         if word in PY_SWITCHES or windows_launcher and word == "-3":
             index += 1
         elif word in PY_VALUE_SWITCHES:
+            if index + 1 >= len(tail):
+                return False, True
             index += 2
         elif (word.startswith("-X") or word.startswith("-W")) and len(word) > 2:
             index += 1
@@ -390,11 +455,13 @@ def _direct_python(tail, *, windows_launcher=False):
         else:
             # Python accepts extensionless scripts, directories and ZIP apps.
             return True, False
-    return False, False
+    return True, False
 
 
 def _analyze(command, file, line, *, inline=False, probe=False, origin_comparison=False):
-    if inline and SHORTHAND.fullmatch(command):
+    # Bare executable names in prose are references, like gh family shorthand.
+    # Their standalone shell-fence/command-line form is executable and checked.
+    if inline and (SHORTHAND.fullmatch(command) or command in {"python3", "python", "py", "py -3"}):
         return []
     try:
         words = _tokens(command)
@@ -424,6 +491,9 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
             findings.append(Diagnostic(file, line, f"unsupported gh command {command_name}; cannot verify command operands"))
             continue
         positional, valued, missing, unknown, incomplete = _options(tail[2:], command_name)
+        maximum = GH_OPTIONS[command_name][2]
+        if maximum is not None and len(positional) > maximum:
+            findings.append(Diagnostic(file, line, f"gh {command_name} accepts at most {maximum} positional operands; found {len(positional)}"))
         if incomplete:
             findings.append(Diagnostic(file, line, "incomplete shell redirection in gh command"))
         for flag in sorted(unknown):
@@ -534,7 +604,7 @@ def scan_document(file, text):
                 snippet, file, number, inline=True,
                 origin_comparison=_origin_comparison(file, heading, source, snippet),
             ))
-        if re.match(r"^\s*(?:gh|python3|python|py)\s+", source):
+        if re.match(r"^\s*(?:gh|python3|python|py)(?:\s|$)", source):
             findings.extend(_analyze(source, file, number))
     if pending:
         findings.extend(_analyze(pending, file, pending_line))

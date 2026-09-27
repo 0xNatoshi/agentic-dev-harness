@@ -226,6 +226,81 @@ class WorkflowCommandTests(unittest.TestCase):
                 self.assertIn("skills/github-workflow/references/examples.md:1:", result.stderr)
                 self.assertIn(expected, result.stderr)
 
+    def test_surplus_positionals_respect_command_specific_limits(self):
+        cases = (
+            ("pr create", "extra", 0), ("pr list", "extra", 0), ("pr status", "extra", 0),
+            ("pr view", "25 extra", 1), ("pr review", "25 extra --body text", 1),
+            ("run list", "extra", 0), ("run view", "25 extra", 1),
+            ("issue create", "extra", 0), ("issue list", "extra", 0), ("issue status", "extra", 0),
+            ("issue transfer", "25 owner/destination extra", 2),
+            ("repo view", "extra", 1), ("repo edit", "extra", 1), ("repo set-default", "extra", 1),
+        )
+        for command, operands, maximum in cases:
+            with self.subTest(command=command), tempfile.TemporaryDirectory(prefix="workflow-positional-limit-") as directory:
+                binding = '"$workflow_host/$workflow_repo"' if command.startswith("repo ") else '--repo "$workflow_host/$workflow_repo"'
+                root = self.root(directory, references={"examples.md": f"`gh {command} {binding} {operands}`\n"})
+                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"{command} accepts at most {maximum} positional operands", result.stderr)
+        with tempfile.TemporaryDirectory(prefix="workflow-positional-forms-") as directory:
+            root = self.root(directory, references={"examples.md": '''```bash
+gh pr list --repo "$workflow_host/$workflow_repo" --head main --base main
+gh pr review --repo "$workflow_host/$workflow_repo" 25 --body "two words"
+gh issue edit --repo "$workflow_host/$workflow_repo" 25 26 27 --add-label triaged
+gh issue transfer --repo "$workflow_host/$workflow_repo" 25 owner/destination
+gh repo view "$workflow_host/$workflow_repo" --json nameWithOwner
+```\n'''})
+            self.assertEqual(check_repository(root), [])
+
+    def test_interpreter_only_shell_commands_require_the_selected_array(self):
+        for launcher in ("python3", "python", "py", "py -3"):
+            for suffix in ("", " -B", " -X dev", " -W ignore", " -u -I"):
+                for layout in ("```bash\n%s\n```\n", "%s\n"):
+                    with self.subTest(launcher=launcher, suffix=suffix, layout=layout), tempfile.TemporaryDirectory(prefix="workflow-interactive-") as directory:
+                        command = launcher + suffix
+                        root = self.root(directory, references={"examples.md": layout % command})
+                        findings = check_repository(root)
+                        self.assertTrue(any(f"direct {launcher.split()[0]} invocation" in item.message for item in findings), [str(item) for item in findings])
+                        (root / "skills/github-workflow/references/examples.md").write_text(layout % ('"${python_cmd[@]}"' + suffix), encoding="utf-8")
+                        self.assertEqual(check_repository(root), [])
+
+    def test_interpreter_metadata_and_array_literals_do_not_execute_python(self):
+        examples = '''The snippet probes `python3`, `py -3` and `python`.
+```bash
+python_cmd=(python3)
+python_cmd=(py -3)
+python_cmd=(env python3 -u)
+python_cmd+=(python3)
+python_cmd+=(py -3)
+printf '%s' python3
+```
+'''
+        with tempfile.TemporaryDirectory(prefix="workflow-python-metadata-") as directory:
+            root = self.root(directory, references={"examples.md": examples})
+            reference = root / "skills/github-workflow/references/examples.md"
+            self.assertEqual(check_repository(root), [])
+            for launcher in ("python3", "python", "py", "py -3"):
+                for flag in ("--version", "-V", "-VV", "--help", "-h"):
+                    with self.subTest(launcher=launcher, flag=flag):
+                        reference.write_text(f"```bash\n{launcher} {flag}\n```\n", encoding="utf-8")
+                        self.assertEqual(check_repository(root), [])
+            for command in ("python3 -X", "python3 -W", "py -3 -X"):
+                reference.write_text(f"```bash\n{command}\n```\n", encoding="utf-8")
+                self.assertTrue(any("unsupported" in item.message for item in check_repository(root)))
+            for command in ('python_cmd=($(python3))', 'python_cmd=($(py -3))', 'python_cmd+=($(python3))', 'python_cmd+=($(py -3))'):
+                reference.write_text(f"```bash\n{command}\n```\n", encoding="utf-8")
+                self.assertTrue(any("direct" in item.message for item in check_repository(root)))
+            for assignment in ("args=(25)", "args+=(25)"):
+                for separator in (";", "&&", "||", "|"):
+                    for prefix in ("", "env ", "command "):
+                        for command, expected in (
+                            ("python -m unittest", "direct python invocation"),
+                            ('gh pr view --repo "$workflow_host/$workflow_repo"', "explicit PR selector"),
+                        ):
+                            with self.subTest(assignment=assignment, separator=separator, prefix=prefix, command=command):
+                                reference.write_text(f"```bash\n{assignment}{separator} {prefix}{command}\n```\n", encoding="utf-8")
+                                self.assertTrue(any(expected in item.message for item in check_repository(root)))
+
     def test_required_option_values_are_reported_for_each_command(self):
         cases = (
             ('pr list --repo "$workflow_host/$workflow_repo" --head', "--head"),
