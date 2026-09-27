@@ -290,6 +290,8 @@ def _shell_boundaries(command):
     # expansions need a grammar outside this checker. Case arms inside
     # substitutions can close with unmatched ')': even an unquoted literal case argument makes
     # boundary-sensitive forms ambiguous here. Quote that literal to disambiguate.
+    # Process substitutions and extended globs also continue a word after ')';
+    # reject their active forms instead of treating them as ordinary groups.
     quote = ""
     escaped = False
     word_started = False
@@ -367,6 +369,10 @@ def _shell_boundaries(command):
         if quote == '"':
             index += 1
             continue
+        if command.startswith(("<(", ">("), index):
+            return unsupported("unsupported process substitution boundary; split the example")
+        if char in "@!?*+" and command[index + 1:index + 2] == "(":
+            return unsupported("unsupported extended glob boundary; use a literal argument")
         if not word_started and command.startswith("case", index) and (
             index + 4 == len(command) or command[index + 4] in " \t" or
             command[index + 4] in ";&|<>()"
@@ -784,7 +790,7 @@ def _here_document(boundaries):
     if not boundaries.has_here_operator:
         return None, None
     header = re.fullmatch(
-        r'''\s*(?:cat|"\$\{python_cmd\[@\]\}"\s+-)\s+<<(?P<tabs>-)?\s*(?P<quote>['"])(?P<end>[A-Za-z_][A-Za-z_0-9]*)(?P=quote)\s*''',
+        r'''[ \t]*(?:cat|"\$\{python_cmd\[@\]\}"[ \t]+-)[ \t]+<<(?P<tabs>-)?[ \t]*(?P<quote>['"])(?P<end>[A-Za-z_][A-Za-z_0-9]*)(?P=quote)[ \t]*''',
         boundaries.visible,
     )
     if header is None:

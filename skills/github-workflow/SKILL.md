@@ -274,7 +274,7 @@ An increment is coherent and verified: working feature slice, fixed bug, complet
 
 1. Relevant lint/tests pass using project commands.
 2. Stage reviewed files; inspect status/staged diff and exclude secrets/.env/artifacts. Blind git add -A is inappropriate.
-3. Commit with `<type>(scope): summary`, adding an issue reference when present.
+3. Use a Conventional Commit, for example `fix(scope): summary`, adding an issue reference when present.
 4. Push, using `git push -u origin HEAD` initially.
 
 Keep hooks/tests/CI intact; diagnose and fix failures or state the blocker. Bypassing checks is not an execution path.
