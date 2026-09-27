@@ -247,6 +247,20 @@ TEXT_CASES = (
     Case("kept method rule undone by bare clause", 2, "No rebase merges; squash merges only. But not this."),
     Case("kept method rule retracted", 2, "No rebase merges; squash merges only. Or rather, don't."),
     Case("kept method rule negated by bare clause", 2, "Use merge commits; never squash-merge. Do not do it."),
+    Case("kept parent section hold above method rule", 2,
+         "## Merging\n\nWait until I say so.\n\n### Method\n\nNo fast-forward merges; use merge commits."),
+    Case("kept parent section owner OK above method rule", 2,
+         "## Merging\n\nThe owner OKs each one first.\n\n### Method\n\nNo fast-forward merges; use merge commits."),
+    Case("kept grandparent section hold above method rule", 2,
+         "# Rules\n\nNothing lands without the owner's OK.\n\n## Git\n\n### Merges\n\n"
+         "No fast-forward merges; use merge commits."),
+    Case("kept French parent section hold above method rule", 2,
+         "## Fusions\n\nLe propriétaire valide chaque fusion d'abord.\n\n### Méthode\n\n"
+         "Pas de fast-forward merge ; utilisez des merge commits."),
+    Case("kept method rule contradicted by bare ban", 2, "No rebase merges; squash merges only. Never rebase, never squash."),
+    Case("kept method rule contradicted by nor", 2, "No squash merges; use merge commits. Nor commits."),
+    Case("kept method rule contradicted by retraction", 2,
+         "Use merge commits; never squash-merge. Or rather, do not commit."),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -284,8 +298,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 207 or len({case.name for case in ALL_CASES}) != 207:
-    raise RuntimeError("Merge fixture inventory must contain 207 unique cases")
+if len(ALL_CASES) != 214 or len({case.name for case in ALL_CASES}) != 214:
+    raise RuntimeError("Merge fixture inventory must contain 214 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

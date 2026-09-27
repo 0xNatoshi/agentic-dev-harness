@@ -174,6 +174,7 @@ MECHANICS_CONTENT = {
     'rebase', 'rebases', 'rebasing', 'squash', 'commit', 'commits', 'fast', 'forward', 'ff', 'onto', 'main', 'master',
     'branch', 'branches', 'branche', 'cherry', 'pick', 'upstream', 'remote', 'sync', 'history', 'linear',
     'historique', 'linéaire'}
+METHOD_CONTENT = {'rebase', 'rebases', 'rebasing', 'squash', 'commit', 'commits', 'fast', 'forward', 'ff'}
 BARE_TOKENS = METHOD_TOKENS | MECHANICS_CONTENT | {'them', 'it'}
 # A hold sentence right after a cleared method rule may qualify that rule.
 FOLLOW_HOLD = re.compile(
@@ -404,8 +405,10 @@ def mechanics_only(unit):
         method_clause = False
         if not re.search(MERGE_WORD, clause):
             words = set(re.findall(r'[^\W_]+', clause))
-            # 'Do not do it.' has no git content and may undo the rule.
-            if words and not (words <= BARE_TOKENS and words & MECHANICS_CONTENT):
+            # 'Do not do it.' has no git content and may undo the rule;
+            # 'Never squash.' may forbid the method the rule just permitted.
+            if (words and not (words <= BARE_TOKENS and words & MECHANICS_CONTENT)) or (
+                    words & NEGATIVE and words & METHOD_CONTENT):
                 return False
             continue
         for match in re.finditer(MERGE_WORD, clause):
@@ -499,11 +502,13 @@ def scan_normalized(text):
         if result == 'cleared' and FOLLOW_HOLD.search(strip_markers(context)):
             return 2  # a heading, lead-in or parent item conditions the rule
         records.append((section, unit, result == 'cleared'))
-    # A hold or approval sentence in the section of a cleared rule, in its
-    # subsections, or right after it, may qualify that rule without naming a merge.
+    # A hold or approval sentence in the section of a cleared rule, in the
+    # sections above or below it, or right after it, may qualify that rule
+    # without naming a merge. Prefix sets keep the check linear in section depth.
     cleared = {section for section, _, done in records if done}
+    above = {path[:depth] for path in cleared for depth in range(len(path) + 1)}
     for index, (section, unit, _) in enumerate(records):
-        inside = any(section[:len(path)] == path for path in cleared)
+        inside = section in above or any(section[:depth] in cleared for depth in range(len(section)))
         if (inside or (index and records[index - 1][2])) and FOLLOW_HOLD.search(unit):
             return 2
     return 1 if found else 0
