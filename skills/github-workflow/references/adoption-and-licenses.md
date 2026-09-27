@@ -75,15 +75,20 @@ After filling legal fields, compare the delivered license byte for byte with the
   fi
   "${python_cmd[@]}" - <<'PY'
 import difflib
+import http.client
 import os
 import subprocess
 import sys
 from urllib.request import urlopen
 
-kind = os.environ["LICENSE_KIND"]
-path = os.environ["LICENSE_PATH"]
-year = os.environ["LICENSE_YEAR"]
-holder = os.environ["LICENSE_HOLDER"]
+# A diff of undecodable bytes must still print on a narrow console encoding.
+sys.stdout.reconfigure(errors="backslashreplace")
+kind, path, year, holder = (os.environ.get(name, "") for name in
+                            ("LICENSE_KIND", "LICENSE_PATH", "LICENSE_YEAR", "LICENSE_HOLDER"))
+urls = {
+    "MIT": "https://raw.githubusercontent.com/github/choosealicense.com/gh-pages/_licenses/mit.txt",
+    "PolyForm": "https://polyformproject.org/licenses/noncommercial/1.0.0.txt",
+}
 
 
 def not_run(reason):
@@ -91,20 +96,25 @@ def not_run(reason):
     raise SystemExit(2)
 
 
+if kind not in urls:
+    not_run("Set LICENSE_KIND to MIT or PolyForm")
 if not (len(year) == 4 and year.isdigit() and holder.strip()) or "{{" in holder:
     not_run("Set a confirmed year and copyright holder first")
+# `:path` is read from the repository root, so the unstaged check must be too.
+prefix = subprocess.run(["git", "rev-parse", "--show-prefix"], capture_output=True, text=True)
+if prefix.returncode != 0 or prefix.stdout.strip():
+    not_run("Run at the repository root")
+if not path or os.path.isabs(path):
+    not_run("Set LICENSE_PATH relative to the repository root")
 # Compare the staged blob: it is what gets delivered, whatever the checkout's line endings.
 staged = subprocess.run(["git", "show", ":" + path], capture_output=True)
-unstaged = subprocess.run(["git", "diff", "--quiet", "--", path])
+unstaged = subprocess.run(["git", "diff", "--quiet", "--", ":(literal)" + path], capture_output=True)
 if staged.returncode != 0 or unstaged.returncode != 0:
     not_run(f"Stage the final {path} first")
-urls = {
-    "MIT": "https://raw.githubusercontent.com/github/choosealicense.com/gh-pages/_licenses/mit.txt",
-    "PolyForm": "https://polyformproject.org/licenses/noncommercial/1.0.0.txt",
-}
 try:
     source = urlopen(urls[kind], timeout=30).read()
-except OSError as error:
+    source.decode()
+except (OSError, http.client.HTTPException, UnicodeDecodeError) as error:
     not_run(f"Official text unavailable ({error})")
 if kind == "MIT":
     header, separator, body = source.partition(b"\n---\n")
@@ -127,7 +137,7 @@ PY
 )
 ```
 
-The snippet probes `python3`, `py -3` and `python` in the order used by `merge-preflight.sh`. Exit 0 means the staged blob matches; 1 means a difference; 2 means the comparison was not run (no Python 3.8+, missing year or holder, unstaged license or unstaged changes, or an unavailable or unexpected official text) and never supports a conformity claim. Line endings are compared as committed: a checkout converted by `core.autocrlf` still passes, while a blob committed with CRLF fails.
+The snippet probes `python3`, `py -3` and `python` in the order used by `merge-preflight.sh`. Exit 0 means the staged blob matches; 1 means a difference; 2 means the comparison was not run (no Python 3.8+, an unknown kind, missing year or holder, a run outside the repository root, an absolute path, unstaged license or unstaged changes, or an unavailable, undecodable or unexpected official text) and never supports a conformity claim. Line endings are compared as committed: a checkout converted by `core.autocrlf` still passes, while a blob committed with CRLF fails.
 
 Network failures or differences block a successful official-comparison claim. Preserve the diff and resolve differences before delivering the standard template. The proprietary text is custom: check its rights against the chosen template without claiming an official external text. Check unresolved `{{...}}`, `[year]`, `[fullname]`, `TO FILL` in every delivered `LICENSE*` and README.md, then reconcile notices/metadata.
 

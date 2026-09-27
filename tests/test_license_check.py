@@ -3,6 +3,7 @@
 from pathlib import Path
 import re
 import shutil
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -62,11 +63,12 @@ class LicenseCheckTests(unittest.TestCase):
         self.git("add", "LICENSE")
         self.git("commit", "-qm", "license")
 
-    def check(self, expected: int, message: str, environment: dict[str, str] | None = None) -> None:
+    def check(self, expected: int, message: str, environment: dict[str, str] | None = None,
+              directory: Path | None = None) -> None:
         # An absolute bash keeps the command runnable under a PATH without Python.
         bash = shutil.which("bash", path=self.environment["PATH"])
         self.assertIsNotNone(bash)
-        result = run([bash, "-c", documented_command()], self.repo, environment or self.environment)
+        result = run([bash, "-c", documented_command()], directory or self.repo, environment or self.environment)
         self.assertEqual(result.returncode, expected, f"stdout={result.stdout!r}, stderr={result.stderr!r}")
         self.assertIn(message, result.stdout + result.stderr)
 
@@ -113,6 +115,43 @@ class LicenseCheckTests(unittest.TestCase):
         (tools / "git").symlink_to(git)
         self.check(2, "Python 3.8+ not found; exact license comparison not run.",
                    self.environment | {"PATH": str(tools)})
+
+    def test_python_fallback_skips_broken_alias(self) -> None:
+        self.commit(MIT_LICENSE.encode())
+        tools = self.root / "fallback"
+        tools.mkdir()
+        for name, target in (("git", shutil.which("git", path=self.environment["PATH"])), ("python", sys.executable)):
+            self.assertIsNotNone(target)
+            (tools / name).symlink_to(target)
+        # A Windows Store alias exits 9009 instead of running Python.
+        (tools / "python3").write_text("#!/bin/sh\nexit 9009\n")
+        (tools / "python3").chmod(0o755)
+        self.check(0, "Exact license text verified: staged LICENSE", self.environment | {"PATH": str(tools)})
+
+    def test_subdirectory_run_is_not_compared(self) -> None:
+        self.commit(MIT_LICENSE.encode())
+        self.license.write_bytes(MIT_LICENSE.replace("hereby", "not").encode())
+        subdirectory = self.repo / "sub dir"
+        subdirectory.mkdir()
+        self.check(2, "Run at the repository root", directory=subdirectory)
+
+    def test_unknown_kind_is_not_compared(self) -> None:
+        self.commit(MIT_LICENSE.encode())
+        self.check(2, "Set LICENSE_KIND to MIT or PolyForm", self.environment | {"LICENSE_KIND": "mit"})
+
+    def test_missing_variable_is_not_compared(self) -> None:
+        self.commit(MIT_LICENSE.encode())
+        environment = {key: value for key, value in self.environment.items() if key != "LICENSE_YEAR"}
+        self.check(2, "Set a confirmed year and copyright holder first", environment)
+
+    def test_undecodable_official_text_is_not_compared(self) -> None:
+        self.commit(MIT_LICENSE.encode())
+        self.source.write_bytes(MIT_SOURCE.encode() + b"\xff")
+        self.check(2, "Official text unavailable")
+
+    def test_undecodable_blob_diff_prints_on_narrow_console(self) -> None:
+        self.commit(MIT_LICENSE.encode() + b"\xff\n")
+        self.check(1, "+\\ufffd", self.environment | {"PYTHONIOENCODING": "cp1252"})
 
 
 if __name__ == "__main__":
