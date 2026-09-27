@@ -54,7 +54,7 @@ Remote deletion compares the expected head through a lease. Local `git update-re
 
 ## Final worktree check before `git update-ref -d`
 
-After exclusive ownership, inactivity, protection, inclusion and recovery checks, run the read-only guard immediately before compare-and-delete. It retains `git worktree list --porcelain` plus `grep -Fx "branch refs/heads/<branch>"`, and inspects `rebase-merge/head-name`, `rebase-apply/head-name` and `BISECT_START` in every worktree gitdir, including detached worktrees. Exit 0 means no observed use; 1 means in use; 2 means inventory/gitdir/operation state cannot be read/trusted. Both nonzero outcomes retain the branch.
+After exclusive ownership, inactivity, protection, inclusion and recovery checks, run the read-only guard immediately before compare-and-delete. It retains `git worktree list --porcelain` plus `grep -Fx "branch refs/heads/<branch>"`, and inspects `rebase-merge/head-name`, `rebase-apply/head-name` and `BISECT_START` in every worktree gitdir, including detached worktrees. Git's exact `detached HEAD` head-name (a rebase started on a detached HEAD) names no branch. A `git am` leaves `rebase-apply` with an `applying` marker and no head-name; the guard then checks that worktree's own HEAD. Any other missing, empty or invalid state stays untrusted. Exit 0 means no observed use; 1 means in use; 2 means inventory/gitdir/operation state cannot be read/trusted. Both nonzero outcomes retain the branch.
 
 ```bash
 (

@@ -22,8 +22,27 @@ SCENARIOS = (
     "wrong_repository",
     "inventory_error",
     "other_rebase",
+    "detached_rebase_merge",
+    "detached_rebase_apply",
+    "other_am",
+    "target_am",
+    "incomplete_rebase_apply",
+    "invalid_head_name",
     "free",
 )
+STATUS = {
+    "unknown_state": 2,
+    "missing_worktree": 2,
+    "wrong_repository": 2,
+    "inventory_error": 2,
+    "incomplete_rebase_apply": 2,
+    "invalid_head_name": 2,
+    "free": 0,
+    "other_rebase": 0,
+    "detached_rebase_merge": 0,
+    "detached_rebase_apply": 0,
+    "other_am": 0,
+}
 
 
 def documented_command() -> str:
@@ -61,15 +80,27 @@ class BranchCleanupTests(unittest.TestCase):
     def prepare(self, scenario: str) -> None:
         if scenario in ("free", "inventory_error"):
             return
-        branch = "other" if scenario == "other_rebase" else "target"
+        branch = "other" if scenario in ("other_rebase", "other_am") else "target"
         if branch == "other":
             self.git("branch", "other")
         worktree = self.root / "linked worktree"
-        if scenario in ("unknown_state", "missing_worktree", "wrong_repository"):
+        if scenario.startswith("detached_rebase"):
             self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
-            if scenario == "unknown_state":
-                gitdir = Path(self.git("rev-parse", "--absolute-git-dir", directory=worktree).stdout.strip())
-                (gitdir / "rebase-merge").mkdir()
+            self.conflicting_commits(worktree)
+            backend = "rebase-apply" if scenario == "detached_rebase_apply" else "rebase-merge"
+            self.start_rebase(worktree, backend)
+            self.assertEqual((self.gitdir(worktree) / backend / "head-name").read_text().strip(), "detached HEAD")
+            return
+        if scenario in (
+            "unknown_state", "missing_worktree", "wrong_repository", "incomplete_rebase_apply", "invalid_head_name"
+        ):
+            self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
+            if scenario in ("unknown_state", "incomplete_rebase_apply", "invalid_head_name"):
+                state = "rebase-apply" if scenario == "incomplete_rebase_apply" else "rebase-merge"
+                (self.gitdir(worktree) / state).mkdir()
+                if scenario == "invalid_head_name":
+                    # Only Git's exact literal is accepted; a near miss stays untrusted.
+                    (self.gitdir(worktree) / state / "head-name").write_text("detached HEAD \n")
             else:
                 worktree.rename(self.root / "moved worktree")
                 if scenario == "missing_worktree":
@@ -81,6 +112,16 @@ class BranchCleanupTests(unittest.TestCase):
         self.git("worktree", "add", "-q", str(worktree), branch)
         if scenario == "attached":
             return
+        if scenario.endswith("_am"):
+            self.conflicting_commits(worktree)
+            patches = self.root / "patches"
+            self.git("format-patch", "-q", "-1", "-o", str(patches), "HEAD")
+            result = self.git("am", str(next(patches.iterdir())), directory=worktree, check=False)
+            self.assertNotEqual(result.returncode, 0, "Fixture am unexpectedly succeeded")
+            state = self.gitdir(worktree) / "rebase-apply"
+            self.assertTrue((state / "applying").is_file())
+            self.assertFalse((state / "head-name").exists())
+            return
         if scenario == "bisect":
             for number in range(1, 6):
                 (worktree / "file").write_text(f"{number}\n")
@@ -91,20 +132,28 @@ class BranchCleanupTests(unittest.TestCase):
             gitdir = Path(self.git("rev-parse", "--absolute-git-dir", directory=worktree).stdout.strip())
             self.assertEqual((gitdir / "BISECT_START").read_text().strip(), branch)
         else:
-            (worktree / "file").write_text("branch\n")
-            self.git("commit", "-qam", "branch change", directory=worktree)
-            (self.repo / "file").write_text("default\n")
-            self.git("commit", "-qam", "default change")
-            arguments = ["rebase"]
-            if scenario == "rebase_apply":
-                arguments.append("--apply")
-            arguments.append(self.default)
-            result = self.git(*arguments, directory=worktree, check=False)
-            self.assertNotEqual(result.returncode, 0, "Fixture rebase unexpectedly succeeded")
-            gitdir = Path(self.git("rev-parse", "--absolute-git-dir", directory=worktree).stdout.strip())
+            self.conflicting_commits(worktree)
             state = "rebase-apply" if scenario == "rebase_apply" else "rebase-merge"
-            self.assertEqual((gitdir / state / "head-name").read_text().strip(), f"refs/heads/{branch}")
+            self.start_rebase(worktree, state)
+            self.assertEqual((self.gitdir(worktree) / state / "head-name").read_text().strip(), f"refs/heads/{branch}")
         self.assertIn("detached", self.git("worktree", "list", "--porcelain").stdout)
+
+    def gitdir(self, worktree: Path) -> Path:
+        return Path(self.git("rev-parse", "--absolute-git-dir", directory=worktree).stdout.strip())
+
+    def conflicting_commits(self, worktree: Path) -> None:
+        (worktree / "file").write_text("branch\n")
+        self.git("commit", "-qam", "branch change", directory=worktree)
+        (self.repo / "file").write_text("default\n")
+        self.git("commit", "-qam", "default change")
+
+    def start_rebase(self, worktree: Path, backend: str) -> None:
+        arguments = ["rebase"]
+        if backend == "rebase-apply":
+            arguments.append("--apply")
+        arguments.append(self.default)
+        result = self.git(*arguments, directory=worktree, check=False)
+        self.assertNotEqual(result.returncode, 0, "Fixture rebase unexpectedly succeeded")
 
     def check_scenario(self, scenario: str) -> None:
         self.prepare(scenario)
@@ -127,11 +176,8 @@ class BranchCleanupTests(unittest.TestCase):
         result = run(["bash", "-c", documented_command()], self.repo, environment)
         current = self.git("rev-parse", "--verify", "refs/heads/target", check=False)
         retained = current.returncode == 0 and current.stdout.strip() == head
-        should_retain = scenario not in ("free", "other_rebase")
-        expected_status = (
-            2 if scenario in ("unknown_state", "missing_worktree", "wrong_repository", "inventory_error")
-            else 1 if should_retain else 0
-        )
+        expected_status = STATUS.get(scenario, 1)
+        should_retain = expected_status != 0
         self.assertEqual(
             (result.returncode, retained), (expected_status, should_retain),
             f"{scenario}: stdout={result.stdout!r}, stderr={result.stderr!r}",

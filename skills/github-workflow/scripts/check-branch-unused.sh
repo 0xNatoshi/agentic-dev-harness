@@ -44,6 +44,8 @@ check_operation_file() {
     printf 'Branch is in use by %s in %s; retain it.\n' "$operation" "$worktree" >&2
     exit 1
   fi
+  # Git writes this exact literal as head-name when rebasing a detached HEAD.
+  [ "$state" = "detached HEAD" ] && return 0
   case "$state" in
     refs/heads/*) state_ref=$state ;;
     *) state_ref="refs/heads/$state" ;;
@@ -54,6 +56,18 @@ check_operation_file() {
   }
 }
 
+check_am_head() {
+  if am_head=$(git -C "$worktree" symbolic-ref -q HEAD); then
+    [ "$am_head" != "$ref" ] || {
+      printf 'Branch is in use by git am in %s; retain it.\n' "$worktree" >&2
+      exit 1
+    }
+  else
+    # Status 1 is a detached HEAD; anything else cannot be trusted.
+    [ "$?" -eq 1 ] || exit 2
+  fi
+}
+
 check_operation_dir() {
   operation=$1
   directory="$gitdir/$operation"
@@ -62,6 +76,13 @@ check_operation_dir() {
       printf 'Cannot read %s state in %s\n' "$operation" "$gitdir" >&2
       exit 2
     }
+    # git am uses rebase-apply with an applying marker and no head-name; it
+    # applies onto the worktree's own HEAD, which the attached check covers.
+    if [ "$operation" = rebase-apply ] && [ -f "$directory/applying" ] &&
+      [ ! -e "$directory/rebasing" ] && [ ! -e "$directory/head-name" ] && [ ! -L "$directory/head-name" ]; then
+      check_am_head
+      return 0
+    fi
     check_operation_file "$operation" "$directory/head-name"
   fi
 }
