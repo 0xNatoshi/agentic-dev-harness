@@ -8,6 +8,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import tempfile
+import unicodedata
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,19 +25,43 @@ def version(root=ROOT):
     return value
 
 
+def package_path(name):
+    if not isinstance(name, str) or not name or re.search(r'[<>:"\\|?*\x00-\x1f]', name):
+        raise ValueError("Package paths must be portable relative POSIX paths")
+    path = PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts or path.as_posix() != name or name == ".":
+        raise ValueError(f"Unsafe package path: {name}")
+    for component in path.parts:
+        device = component.split(".", 1)[0].rstrip(" ").upper()
+        if component.endswith((".", " ")) or re.fullmatch(r"CON|CONIN\$|CONOUT\$|PRN|AUX|NUL|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3]", device):
+            raise ValueError(f"Windows-reserved package path: {name}")
+    return path
+
+
+def destination_key(name):
+    # Casefold alone keeps dotless i distinct; include uppercase aliases too.
+    # These conservative comparison keys never change the spelling in the ZIP.
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", name).upper().casefold())
+
+
 def payloads(root=ROOT):
     mapping = json.loads((root / "package-files.json").read_text(encoding="utf-8"))
     if not isinstance(mapping, dict) or not mapping:
         raise ValueError("package-files.json must declare the exported sources")
+    files = {destination_key("MANIFEST.json")}  # Generated, never a mapped payload or directory.
+    directories = set()
     for source, destinations in mapping.items():
         if not isinstance(destinations, list) or not destinations:
             raise ValueError(f"Missing package destinations: {source}")
-        for name in [source, *destinations]:
-            if not isinstance(name, str) or not name or "\\" in name or ":" in name:
-                raise ValueError("Package paths must be relative POSIX paths")
-            path = PurePosixPath(name)
-            if path.is_absolute() or ".." in path.parts or path.as_posix() != name or name == ".":
-                raise ValueError(f"Unsafe package path: {name}")
+        package_path(source)
+        for name in destinations:
+            path = package_path(name)
+            key = destination_key(name)
+            parents = {destination_key(parent.as_posix()) for parent in path.parents if parent != PurePosixPath(".")}
+            if key in files or key in directories or parents & files:
+                raise ValueError(f"Conflicting package destination: {name}")
+            files.add(key)
+            directories.update(parents)
     for directory in ["profiles", "skills/github-workflow", "configurations/codex"]:
         base = root / directory
         if base.is_symlink() or not base.is_dir():
@@ -61,8 +86,6 @@ def payloads(root=ROOT):
             raise ValueError(f"Source must remain inside the repository: {source}")
         data = path.read_bytes()
         for destination in destinations:
-            if destination in result:
-                raise ValueError(f"Duplicate package destination: {destination}")
             result[destination] = data
     return result
 

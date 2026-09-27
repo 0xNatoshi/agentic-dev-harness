@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Reject ambiguous package destinations, generated-manifest collisions and Windows-reserved path components before writing output. The v6.4.0 installation payload and published tag are unchanged.
+
 ## 6.4.0
 
 - Establish the private versioned repository from the v6.3.1 distribution.
