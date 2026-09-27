@@ -26,7 +26,7 @@ def require(condition, detail):
 
 
 # An alphabetic top-level label keeps version pins such as action@v4.2.2 out.
-EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})\b")
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})")
 NEUTRAL_DOMAINS = {"example.invalid", "example.com", "example.org", "users.noreply.github.com"}
 NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "git@github.com"}
 
@@ -34,7 +34,7 @@ NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "git@github.com"}
 def check_emails(relative, text):
     for number, line in enumerate(text.splitlines(), 1):
         for match in EMAIL.finditer(line):
-            neutral = match.group(1).lower() in NEUTRAL_DOMAINS or match.group(0).lower() in NEUTRAL_ADDRESSES
+            neutral = match.group(1).lower() in NEUTRAL_DOMAINS or match.group(0).lower().lstrip("_") in NEUTRAL_ADDRESSES
             # Report the location only, so the gate never echoes an address.
             require(neutral, f"Email address outside the neutral allowlist: {relative}:{number}")
 
