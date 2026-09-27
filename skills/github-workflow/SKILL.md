@@ -276,14 +276,30 @@ grep -nF 'TO FILL' <pr-body-file>
 
 After successful git fetch origin, resolve all applicable instructions/imports and run `bash <skill-dir>/scripts/merge-preflight.sh suspension <files...>`: 0 means no known pattern, 1 dated veto, 2 blocking ambiguity/error. It normalizes case, Unicode dashes, NBSP, BOM, CRLF and wrapped lines; ignores only full-line managed blocks and literal date examples; recognizes the v5 and French aliases below; and reads published origin/default AGENTS.md after verifying its tree. Refresh origin first. Zero is not semantic proof of absence. Read all instructions: an applicable free-form restriction missed by the scanner still makes the gate indeterminate (state 2) until context resolves it; current specific authorization may already do so. A scan result is not authorization. Normalize historical French review labels in the current PR to Independent review.
 
+Retain `workflow_sha` from completed final-head checks and reviews; do not replace it with a later observation. Read the final review and deployment inputs:
+
 ```bash
-gh pr view --repo "$workflow_host/$workflow_repo" <pr> --json state,isDraft,mergeable,reviewDecision,reviewRequests,statusCheckRollup,headRefOid,title
-gh pr view --repo "$workflow_host/$workflow_repo" <pr> --comments
-bash <skill-dir>/scripts/merge-preflight.sh reviews <owner> <repo> <pr>
-gh api --hostname "$workflow_host" repos/$workflow_repo/deployments --jq length
-bash <skill-dir>/scripts/merge-preflight.sh pages <owner> <repo>
-git fetch origin && git merge-base --is-ancestor origin/<default> <headRefOid> || exit 2
-gh pr merge --repo "$workflow_host/$workflow_repo" <pr> --<method> --match-head-commit <headRefOid>
+gh pr view --repo "$workflow_host/$workflow_repo" <pr> --json state,isDraft,mergeable,reviewDecision,reviewRequests,statusCheckRollup,headRefOid,title || exit 2
+gh pr view --repo "$workflow_host/$workflow_repo" <pr> --comments || exit 2
+bash <skill-dir>/scripts/merge-preflight.sh reviews <owner> <repo> <pr> || exit 2
+gh api --hostname "$workflow_host" repos/$workflow_repo/deployments --jq length || exit 2
+workflow_pages_status=0
+bash <skill-dir>/scripts/merge-preflight.sh pages <owner> <repo> || workflow_pages_status=$?
+case "$workflow_pages_status" in
+  0) ;;
+  1) printf '%s\n' 'Pages is configured; resolve deployment impact before merge.' ;;
+  *) exit 2 ;;
+esac
+```
+
+Inspect those results against all criteria above before continuing; successful reads alone are not an acceptance verdict. Resolve deployment impact, review findings and required authorizations. Then require the observed head to equal the head whose checks/reviews are complete; missing, malformed or changed evidence blocks:
+
+```bash
+[[ ${workflow_sha:-} =~ ^[0-9a-f]{40}$ ]] || exit 2
+workflow_observed_sha=$(gh pr view --repo "$workflow_host/$workflow_repo" <pr> --json headRefOid --jq .headRefOid) || exit 2
+[ "$workflow_observed_sha" = "$workflow_sha" ] || exit 2
+git fetch origin && git merge-base --is-ancestor origin/<default> "$workflow_sha" || exit 2
+gh pr merge --repo "$workflow_host/$workflow_repo" <pr> --<method> --match-head-commit "$workflow_sha"
 ```
 
 Pages verifies explicit repository existence/origin identity first. Only its real HTTP 404 means no configuration reported. 200 requires deployment-impact analysis; 401/403/5xx/network/read errors block. This does not exclude other deployment integrations.

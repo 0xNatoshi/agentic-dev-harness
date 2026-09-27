@@ -53,7 +53,7 @@ Long work: progress/discoveries/resources in `TASKS.md`, excluded via `.git/info
 
 - Run applicable lint/types/build/tests on consolidated state. Never disable tests, bypass hooks (`--no-verify`), ignore lint, fabricate CI or weaken thresholds/protections. New behavior/fixes need observable-contract/failure-path tests, not implementation/mock mirrors.
 - Prove regressions with the same final test present in isolated unfixed/fixed states: fail without, pass with the fix after necessary rebuilds. Record revisions/commands/results; repeat if the test changes. Preserve uncommitted work.
-- Exercise actual paths, exposed consumers, errors and shared state; cover relevant duplication/ordering/restart/cancellation/partial failure. Tests must be deterministic/independent, without network/order/uncontrolled clock dependencies. Fix flakes; deletion/quarantine needs an issue/user decision, not retries until green.
+- Exercise actual paths, exposed consumers, errors and shared state; cover relevant duplication/ordering/restart/cancellation/partial failure. Tests must be deterministic/independent, without network/order/uncontrolled clock dependencies. Fix flakes; never retry until green. Deletion/quarantine needs the user's decision and a linked issue.
 - Measure before optimizing: reproducible before/after environment/data/trial counts for claimed gains; deterministic counters for CI. Inspect visible changes and attach before/after captures. Distinguish local/simulated/remote/live proof; counts/reviewer agreement do not prove untested paths. Record baseline failures/environment limits; missing required proof keeps draft.
 - Enforce traps with tests/lint/CI, otherwise Known pitfalls. Update docs/contracts. No silent catch, dead/debug code or TODO without linked issue. Justify/pin dependencies. Existing flags need purpose/removal issue; temporary debt needs follow-up.
 
@@ -155,11 +155,12 @@ grep -nE '^[[:space:]]*-[[:space:]]*Independent review:[[:space:]]*(not required
 grep -nF 'TO FILL' <pr-body-file>
 ```
 
-Reread head/checks/protections/feedback/restrictions; execute skill `reviews`/`pages` with verified owner/repository/PR number. Reviews: complete pagination, zero unresolved threads. Pages verifies identity; only real HTTP 404 means absent, 200 needs impact analysis, other errors block. `gh api --hostname "$workflow_host" repos/$workflow_repo/deployments --jq length`: nonzero needs analysis. Inspect other integrations too.
+Keep validated `workflow_sha`; reread checks/protections/feedback/restrictions. Execute skill `reviews`/`pages` with verified owner/repository/PR number. Reviews: complete pagination, zero unresolved threads. Pages verifies identity; only real HTTP 404 means absent, 200 needs impact analysis, other errors block. `gh api --hostname "$workflow_host" repos/$workflow_repo/deployments --jq length`: nonzero needs analysis. Inspect other integrations too.
 
 ```bash
-workflow_sha=$(gh pr view --repo "$workflow_host/$workflow_repo" "$workflow_pr" --json headRefOid --jq .headRefOid) || exit 2
-# Require a nonempty valid final-head SHA with complete evidence above.
+[[ ${workflow_sha:-} =~ ^[0-9a-f]{40}$ ]] || exit 2
+workflow_observed_sha=$(gh pr view --repo "$workflow_host/$workflow_repo" "$workflow_pr" --json headRefOid --jq .headRefOid) || exit 2
+[ "$workflow_observed_sha" = "$workflow_sha" ] || exit 2
 git fetch origin && git merge-base --is-ancestor origin/main "$workflow_sha" || exit 2
 gh pr merge --repo "$workflow_host/$workflow_repo" "$workflow_pr" --squash --match-head-commit "$workflow_sha"
 ```
