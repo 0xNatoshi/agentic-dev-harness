@@ -140,15 +140,16 @@ HOLD_CONTEXT = re.compile(
 SCOPE = re.compile(
     r'\b(?:prs?|mrs?|pull[\s-]+requests?|merge[\s-]+requests?|demandes?\s+de\s+fusion|branch\w*|branche\w*'
     r'|main|master|trunk|default[\s-]+branch\w*|develop|production|release\w*)\b')
-NEVER_EXEMPT = re.compile(r'\bauto[\s-]*merg\w*|\bautomerg\w*|' + MERGE_WORD + r'[\s-]+(?:buttons?|queues?)\b')
+NEVER_EXEMPT = re.compile(r'\bauto[\s-]*merg\w*|' + MERGE_WORD + r'[\s-]+(?:buttons?|queues?)\b')
 # Merge methods; a negated method is cleared only beside a permitted alternative.
 METHOD_PREFIX = re.compile(
     r'\b(?:squash|rebase|fast[\s-]*forward|ff|no-ff|three-way|3-way|octopus|recursive|ort|resolve|subtree)'
     r'(?:\s+and\s+|[\s-]*)$')
 METHOD_FLAG = re.compile(r'\s+--?(?:ff-only|no-ff|ff|squash|no-commit)\b')
-MECHANICS_NOUN = re.compile(
-    r'[\s-]+(?:conflicts?|markers?|bases?|drivers?|tools?|strateg\w*|messages?|parents?|polic\w*|methods?'
-    r'|settings?|options?)\b')
+MECHANICS_NOUN = re.compile(r'[\s-]+(?:conflicts?|markers?|bases?|drivers?|tools?|messages?|parents?)\b')
+# 'No merge method is permitted' bans every choice; 'the merge strategy' only names one.
+CHOICE_NOUN = re.compile(r'[\s-]+(?:strateg\w*|polic\w*|methods?|settings?|options?)\b')
+ANY_BEFORE = re.compile(r'\b(?:any|no|every|all|aucune?|toute?s?)\s*$')
 COMMIT_NOUN = re.compile(r'[\s-]+commits?\b')
 # 'Never merge commits' uses merge as a verb: it restricts what may be merged.
 VERB_BEFORE = re.compile(
@@ -165,6 +166,11 @@ UPSTREAM_SOURCE = re.compile(
     r'|(?:dépôt|depot|remote|projet)\s+(?:upstream|amont|d[’\x27]origine|parent)|upstream)\b')
 UPSTREAM_END = re.compile(
     r'(?:\s*\b(?:directly|wholesale|as[\s-]is|blindly|directement|en\s+bloc|tel\s+quel)\b)*[\s,)\]"\x27»”’]*')
+# Only coordinated git verbs and plain objects may sit between the merge word and the source:
+# 'never merge except from upstream' or 'not even from upstream' still ban merging.
+UPSTREAM_BETWEEN = re.compile(
+    r'(?:[\s,]|\b(?:or|and|et|ou|rebase|onto|cherry-pick\w*|pull|fetch|sync|copy|import|wholesale|directly'
+    r'|blindly|jamais|changes?|commits?|code|updates?|work|the|a|an|des|les|le|la|du|de|in|into)\b)*')
 WIDEN = re.compile(r'\b(?:anywhere|elsewhere|else|other\w*|including|ailleurs|autres?|y\s+compris|notamment)\b')
 SOURCE_WORD = re.compile(r'\b(?:from|depuis)\b')
 LIST_ITEM = re.compile(r'^(\s*)(?:[-*+]|\d{1,9}[.)])(?:\s+|$)')
@@ -173,9 +179,36 @@ FENCE = re.compile(r'^ {0,3}(`{3,}(?!.*`)|~{3,})(.*)$')
 RULE = re.compile(r'^ {0,3}(?:(?:-[ \t]*){3,}|(?:=[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$')
 SETEXT = re.compile(r'^ {0,3}(=+|-+)[ \t]*$')
 QUOTE = re.compile(r'^ {0,3}>[ \t]?')
-# FREE spans at most a few hundred characters, so older context cannot change a result.
+# FREE spans a few hundred characters; the hold and scope checks read only this much context.
 CONTEXT_LIMIT = 600
-LEAD_BLOCKS = 3
+# Bound the work per unit; a longer unit stays blocking.
+WORD_WINDOW = 250
+MAX_MERGE_WORDS = 50
+
+
+def unquote(line):
+    """Drop blockquote prefixes and expand tabs so indentation compares in columns."""
+    while QUOTE.match(line):
+        line = QUOTE.sub('', line, 1)
+    return line.expandtabs(4)
+
+
+def trim(blocks):
+    """Keep the newest blocks that fit the context limit, and at least one."""
+    kept, size = [], 0
+    for block in reversed(blocks):
+        if kept and size + len(block) > CONTEXT_LIMIT:
+            break
+        kept.append(block)
+        size += len(block) + 1
+    return kept[::-1]
+
+
+def label(text):
+    """A list item such as '**Merges:**' or 'Merging' that titles the items after it."""
+    if re.fullmatch(r'(\*\*|__)[^*_]+\1:?', text) or text.rstrip(' *_').endswith(':'):
+        return True
+    return len(text.split()) <= 2 and bool(re.search(MERGE_WORD, text))
 
 
 def terminated(block):
@@ -214,9 +247,13 @@ def units(lines):
         current, block, kind = kind, [], None
         if current == 'item':
             text = LIST_ITEM.sub('', text, 1)
+            sibling = None
             while items and items[-1][0] >= indent:
-                items.pop()
-            pair = context(t for _, t in items), text
+                sibling = items.pop()
+            parents = [t for _, t in items]
+            if sibling and sibling[0] == indent and label(sibling[1]):
+                parents.append(sibling[1])  # '- **Merges:**' labels the next sibling
+            pair = context(parents), text
             items.append((indent, text))
             return pair
         if items and indent:
@@ -224,7 +261,7 @@ def units(lines):
             return context(t for i, t in items if i < indent), text
         if items:
             # Unterminated open items still introduce the block after the list.
-            lead = (lead + [t for _, t in items if not terminated(t)])[-LEAD_BLOCKS:]
+            lead = trim(lead + [t for _, t in items if not terminated(t)])
             items = []
         if current == 'row':
             pair = context([header] if header else []), text
@@ -233,7 +270,7 @@ def units(lines):
         header = None
         pair = context(), text
         body = re.sub(r'<!--|-->', ' ', text).strip() if current == 'comment' else text
-        lead = [] if terminated(body) else (lead + [body])[-LEAD_BLOCKS:]
+        lead = [] if terminated(body) else trim(lead + [body])
         return pair
 
     def enter_heading(level, text):
@@ -246,8 +283,6 @@ def units(lines):
         return pair
 
     for line in lines:
-        while QUOTE.match(line):
-            line = QUOTE.sub('', line, 1)
         stripped = line.strip()
         if fence:
             marker, fenced_context, fenced = fence
@@ -292,17 +327,17 @@ def units(lines):
         yield pair
 
 
-def upstream_source(clause, match):
-    after = clause[match.end():]
+def upstream_source(before, after):
     sources = list(UPSTREAM_SOURCE.finditer(after))
-    if len(sources) != 1 or len(SOURCE_WORD.findall(after)) > 1 or WIDEN.search(clause):
+    if len(sources) != 1 or len(SOURCE_WORD.findall(after)) > 1 or WIDEN.search(before + after):
         return False
-    return bool(UPSTREAM_END.fullmatch(after[sources[0].end():]))
+    between, rest = after[:sources[0].start()], after[sources[0].end():]
+    return bool(UPSTREAM_BETWEEN.fullmatch(between) and UPSTREAM_END.fullmatch(rest))
 
 
-def positive_method(clause, start, end):
-    words = re.findall(r'[\w’\x27-]+', clause[:start])[-3:]
-    if re.match(r'[\s-]*(?:only|uniquement|seulement)\b', clause[end:]):
+def positive_method(before, after):
+    words = re.findall(r'[\w’\x27-]+', before)[-3:]
+    if re.match(r'[\s-]*(?:only|uniquement|seulement)\b', after):
         return not NEGATIVE.intersection(words)
     return bool(POSITIVE.intersection(words)) and not NEGATIVE.intersection(words)
 
@@ -311,20 +346,25 @@ def mechanics_only(unit):
     """True when every merge word in the unit is a git-mechanics term or an upstream-sync clause."""
     plain = re.sub(r'[*_`]', ' ', unit)
     methods = positive = False
+    if len(re.findall(MERGE_WORD, plain)) > MAX_MERGE_WORDS:
+        return False
     for clause in re.split(r'[.!?;:]', plain):
         for match in re.finditer(MERGE_WORD, clause):
-            before, after = clause[:match.start()], clause[match.end():]
+            before = clause[max(0, match.start() - WORD_WINDOW):match.start()]
+            after = clause[match.end():match.end() + WORD_WINDOW]
             prefix = METHOD_PREFIX.search(before)
             commit = COMMIT_NOUN.match(after)
             verb = VERB_BEFORE.search(before)
-            if upstream_source(clause, match):
+            if len(clause) - match.end() <= WORD_WINDOW and upstream_source(before, after):
                 continue
             if prefix or METHOD_FLAG.match(after) or (commit and not verb and not ARTICLE_BEFORE.search(before)):
                 methods = True
-                start = prefix.start() if prefix else match.start()
-                end = match.end() + (commit.end() if commit else 0)
-                positive = positive or positive_method(clause, start, end)
+                start = prefix.start() if prefix else len(before)
+                end = commit.end() if commit else 0
+                positive = positive or positive_method(before[:start], after[end:])
             elif not verb and (MECHANICS_NOUN.match(after) or commit):
+                continue
+            elif not verb and CHOICE_NOUN.match(after) and not ANY_BEFORE.search(before):
                 continue
             elif match.group() == 'fusion' and re.search(r'\bconflits?\s+de\s*$', before):
                 continue
@@ -363,6 +403,7 @@ def scan_normalized(text):
     if managed:
         return 2
     # Whitespace joining recognizes a marker or date wrapped over several lines.
+    outside = [unquote(line) for line in outside]
     joined = re.sub(r'\s+', ' ', '\n'.join(outside))
     joined = EXAMPLE.sub('', joined)
     found = False
@@ -391,19 +432,24 @@ def scan_normalized(text):
 
 
 def hidden_splits(text):
-    """Count in-word invisible characters near merge or pause vocabulary."""
-    count = 0
+    """Count in-word invisible characters near merge or pause vocabulary, up to two."""
     hidden = ''.join(filter(invisible, set(text)))
-    for found in re.finditer('[' + re.escape(hidden) + ']', text) if hidden else ():
+    vocabulary = re.compile(r'merg|fusion|suspen|paus|hold|attente')
+    strip = {ord(c): None for c in hidden}
+    if not hidden or not vocabulary.search(re.sub(r'\s+', '', text.translate(strip)).casefold()):
+        return 0
+    count = 0
+    visible = re.compile('[^' + re.escape(hidden) + ']')
+    for found in re.finditer('[' + re.escape(hidden) + ']', text):
         index = found.start()
-        if not (index and text[index - 1].isalnum()):
+        following = visible.search(text, index + 1)
+        if not (index and text[index - 1].isalnum() and following and following.group().isalnum()):
             continue
-        following = next((x for x in text[index + 1:] if not invisible(x)), '')
-        if not following.isalnum():
-            continue
-        window = ''.join(x for x in text[max(0, index - 40):index + 40] if not x.isspace() and not invisible(x))
-        if re.search(r'merg|fusion|suspen|paus|hold|attente', window.casefold()):
+        window = text[max(0, index - 250):index + 250].translate(strip)
+        if vocabulary.search(re.sub(r'\s+', '', window).casefold()):
             count += 1
+            if count > 1:
+                break
     return count
 
 

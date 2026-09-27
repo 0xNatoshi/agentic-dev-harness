@@ -177,6 +177,23 @@ TEXT_CASES = (
     Case("cleared i.e. is not first person", 0, "- No fast-forward merges, i.e. always use merge commits."),
     Case("cleared blockquote sibling items", 0, "> - Do not add dependencies\n> - Merge requests use squash"),
     Case("clear numbered sibling items", 0, "1. Do not add dependencies\n2. Merge requests use squash"),
+    Case("kept ban except upstream", 2, "Never merge except from upstream."),
+    Case("kept ban even from upstream", 2, "Never merge anything, even from upstream."),
+    Case("kept ban then only upstream sync", 2, "Do not merge anything, only sync from upstream."),
+    Case("kept French only from upstream", 2, "Ne fusionnez que depuis le dépôt amont."),
+    Case("kept French ban even from upstream", 2, "Pas de fusion, même depuis le dépôt amont."),
+    Case("kept no merge method permitted", 2, "No merge method is permitted."),
+    Case("kept label sibling item", 2, "- **Merges:**\n- paused until I approve"),
+    Case("kept distant label lead", 2, "Merging\n\nKeep history linear\n\nSign commits\n\nUse squash\n\nOn hold until further notice."),
+    Case("cleared upstream changes source", 0, "- Never merge changes from the upstream remote."),
+    Case("caught wrapped blockquote veto", 1, "> Autonomous merge\n> suspended — request dated 2026-09-27"),
+    Case("French short date alias", 1, "Merge autonome suspendu — demande du 2026-09-27"),
+    Case("kept ban not even from upstream", 2, "Never merge, not even from upstream."),
+    Case("kept no merge strategy allowed", 2, "No merge strategy is allowed."),
+    Case("kept short label sibling", 2, "- Merges\n- on hold"),
+    Case("kept tab-indented child", 2, "  - Merging\n\t- paused"),
+    Case("kept hold lead-in over blocks", 2, "Until I approve:\n\nA\n\nB\n\nC\n\nNo fast-forward merges; use merge commits."),
+    Case("caught distant invisible splits", 2, "Do​not touch anything in this repository at all, or mer​ge anything, until I approve."),
     Case("conservative method ban alone", 2, "- No merge commits."),
 )
 
@@ -215,8 +232,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 153 or len({case.name for case in ALL_CASES}) != 153:
-    raise RuntimeError("Merge fixture inventory must contain 153 unique cases")
+if len(ALL_CASES) != 170 or len({case.name for case in ALL_CASES}) != 170:
+    raise RuntimeError("Merge fixture inventory must contain 170 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
