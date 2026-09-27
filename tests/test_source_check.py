@@ -73,7 +73,9 @@ class SourceCheckTests(unittest.TestCase):
                         "@".join(["~noreply", "anthropic.com"]), "@".join(["`git", "github.com"]),
                         "@".join(["'git", "github.com"]), "@".join(["{git", "github.com"]),
                         "*" + "@".join(["", "personal-mail.net"]) + "*",
-                        "`" + "@".join(["", "personal-mail.net"]) + "`"]:
+                        "`" + "@".join(["", "personal-mail.net"]) + "`",
+                        "@".join(["person", "example.com2"]), "@".join(["noreply", "anthropic.com-evil"]),
+                        "@".join(["first", "ex\u00e4mple.de"]), "@".join(["noreply", "anthropic.c\u00f6m"])]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
@@ -106,6 +108,8 @@ class SourceCheckTests(unittest.TestCase):
             "mailto:" + "@".join(["noreply", "anthropic.com"]),
             "actions/checkout@v4.2.2",
             "package@1.2.3",
+            "package@v1.2.3-beta.1",
+            "Write to " + "@".join(["noreply", "anthropic.com"]) + ".",
         ]
         with tempfile.TemporaryDirectory(prefix="harness-neutral-email-") as directory:
             root = Path(directory)

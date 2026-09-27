@@ -25,8 +25,12 @@ def require(condition, detail):
         raise ValueError(detail)
 
 
-# An alphabetic top-level label keeps version pins such as action@v4.2.2 out.
-DOMAIN = re.compile(r'@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})')
+# The domain is every dotted label after @, letters in any script included, so a
+# neutral prefix such as example.com2 or anthropic.com-evil cannot pass; a final
+# sentence period is not a label. Version pins such as action@v4.2.2 start with
+# two numeric labels; real address domains rarely do, so they are skipped.
+DOMAIN = re.compile(r'@((?:[^\W_]|-)+(?:\.(?:[^\W_]|-)+)+)')
+VERSION = re.compile(r'[vV]?\d+\.\d+(?:\Z|[.-])')
 # The local part is the token before @, including RFC quoted strings and
 # <placeholder> segments, so punctuation or quoting cannot hide an address;
 # a quoted string never spans whitespace, @ or commas, so `"a", "b@c"` reads as b.
@@ -60,6 +64,8 @@ def check_emails(relative, text):
                 # import such as `@AGENTS.md`.
                 continue
             domain = match.group(1).lower()
+            if VERSION.match(domain):
+                continue
             neutral = domain in NEUTRAL_DOMAINS or f"{local.lower()}@{domain}" in NEUTRAL_ADDRESSES
             # Report the location only, so the gate never echoes an address.
             require(neutral, f"Email address outside the neutral allowlist: {relative}:{number}")
