@@ -1,0 +1,50 @@
+# Contributing and agent handoff
+
+Read [AGENTS.md](AGENTS.md) before Git operations. Use English in repository content, commits, issues, PRs and comments. Conversation language remains a personal preference. Keep private machine paths, personal names, personal email, credentials and runtime settings out of GitHub.
+
+## One owner per implementation
+
+Use an issue for a substantial change. Before starting, read its latest comments, linked/open PRs and matching branches. Record a short claim with agent/application, a neutral session identifier, branch, intended scope and next checkpoint. A claim is coordination evidence, not an atomic lock: reread after posting; if claims conflict, resolve ownership before writing shared code. The same account's assignee cannot distinguish its active sessions.
+
+Do not expire a claim solely because time passed. The current owner hands off explicitly or the user entrusts the work. Independent subtasks get separate file ownership. Reviewers post findings against the PR revision and do not commit to the implementer's branch unless entrusted. Never remove another session's worktree, overwrite its files or close its PR to free resources.
+
+Issue, PR and review updates are part of an explicitly entrusted repository task when the user's authorization covers that collaboration. This guide does not authorize unrelated outreach, messages on the user's behalf or work in other repositories.
+
+## Evidence and review
+
+For a substantive change, link the issue with `Closes #<number>` or `Refs #<number>`, write observable acceptance criteria, and open a draft PR at the first branch push. Include the actual commands/results, exact head, meaningful environment limits and rollback. Use the visible `Independent review` line in the PR template and complete it before marking ready.
+
+Documentation-only work uses self-review and appropriate automatic checks. Executable policy, authorization, CI/hooks or gate changes receive the risk-based review required by AGENTS.md. Findings need a fix or an evidence-backed disposition; significant deltas return to the relevant reviewer. Tests exercise the current source in disposable repositories and never make real GitHub writes.
+
+Run the local gate before delivery:
+
+```bash
+python3 scripts/check.py
+python3 -m unittest discover -s tests -v
+python3 scripts/build.py
+```
+
+A running CI check must finish; a failing check blocks. Use the documented local fallback only after establishing the eligible unstarted-run condition. Never lower protections or fabricate a CI result. A ready entrusted PR satisfying all gates is merged and verified without another ritual go. Explicit holds and other irreversible boundaries retain their effect.
+
+## Handoff comment
+
+Record these facts in the issue or PR so another computer can resume without chat history:
+
+- Current owner and explicitly designated next owner/session.
+- Branch, PR and exact commit SHA; whether the checkout has unpublished work.
+- Acceptance criteria completed and checks actually executed, with results.
+- Remaining work, known limits and the immediate next action.
+- Open review findings or decisions, plus the reason for any real hold.
+- Resources retained, their owner and reevaluation trigger. Keep sensitive local recovery paths in private task tracking.
+
+Progress notes include the next action. Record an explicit project-wide hold in root AGENTS.md outside its managed block as well as the issue/PR; a comment alone may be missed by other sessions.
+
+## Versions, packages and recovery
+
+1. Change canonical source files and tests; preserve authentic historical templates and notices. New exported files require an explicit entry in package-files.json; private configuration never belongs in that list.
+2. Update `VERSION`, the changelog and versioned installation references for a new package. A changed repository template gets a new authentic snapshot and index entry; packaging-only changes do not require a project-template migration.
+3. Run the gate on the final revision and inspect the generated ZIP/manifest. The build neither reads live home-directory configuration nor publishes anything.
+4. Deliver through a reviewed PR, then verify main. An explicitly requested initial empty-repository bootstrap is the one-time exception.
+5. Create a tag or release only within the user's publishing authorization. Never move published tags or overwrite release assets. No automated release publisher is installed.
+
+Rollback a repository change through a revert PR and the same gates. Keep previous version tags. For installed profiles, use the destination guide's verified backups and compare installed hashes before restoring; preserve later changes. The repository contains no private local backups or full Hermes SOUL.

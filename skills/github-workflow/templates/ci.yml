@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [{{DEFAULT_BRANCH}}]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      # {{SETUP_STEP}} — e.g. actions/setup-node@v5 (node-version + cache: npm)
+      #                   or actions/setup-python@v6 (python-version + cache: pip)
+      #                   (GHES: use the latest version available on the instance)
+
+      - name: Install
+        run: {{INSTALL_CMD}}
+
+      - name: Lint
+        run: {{LINT_CMD}}
+
+      - name: Typecheck
+        run: {{TYPECHECK_CMD}}
+
+      - name: Build
+        run: {{BUILD_CMD}}
+
+      - name: Test
+        run: {{TEST_CMD}}

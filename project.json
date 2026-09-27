@@ -1,0 +1,7 @@
+{
+  "name": "dev-harness",
+  "description": "Versioned development workflow, agent profiles and safe delivery tooling for Codex, Claude Code and Hermes",
+  "private": true,
+  "license": "LicenseRef-Proprietary",
+  "repository_template_version": "6.3"
+}

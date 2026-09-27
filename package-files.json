@@ -1,0 +1,110 @@
+{
+  "LICENSE": [
+    "LICENSE"
+  ],
+  "THIRD_PARTY_NOTICES.md": [
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "VERSION": [
+    "VERSION"
+  ],
+  "configurations/codex/agents-config.toml": [
+    "configurations/codex/agents-config.toml"
+  ],
+  "configurations/codex/agents/architect.toml": [
+    "configurations/codex/agents/architect.toml"
+  ],
+  "configurations/codex/agents/explorer.toml": [
+    "configurations/codex/agents/explorer.toml"
+  ],
+  "configurations/codex/agents/operator.toml": [
+    "configurations/codex/agents/operator.toml"
+  ],
+  "configurations/codex/agents/reviewer.toml": [
+    "configurations/codex/agents/reviewer.toml"
+  ],
+  "configurations/codex/agents/worker.toml": [
+    "configurations/codex/agents/worker.toml"
+  ],
+  "docs/INSTALL-CLAUDE.md": [
+    "INSTALL-CLAUDE.md"
+  ],
+  "docs/INSTALL-CODEX.md": [
+    "INSTALL-CODEX.md"
+  ],
+  "docs/STATUS.md": [
+    "STATUS.md"
+  ],
+  "docs/package-README.md": [
+    "README.md"
+  ],
+  "profiles/AGENTS.template.md": [
+    "AGENTS.md",
+    "configurations/codex/AGENTS.md",
+    "configurations/claude-desktop/AGENTS.md"
+  ],
+  "profiles/CLAUDE.template.md": [
+    "CLAUDE.md",
+    "configurations/claude-desktop/CLAUDE.md"
+  ],
+  "profiles/hermes-development.md": [
+    "adaptations/hermes-development.md"
+  ],
+  "skills/github-workflow/SKILL.md": [
+    "skills/github-workflow/SKILL.md"
+  ],
+  "skills/github-workflow/agents/openai.yaml": [
+    "skills/github-workflow/agents/openai.yaml"
+  ],
+  "skills/github-workflow/references/adoption-and-licenses.md": [
+    "skills/github-workflow/references/adoption-and-licenses.md"
+  ],
+  "skills/github-workflow/references/ci-local-gate.md": [
+    "skills/github-workflow/references/ci-local-gate.md"
+  ],
+  "skills/github-workflow/references/development-loop.md": [
+    "skills/github-workflow/references/development-loop.md"
+  ],
+  "skills/github-workflow/references/readme-guide.md": [
+    "skills/github-workflow/references/readme-guide.md"
+  ],
+  "skills/github-workflow/references/workspace-lifecycle.md": [
+    "skills/github-workflow/references/workspace-lifecycle.md"
+  ],
+  "skills/github-workflow/scripts/check-branch-unused.sh": [
+    "skills/github-workflow/scripts/check-branch-unused.sh"
+  ],
+  "skills/github-workflow/scripts/merge-preflight.sh": [
+    "skills/github-workflow/scripts/merge-preflight.sh"
+  ],
+  "skills/github-workflow/scripts/workflow-context.py": [
+    "skills/github-workflow/scripts/workflow-context.py"
+  ],
+  "skills/github-workflow/templates/AGENTS.md": [
+    "skills/github-workflow/templates/AGENTS.md"
+  ],
+  "skills/github-workflow/templates/LICENSE-mit.txt": [
+    "skills/github-workflow/templates/LICENSE-mit.txt"
+  ],
+  "skills/github-workflow/templates/LICENSE-polyform-noncommercial-1.0.0.txt": [
+    "skills/github-workflow/templates/LICENSE-polyform-noncommercial-1.0.0.txt"
+  ],
+  "skills/github-workflow/templates/LICENSE-proprietary.txt": [
+    "skills/github-workflow/templates/LICENSE-proprietary.txt"
+  ],
+  "skills/github-workflow/templates/ci.yml": [
+    "skills/github-workflow/templates/ci.yml"
+  ],
+  "skills/github-workflow/templates/history/AGENTS-v6.1.md": [
+    "skills/github-workflow/templates/history/AGENTS-v6.1.md"
+  ],
+  "skills/github-workflow/templates/history/AGENTS-v6.2.md": [
+    "skills/github-workflow/templates/history/AGENTS-v6.2.md"
+  ],
+  "skills/github-workflow/templates/history/AGENTS-v6.3.md": [
+    "skills/github-workflow/templates/history/AGENTS-v6.3.md"
+  ],
+  "skills/github-workflow/templates/history/INDEX.md": [
+    "skills/github-workflow/templates/history/INDEX.md"
+  ]
+}

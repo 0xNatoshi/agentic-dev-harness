@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Read-only final worktree guard before deleting a verified local branch ref.
+# Exit 0: unused; 1: in use; 2: inventory or operation state cannot be trusted.
+
+branch=${1-}
+if [ -z "$branch" ] || [ "$#" -ne 1 ] || [[ "$branch" == refs/heads/* ]] || ! git check-ref-format "refs/heads/$branch" >/dev/null 2>&1; then
+  printf '%s\n' 'Expected one valid, short branch name.' >&2
+  exit 2
+fi
+ref="refs/heads/$branch"
+common=$(git rev-parse --path-format=absolute --git-common-dir) || exit 2
+[ -n "$common" ] || exit 2
+
+inventory=$(mktemp) || exit 2
+inventory_z=$(mktemp) || { rm -f "$inventory"; exit 2; }
+trap 'rm -f "$inventory" "$inventory_z"' EXIT
+
+# Retain the exact attached-branch check used by the previous guarded command.
+git worktree list --porcelain > "$inventory" || exit 2
+if grep -Fx "branch $ref" "$inventory"; then
+  printf '%s\n' 'Branch is still checked out by a worktree; retain it.' >&2
+  exit 1
+else
+  status=$?
+  [ "$status" -eq 1 ] || exit 2
+fi
+
+# -z keeps worktree paths unambiguous, including whitespace and newlines.
+git worktree list --porcelain -z > "$inventory_z" || exit 2
+
+check_operation_file() {
+  operation=$1
+  file=$2
+  [ -f "$file" ] && [ -r "$file" ] || {
+    printf 'Cannot read %s state: %s\n' "$operation" "$file" >&2
+    exit 2
+  }
+  state=$(cat "$file") || exit 2
+  [ -n "$state" ] || {
+    printf 'Empty %s state: %s\n' "$operation" "$file" >&2
+    exit 2
+  }
+  if [ "$state" = "$ref" ] || [ "$state" = "$branch" ]; then
+    printf 'Branch is in use by %s in %s; retain it.\n' "$operation" "$worktree" >&2
+    exit 1
+  fi
+  case "$state" in
+    refs/heads/*) state_ref=$state ;;
+    *) state_ref="refs/heads/$state" ;;
+  esac
+  git check-ref-format "$state_ref" >/dev/null 2>&1 || {
+    printf 'Unknown %s state: %s\n' "$operation" "$file" >&2
+    exit 2
+  }
+}
+
+check_operation_dir() {
+  operation=$1
+  directory="$gitdir/$operation"
+  if [ -e "$directory" ] || [ -L "$directory" ]; then
+    [ -d "$directory" ] && [ -r "$directory" ] && [ -x "$directory" ] || {
+      printf 'Cannot read %s state in %s\n' "$operation" "$gitdir" >&2
+      exit 2
+    }
+    check_operation_file "$operation" "$directory/head-name"
+  fi
+}
+
+seen=0
+while IFS= read -r -d '' entry; do
+  case "$entry" in
+    worktree\ *)
+      worktree=${entry#worktree }
+      [ -n "$worktree" ] || exit 2
+      seen=$((seen + 1))
+      gitdir=$(git -C "$worktree" rev-parse --absolute-git-dir) || exit 2
+      worktree_common=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir) || exit 2
+      [ "$worktree_common" = "$common" ] || {
+        printf 'Worktree no longer belongs to this repository: %s\n' "$worktree" >&2
+        exit 2
+      }
+      [ -d "$gitdir" ] && [ -r "$gitdir" ] && [ -x "$gitdir" ] || exit 2
+      ls -A "$gitdir" >/dev/null || exit 2
+      check_operation_dir rebase-merge
+      check_operation_dir rebase-apply
+      bisect="$gitdir/BISECT_START"
+      if [ -e "$bisect" ] || [ -L "$bisect" ]; then
+        check_operation_file bisect "$bisect"
+      fi
+      ;;
+    "branch $ref")
+      printf '%s\n' 'Branch became checked out by a worktree; retain it.' >&2
+      exit 1
+      ;;
+  esac
+done < "$inventory_z"
+[ "$seen" -gt 0 ] || {
+  printf '%s\n' 'Empty worktree inventory; retain the branch.' >&2
+  exit 2
+}

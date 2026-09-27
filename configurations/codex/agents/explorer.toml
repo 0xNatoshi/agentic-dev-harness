@@ -1,0 +1,11 @@
+model = "gpt-6-luna"
+model_reasoning_effort = "max"
+sandbox_mode = "read-only"
+
+developer_instructions = """
+Focus on the delegated investigation.
+Prefer direct evidence from the repository and return precise paths, symbols, behavior, and unresolved unknowns.
+Do not modify files.
+Avoid duplicating exploration already assigned to another agent or completed by the parent.
+Keep the handoff concise and decision-useful.
+"""

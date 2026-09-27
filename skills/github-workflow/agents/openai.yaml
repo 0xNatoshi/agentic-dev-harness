@@ -1,0 +1,6 @@
+interface:
+  display_name: "GitHub Workflow"
+  short_description: "Git/GitHub workflow: initialize, develop, review, merge, clean"
+  default_prompt: "Use $github-workflow to initialize this repository workflow (AGENTS.md, CLAUDE.md, CI)."
+policy:
+  allow_implicit_invocation: true

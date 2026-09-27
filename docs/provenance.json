@@ -1,0 +1,30 @@
+{
+  "baseline_version": "6.3.1",
+  "original_archive_sha256": "48d1a0ef5d1a5b7de220dcb1c7ea70d823d18425a2b7c286f5f9fe2b55d2ab6f",
+  "original_manifest_sha256": "e2112651b1714661c51e25152acf2d820743ecaaab863c2f34924c98095688f6",
+  "imported_unchanged_files": {
+    "skills/github-workflow/scripts/workflow-context.py": "0b170fd197631685104efc42cdc698d13e204c81a76e0b89170f4dacaaf2b3e2",
+    "skills/github-workflow/scripts/merge-preflight.sh": "039ebd1cc6b0245edd31a7fcb9cc754fea0f4c3337b0b5315d7d31aa91d3ea06",
+    "skills/github-workflow/scripts/check-branch-unused.sh": "b4025c2af7b36bf3a446cc683f3ab4c8103eda809dc98902e95a1030864c492b",
+    "skills/github-workflow/templates/LICENSE-polyform-noncommercial-1.0.0.txt": "7b1b1c5d4d1f8de290f2cc8923e57af0bd18349b056c23cb6e2b1624554ec086",
+    "skills/github-workflow/templates/LICENSE-mit.txt": "56016cbac6c1d3f565fc854356f6781757254ea34be30a0b75869ae2df0118b6",
+    "skills/github-workflow/templates/LICENSE-proprietary.txt": "564f2fc064e98aa4264d700b66516c6b9877b2876f1f7433af3f57781adbe548",
+    "skills/github-workflow/templates/AGENTS.md": "3eddbb036bbdd28c07954d48a46fb630d9c50e004d48e7e8b62ae748501c1d65",
+    "skills/github-workflow/templates/ci.yml": "94574340dd17282b1775cfa1998e4c09c2b30f8bb560c4ff656cec0302d36eeb",
+    "skills/github-workflow/templates/history/AGENTS-v6.2.md": "b8f56fb3c1ee9ba2b2bd68ede93b8ecdaf56b16bea1c3adc1dc6747dca255c23",
+    "skills/github-workflow/templates/history/AGENTS-v6.3.md": "3eddbb036bbdd28c07954d48a46fb630d9c50e004d48e7e8b62ae748501c1d65",
+    "skills/github-workflow/templates/history/AGENTS-v6.1.md": "762354ef1ec2e7b8e77a105cd5417dd383f754c554a2c67f2079ca987fbdde8f",
+    "configurations/codex/agents/operator.toml": "1694f87974fbbbc14ecdddceee89d0260dc9a24517ee6920d69a0915ae4ea390",
+    "configurations/codex/agents/explorer.toml": "c05c2259e8cf30dd2ab50039f0ab5124c9245890360633779fb65101b7d34961",
+    "configurations/codex/agents/reviewer.toml": "3cde1a78f3215540d43e867751608e4b0f018af199986211f27c3708940225a7",
+    "configurations/codex/agents/architect.toml": "ffc5f07f9ab595614a3a31a16df205f7dbe572e80b40339d8589a4a0948c38ba",
+    "configurations/codex/agents/worker.toml": "f9ce0490c395a7ad0992782a7ad4455bc0a5fcb800be00aa418e4bd6000c759f"
+  },
+  "changes": "Versioned repository layout, neutral common profile, portable build/checks and collaboration templates. Baseline local-install receipts and personal backups are not repository source. The history index records the privacy exclusion of the authentic v6 snapshot; no sanitized file is misrepresented as that historical snapshot.",
+  "excluded_source_files": {
+    "skills/github-workflow/templates/history/AGENTS-v6.md": {
+      "sha256": "98413fbcddd38142f0a6c045eed9704e725fa109427e9a83173de55b718c4bc0",
+      "reason": "Contains personal wording; exact original retained in the pre-repository private distribution, not published or rewritten."
+    }
+  }
+}

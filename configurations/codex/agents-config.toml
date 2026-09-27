@@ -1,0 +1,26 @@
+# Merge this fragment into the active Codex config.toml; do not replace that file.
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 6
+default_subagent_model = "gpt-6-sol"
+default_subagent_reasoning_effort = "xhigh"
+
+[agents.explorer]
+description = "Use for targeted codebase exploration, call-site discovery, dependency mapping, evidence gathering, and answering precise questions before implementation."
+config_file = "./agents/explorer.toml"
+
+[agents.worker]
+description = "Use for bounded implementation work: features, bug fixes, refactors, and test changes with clear ownership and an expected result."
+config_file = "./agents/worker.toml"
+
+[agents.reviewer]
+description = "Use for an independent review of a change: correctness, regressions, contract violations, missing validation, and concrete risk before integration."
+config_file = "./agents/reviewer.toml"
+
+[agents.architect]
+description = "Use for difficult architecture, invariants, cross-component design, ambiguous root-cause analysis, or a high-value independent counter-analysis before a consequential change."
+config_file = "./agents/architect.toml"
+
+[agents.operator]
+description = "Use for routine deterministic operational work with low reasoning demand: Git plumbing, prescribed commands/checks, formatting, straightforward file operations, and repository housekeeping when the target action is already clear."
+config_file = "./agents/operator.toml"
