@@ -261,6 +261,11 @@ TEXT_CASES = (
     Case("kept method rule contradicted by nor", 2, "No squash merges; use merge commits. Nor commits."),
     Case("kept method rule contradicted by retraction", 2,
          "Use merge commits; never squash-merge. Or rather, do not commit."),
+    Case("kept method banned then permitted", 2, "Do not use squash merges; use squash merges."),
+    Case("kept method banned then permitted in one clause", 2, "Never use squash merges, use squash merges."),
+    Case("kept method permitted then banned", 2, "Use rebase merges. Never use rebase merges."),
+    Case("kept merge commits banned then permitted", 2, "No merge commits; use merge commits."),
+    Case("kept French method banned then permitted", 2, "Pas de squash merge ; utilisez le squash merge."),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -298,8 +303,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 214 or len({case.name for case in ALL_CASES}) != 214:
-    raise RuntimeError("Merge fixture inventory must contain 214 unique cases")
+if len(ALL_CASES) != 219 or len({case.name for case in ALL_CASES}) != 219:
+    raise RuntimeError("Merge fixture inventory must contain 219 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

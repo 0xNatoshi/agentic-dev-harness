@@ -175,6 +175,11 @@ MECHANICS_CONTENT = {
     'branch', 'branches', 'branche', 'cherry', 'pick', 'upstream', 'remote', 'sync', 'history', 'linear',
     'historique', 'linéaire'}
 METHOD_CONTENT = {'rebase', 'rebases', 'rebasing', 'squash', 'commit', 'commits', 'fast', 'forward', 'ff'}
+# One identity per merge method, so a rule that bans and permits the same method is caught.
+METHOD_KEYS = {
+    'squash': 'squash', 'rebase': 'rebase', 'rebases': 'rebase', 'fast': 'ff', 'forward': 'ff', 'ff': 'ff',
+    'three': 'three-way', '3': 'three-way', 'octopus': 'octopus', 'recursive': 'recursive', 'ort': 'ort',
+    'resolve': 'resolve', 'subtree': 'subtree', 'commit': 'commit', 'commits': 'commit'}
 BARE_TOKENS = METHOD_TOKENS | MECHANICS_CONTENT | {'them', 'it'}
 # A hold sentence right after a cleared method rule may qualify that rule.
 FOLLOW_HOLD = re.compile(
@@ -369,7 +374,7 @@ def upstream_source(before, after):
 
 
 def permitted_method(clause):
-    """None if the clause is not plain method wording, else whether it permits a method.
+    """None if the clause is not plain method wording, else its (permitted, banned) method sets.
 
     Polarity is read per comma or 'but' segment from its start; a segment with
     neither polarity word continues the previous one, so 'never use squash
@@ -378,22 +383,26 @@ def permitted_method(clause):
     words = re.findall(r'[^\W_]+', clause)
     if not set(words) <= METHOD_TOKENS:
         return None
-    permitted, polarity = False, None
+    permitted, banned, polarity = set(), set(), None
     for segment in re.split(r',|\b(?:but|mais|instead|plutôt)\b', clause):
         tokens = set(re.findall(r'[^\W_]+', segment))
         if tokens & NEGATIVE:
             polarity = False
         elif tokens & POSITIVE:
             polarity = True
-        if polarity and re.search(MERGE_WORD + r'|\bcommits?\b', segment):
-            permitted = True
-    return permitted
+        keys = {METHOD_KEYS[token] for token in tokens & METHOD_KEYS.keys()}
+        if polarity is False:
+            banned |= keys or {'merge'}
+        elif polarity and re.search(MERGE_WORD + r'|\bcommits?\b', segment):
+            permitted |= keys or {'merge'}
+    return permitted, banned
 
 
 def mechanics_only(unit):
     """True when every merge word in the unit is a git-mechanics term or an upstream-sync clause."""
     plain = re.sub(r'[*_`]', ' ', unit)
-    methods = positive = False
+    methods = False
+    permitted, banned = set(), set()
     if len(re.findall(MERGE_WORD, plain)) > MAX_MERGE_WORDS:
         return False
     # 'i.e.' restates the rule inside one clause.
@@ -432,11 +441,14 @@ def mechanics_only(unit):
             else:
                 return False
         if method_clause:
-            permitted = permitted_method(clause)
-            if permitted is None:
+            polarity = permitted_method(clause)
+            if polarity is None:
                 return False
-            methods, positive = True, positive or permitted
-    return positive or not methods
+            methods = True
+            permitted |= polarity[0]
+            banned |= polarity[1]
+    # 'Do not use squash merges; use squash merges.' contradicts itself, so it stays blocking.
+    return not (permitted & banned) and (bool(permitted) or not methods)
 
 
 def free_restriction(context, unit):
