@@ -16,222 +16,217 @@ import sys
 
 GUIDE = Path("skills/github-workflow")
 SHELL_FENCES = {"", "bash", "sh", "shell", "zsh", "console"}
-PR_SELECTORS = {
-    "checkout", "checks", "close", "comment", "diff", "edit", "lock", "merge",
-    "ready", "reopen", "revert", "review", "unlock", "update-branch", "view",
-}
-RUN_IDS = {"cancel", "delete", "download", "rerun", "view", "watch"}
-REPO_POSITIONALS = {"view", "edit"}
 # Recognized command options from gh 2.86 help. Unknown commands/options fail
 # closed until their documented contract is added. Inherited flags are added
 # by _options; the merge-method placeholder is guidance syntax, not a CLI flag.
-# Each tuple holds valued flags, Boolean flags and the maximum positional count;
-# None preserves the documented variadic issue-edit form.
+# Each tuple holds valued flags, Boolean flags and (minimum, maximum) operands.
+# Workflow minima require explicit PR/run/repository targets even where gh can
+# infer one. None preserves the documented variadic issue-edit form.
 GH_OPTIONS = {
     'pr create': (
         '-a --assignee -B --base -b --body -F --body-file -H --head -l --label -m --milestone -p '
         '--project --recover -r --reviewer -T --template -t --title',
         '-d --draft --dry-run -e --editor -f --fill --fill-first --fill-verbose '
         '--no-maintainer-edit -w --web',
-        0,
+        (0, 0),
     ),
     'pr list': (
         '--app -a --assignee -A --author -B --base -H --head -q --jq --json -l --label -L --limit '
         '-S --search -s --state -t --template',
         '-d --draft -w --web',
-        0,
+        (0, 0),
     ),
     'pr status': (
         '-q --jq --json -t --template',
         '-c --conflict-status',
-        0,
+        (0, 0),
     ),
     'pr checkout': (
         '-b --branch',
         '--detach -f --force --recurse-submodules',
-        1,
+        (1, 1),
     ),
     'pr checks': (
         '-i --interval -q --jq --json -t --template',
         '--fail-fast --required --watch -w --web',
-        1,
+        (1, 1),
     ),
     'pr close': (
         '-c --comment',
         '-d --delete-branch',
-        1,
+        (1, 1),
     ),
     'pr comment': (
         '-b --body -F --body-file',
         '--create-if-none --delete-last --edit-last -e --editor -w --web --yes',
-        1,
+        (1, 1),
     ),
     'pr diff': (
         '--color',
         '--name-only --patch -w --web',
-        1,
+        (1, 1),
     ),
     'pr edit': (
         '--add-assignee --add-label --add-project --add-reviewer -B --base -b --body -F '
         '--body-file -m --milestone --remove-assignee --remove-label --remove-project '
         '--remove-reviewer -t --title',
         '--remove-milestone',
-        1,
+        (1, 1),
     ),
     'pr lock': (
         '-r --reason',
         '',
-        1,
+        (1, 1),
     ),
     'pr merge': (
         '-A --author-email -b --body -F --body-file --match-head-commit -t --subject',
         '--admin --auto -d --delete-branch --disable-auto -m --merge -r --rebase -s --squash '
         '--<method>',
-        1,
+        (1, 1),
     ),
     'pr ready': (
         '',
         '--undo',
-        1,
+        (1, 1),
     ),
     'pr reopen': (
         '-c --comment',
         '',
-        1,
+        (1, 1),
     ),
     'pr revert': (
         '-b --body -F --body-file -t --title',
         '-d --draft',
-        1,
+        (1, 1),
     ),
     'pr review': (
         '-b --body -F --body-file',
         '-a --approve -c --comment -r --request-changes',
-        1,
+        (1, 1),
     ),
     'pr unlock': (
         '',
         '',
-        1,
+        (1, 1),
     ),
     'pr update-branch': (
         '',
         '--rebase',
-        1,
+        (1, 1),
     ),
     'pr view': (
         '-q --jq --json -t --template',
         '-c --comments -w --web',
-        1,
+        (1, 1),
     ),
     'run cancel': (
         '',
         '--force',
-        1,
+        (1, 1),
     ),
     'run delete': (
         '',
         '',
-        1,
+        (1, 1),
     ),
     'run download': (
         '-D --dir -n --name -p --pattern',
         '',
-        1,
+        (1, 1),
     ),
     'run list': (
         '-b --branch -c --commit --created -e --event -q --jq --json -L --limit -s --status -t '
         '--template -u --user -w --workflow',
         '-a --all',
-        0,
+        (0, 0),
     ),
     'run rerun': (
         '-j --job',
         '-d --debug --failed',
-        1,
+        (1, 1),
     ),
     'run view': (
         '-a --attempt -j --job -q --jq --json -t --template',
         '--exit-status --log --log-failed -v --verbose -w --web',
-        1,
+        (1, 1),
     ),
     'run watch': (
         '-i --interval',
         '--compact --exit-status',
-        1,
+        (1, 1),
     ),
     'issue close': (
         '-c --comment -r --reason',
         '',
-        1,
+        (1, 1),
     ),
     'issue comment': (
         '-b --body -F --body-file',
         '--create-if-none --delete-last --edit-last -e --editor -w --web --yes',
-        1,
+        (1, 1),
     ),
     'issue create': (
         '-a --assignee -b --body -F --body-file -l --label -m --milestone -p --project --recover '
         '-T --template -t --title',
         '-e --editor -w --web',
-        0,
+        (0, 0),
     ),
     'issue delete': (
         '',
         '--yes',
-        1,
+        (1, 1),
     ),
     'issue develop': (
         '-b --base --branch-repo -n --name',
         '-c --checkout -l --list',
-        1,
+        (1, 1),
     ),
     'issue edit': (
         '--add-assignee --add-label --add-project -b --body -F --body-file -m --milestone '
         '--remove-assignee --remove-label --remove-project -t --title',
         '--remove-milestone',
-        None,
+        (1, None),
     ),
     'issue list': (
         '--app -a --assignee -A --author -q --jq --json -l --label -L --limit --mention -m '
         '--milestone -S --search -s --state -t --template',
         '-w --web',
-        0,
+        (0, 0),
     ),
     'issue lock': (
         '-r --reason',
         '',
-        1,
+        (1, 1),
     ),
     'issue reopen': (
         '-c --comment',
         '',
-        1,
+        (1, 1),
     ),
     'issue status': (
         '-q --jq --json -t --template',
         '',
-        0,
+        (0, 0),
     ),
     'issue transfer': (
         '',
         '',
-        2,
+        (2, 2),
     ),
     'issue unlock': (
         '',
         '',
-        1,
+        (1, 1),
     ),
     'issue view': (
         '-q --jq --json -t --template',
         '-c --comments -w --web',
-        1,
+        (1, 1),
     ),
     'repo view': (
         '-b --branch -q --jq --json -t --template',
         '-w --web',
-        1,
+        (1, 1),
     ),
     'repo edit': (
         '--add-topic --default-branch -d --description -h --homepage --remove-topic --visibility',
@@ -240,12 +235,12 @@ GH_OPTIONS = {
         '--enable-discussions --enable-issues --enable-merge-commit --enable-projects '
         '--enable-rebase-merge --enable-secret-scanning --enable-secret-scanning-push-protection '
         '--enable-squash-merge --enable-wiki --template',
-        1,
+        (1, 1),
     ),
     'repo set-default': (
         '',
         '-u --unset -v --view',
-        1,
+        (1, 1),
     ),
 }
 CONTROL = {";", ";;", ";&", ";;&", "&&", "||", "|", "|&", "&", "(", ")"}
@@ -384,7 +379,7 @@ def _option_value(flag, value):
 
 
 def _options(args, command):
-    """Return positional words, valued flags, missing values and unknown flags."""
+    """Return operands, option values/switches and malformed-input evidence."""
     value_options, boolean_options, _ = GH_OPTIONS[command]
     value_flags = set(value_options.split())
     boolean_flags = set(boolean_options.split()) | {"--help"}
@@ -392,6 +387,7 @@ def _options(args, command):
         value_flags.update({"--repo", "-R"})
     positional = []
     valued = {}
+    switches = set()
     missing = set()
     unknown = set()
     args, incomplete = _without_redirections(args)
@@ -420,7 +416,7 @@ def _options(args, command):
             else:
                 missing.add(flag)
         elif flag in boolean_flags and not equal:
-            pass
+            switches.add(flag)
         elif word.startswith("-"):
             # An unknown flag may consume the next word. Never let that word
             # silently satisfy a selector/ID check.
@@ -428,7 +424,7 @@ def _options(args, command):
         elif not word.startswith("-"):
             positional.append(word)
         index += 1
-    return positional, valued, missing, unknown, incomplete
+    return positional, valued, switches, missing, unknown, incomplete
 
 
 def _direct_python(tail, *, windows_launcher=False):
@@ -484,14 +480,27 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
         if len(tail) < 2 or tail[0] not in {"pr", "run", "issue", "repo"}:
             continue
         family, subcommand = tail[:2]
-        if "/" in subcommand or "|" in subcommand:
-            continue
         command_name = f"{family} {subcommand}"
         if command_name not in GH_OPTIONS:
             findings.append(Diagnostic(file, line, f"unsupported gh command {command_name}; cannot verify command operands"))
             continue
-        positional, valued, missing, unknown, incomplete = _options(tail[2:], command_name)
-        maximum = GH_OPTIONS[command_name][2]
+        positional, valued, switches, missing, unknown, incomplete = _options(tail[2:], command_name)
+        minimum, maximum = GH_OPTIONS[command_name][2]
+        default_view = command_name == "repo set-default" and bool(switches & {"--view", "-v"})
+        default_unset = command_name == "repo set-default" and bool(switches & {"--unset", "-u"})
+        if default_view or default_unset:
+            minimum, maximum = 0, 0
+        if origin_comparison:
+            minimum = 0
+        if default_unset:
+            findings.append(Diagnostic(file, line, "gh repo set-default --unset is outside the verified-origin repair; supply the verified target instead"))
+        if len(positional) < minimum:
+            detail = {
+                "pr": "needs an explicit PR selector",
+                "run": "needs an explicit run ID",
+                "repo": "needs an explicit repository",
+            }.get(family, f"needs at least {minimum} positional operands")
+            findings.append(Diagnostic(file, line, f"gh {command_name} {detail}"))
         if maximum is not None and len(positional) > maximum:
             findings.append(Diagnostic(file, line, f"gh {command_name} accepts at most {maximum} positional operands; found {len(positional)}"))
         if incomplete:
@@ -510,12 +519,8 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
                 findings.append(Diagnostic(file, line, f"gh {family} {subcommand} needs a valued --repo"))
             elif not ORIGIN_REPO.fullmatch(repository):
                 findings.append(Diagnostic(file, line, f"gh {family} {subcommand} --repo must target the verified origin"))
-        if family == "pr" and subcommand in PR_SELECTORS and not positional:
-            findings.append(Diagnostic(file, line, f"gh pr {subcommand} needs an explicit PR selector"))
-        if family == "run" and subcommand in RUN_IDS and not positional:
-            findings.append(Diagnostic(file, line, f"gh run {subcommand} needs an explicit run ID"))
-        if family == "repo" and subcommand in REPO_POSITIONALS and not any(ORIGIN_REPO.fullmatch(value) for value in positional) and not origin_comparison:
-            findings.append(Diagnostic(file, line, f"gh repo {subcommand} needs an explicit repository"))
+        if family == "repo" and positional and not (origin_comparison or default_view or default_unset) and not ORIGIN_REPO.fullmatch(positional[0]):
+            findings.append(Diagnostic(file, line, f"gh repo {subcommand} needs an explicit repository matching the verified origin"))
         if "--match-head-commit" in missing:
             findings.append(Diagnostic(file, line, "--match-head-commit needs a commit value"))
     return findings
