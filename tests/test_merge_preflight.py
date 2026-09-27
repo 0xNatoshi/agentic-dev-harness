@@ -351,7 +351,18 @@ TEXT_CASES = (
     Case("kept lead-in with a second negation", 2, "- Never, not even once\n- merge PRs"),
     Case("kept French aucun lead-in", 2, "- En aucun cas\n- fusionner"),
     Case("kept French pretext lead-in", 2, "- Sous aucun prétexte\n- fusionner les PR"),
-    Case("cleared negated noun item beside merge method", 0, "- Tests must pass\n- No exceptions\n- Merge with squash"),
+    Case("conservative one-word negated item beside merge method", 2,
+         "- Tests must pass\n- No exceptions\n- Merge with squash"),
+    Case("cleared negated noun item beside merge method", 0, "- Tests must pass\n- No exceptions for docs\n- Merge with squash"),
+    Case("kept idiom negated lead-in", 2, "- Under no circumstances\n- merge pull requests"),
+    Case("kept at-no-time lead-in", 2, "- At no time\n- merge pull requests"),
+    Case("kept by-no-means lead-in", 2, "- By no means\n- merge pull requests"),
+    Case("kept qualified idiom lead-in", 2, "- At no point in time\n- merge PRs"),
+    Case("kept one-word negated lead-in", 2, "- Do not proceed\n- merge pull requests"),
+    Case("kept determiner negated lead-in", 2, "- Do not do such things\n- merge PRs"),
+    Case("kept French moment lead-in", 2, "- À aucun moment\n- fusionner les PR"),
+    Case("kept negated lead-in between table rows", 2, "| Rule |\n|---|\n| Do not do the following |\n| merge PRs |"),
+    Case("kept idiom lead-in between table rows", 2, "| Rule |\n|---|\n| Under no circumstances |\n| merge PRs |"),
     Case("cleared French negated rule beside merge method", 0, "- Ne pas ajouter de dépendances\n- Merges use squash"),
     Case("kept wait directive across list items", 2, "- Wait before\n- merging pull requests"),
     Case("kept hold directive across list items", 2, "- Hold off on\n- merging anything"),
@@ -405,8 +416,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 303 or len({case.name for case in ALL_CASES}) != 303:
-    raise RuntimeError("Merge fixture inventory must contain 303 unique cases")
+if len(ALL_CASES) != 313 or len({case.name for case in ALL_CASES}) != 313:
+    raise RuntimeError("Merge fixture inventory must contain 313 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

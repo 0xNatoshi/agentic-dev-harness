@@ -275,20 +275,28 @@ def label(text):
 
 LEAD_LIMIT = 120
 NEGATION = r'\b(?:not|never|no|avoid|don[’\x27]t|jamais|pas|ne|aucune?)\b'
-# A negation whose next word is an adverb, preposition or determiner qualifies what
-# follows instead of naming what it forbids: '- Never, ever again', '- Never under any
-# circumstances', '- En aucun cas'. A content word ('- Do not add dependencies',
-# '- No secrets in commits') makes the item a complete rule of its own.
+# A negation whose next word is an adverb, preposition, determiner or idiom noun
+# qualifies what follows instead of naming what it forbids: '- Never, ever again',
+# '- Never under any circumstances', '- Do not do such things', '- En aucun cas'.
+# A content word ('- Do not add dependencies', '- No secrets in commits') makes the
+# item a complete rule of its own.
 LEAD_START = (r'(?:again|ever|even|any|anymore|at|all|under|in|on|for|by|with|without|'
               r'from|during|before|after|until|unless|while|when|whatsoever|regardless|really|simply|'
-              r'just|now|yet|today|once|whatever|whenever|except|outside|beyond|within|au|aux|à|en|'
-              r'sous|dans|pour|sans|avant|après|pendant|aucune?|cas|prétexte|'
-              r'circonstances?|conditions?|raison|du|tout|encore|même|maintenant)')
+              r'just|now|yet|today|once|whatever|whenever|except|outside|beyond|within|'
+              r'the|this|that|these|those|such|circumstances?|conditions?|cases?|account|means|'
+              r'times?|point|event|ways?|matter|reason|pretext|excuse|'
+              r'au|aux|à|en|sous|dans|pour|sans|avant|après|pendant|aucune?|cas|prétexte|'
+              r'circonstances?|raison|moment|façon|manière|sorte|du|tout|encore|même|maintenant|'
+              r'le|la|les|ce|cet|cette|ces|cela|ça|ceci)')
 LEAD_GAP = r'[\s;,:()\-–—>]'
 BARE_LEAD = re.compile(r'.*' + NEGATION + r'(?:\s+(?:do|faire|faites|fais))?'
                        r'(?:' + LEAD_GAP + r'+' + LEAD_START + r'\b.*|' + LEAD_GAP + r'*)')
 POINTER_LEAD = re.compile(
     NEGATION + r'.*\b(?:following|below|these|those|this|suivante?s?|ci[\s-]dessous|ces|ceci)\b')
+# A preposition before the negation marks an idiom: '- Under no circumstances',
+# '- At no point', '- By no means', '- D’aucune façon'.
+IDIOM_LEAD = re.compile(r'(?:under|at|in|by|on|for|en|à|sous|dans|pour|de|d[’\x27])\s*(?:no|aucune?)\b')
+FUNCTION_WORD = re.compile(LEAD_START + r'|of|it|them|to|a|an|do|faire|faites|fais|de|d|l|un|une|des')
 
 
 def negated_lead(text):
@@ -303,8 +311,17 @@ def negated_lead(text):
     # Lead-ins are short; the bound also keeps the backtracking patterns cheap.
     if len(plain) > LEAD_LIMIT or terminated(text) or re.search(MERGE_WORD, plain):
         return False
-    return bool(BARE_LEAD.fullmatch(plain) or POINTER_LEAD.search(plain)
-                or re.search(NEGATION, plain) and HOLD_CONTEXT.search(plain))
+    negations = list(re.finditer(NEGATION, plain))
+    if not negations:
+        return False
+    # A complete rule names at least two content words after its negation
+    # ('- Do not add dependencies', '- No secrets in commits'); with fewer it
+    # names nothing it forbids on its own ('- Do not proceed', '- No exceptions
+    # whatsoever', '- Do not do such things').
+    words = re.findall(r'[^\W_]+', plain[negations[-1].end():])
+    content = [word for word in words if not FUNCTION_WORD.fullmatch(word)]
+    return bool(len(content) <= 1 or BARE_LEAD.fullmatch(plain)
+                or IDIOM_LEAD.match(plain) or POINTER_LEAD.search(plain) or HOLD_CONTEXT.search(plain))
 
 
 def terminated(block):
@@ -331,6 +348,7 @@ def units(lines, hold_found):
     items = []     # (indent, text) of the open list item chain
     intros = set()  # indents whose list holds a negated lead-in item so far
     header = None  # first row of the current table
+    row_intro = False  # the current table holds a negated lead-in row so far
     block, kind, indent = [], None, 0
     fence = None   # (marker, context, lines) of an open fenced block
     run = collections.deque()  # (text, words) of recent adjacent list items and table rows
@@ -384,7 +402,7 @@ def units(lines, hold_found):
         run_size = 0
 
     def flush():
-        nonlocal block, kind, lead, items, header
+        nonlocal block, kind, lead, items, header, row_intro
         if not block:
             return None
         text = ' '.join(part.strip() for part in block)
@@ -420,12 +438,16 @@ def units(lines, hold_found):
             items = []
             intros.clear()
         if current == 'row':
+            if row_intro and re.search(MERGE_WORD, text):
+                hold_found()  # '| Do not do the following |' above '| merge PRs |'
             pair = context([header] if header else []), text
+            if header and negated_lead(text.replace('|', ' ')):
+                row_intro = True
             # Adjacent lists and tables share one run, as a whole-file reading would.
             extend_run(text)
             header = header or text
             return pair
-        header = None
+        header, row_intro = None, False
         end_run()
         pair = context(), text
         body = re.sub(r'<!--|-->', ' ', text).strip() if current == 'comment' else text
@@ -433,12 +455,12 @@ def units(lines, hold_found):
         return pair
 
     def enter_heading(level, text):
-        nonlocal lead, items, header
+        nonlocal lead, items, header, row_intro
         while headings and headings[-1][0] >= level:
             headings.pop()
         pair = context(), text
         headings.append((level, text[:CONTEXT_LIMIT]))
-        lead, items, header = [], [], None
+        lead, items, header, row_intro = [], [], None, False
         intros.clear()
         end_run()
         return pair
