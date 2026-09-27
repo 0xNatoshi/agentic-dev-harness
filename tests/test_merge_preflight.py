@@ -335,6 +335,18 @@ TEXT_CASES = (
     Case("kept French negated lead-in with hold", 2, "- Ne faites pas ceci sans mon accord\n- fusionner les PR"),
     Case("kept negated lead-in beside a long parent", 2,
          "- " + ("Without me the notes" + " the notes cover tags and docs for every contributor" * 20)[:590] + "\n  - Never do the following\n  - no rebase merges, use squash merges"),
+    Case("kept lead-in over a later hold-bearing sibling", 2,
+         "- Do not do the following\n- force-push to main, not even for me\n- merge pull requests"),
+    Case("kept lead-in over a later dated sibling", 2, "- Do not do the following\n- push to main, not today\n- merge PRs"),
+    Case("kept lead-in over a later review sibling", 2,
+         "- Do not do the following\n- avoid force pushes without my review\n- merge pull requests"),
+    Case("kept lead-in over a later bare negation", 2, "- Do not do the following\n- Not now\n- merge"),
+    Case("kept French lead-in over a later sibling", 2,
+         "- Ne faites pas ceci\n- pousser sur main, jamais sans moi\n- fusionner les PR"),
+    Case("kept qualified negated lead-in", 2, "- Never under any circumstances\n- merge pull requests"),
+    Case("kept intensified negated lead-in", 2, "- Never, ever\n- merge PRs"),
+    Case("kept bracketed intensifier lead-in", 2, "- Never (ever)\n- merge PRs"),
+    Case("kept arrow negated lead-in", 2, "- Never ->\n- merge PRs"),
     Case("kept wait directive across list items", 2, "- Wait before\n- merging pull requests"),
     Case("kept hold directive across list items", 2, "- Hold off on\n- merging anything"),
     Case("kept stop directive across table rows", 2, "| Rule |\n| --- |\n| Stop |\n| merging |"),
@@ -387,8 +399,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 288 or len({case.name for case in ALL_CASES}) != 288:
-    raise RuntimeError("Merge fixture inventory must contain 288 unique cases")
+if len(ALL_CASES) != 297 or len({case.name for case in ALL_CASES}) != 297:
+    raise RuntimeError("Merge fixture inventory must contain 297 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

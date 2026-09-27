@@ -275,7 +275,13 @@ def label(text):
 
 LEAD_LIMIT = 120
 NEGATION = r'\b(?:not|never|no|avoid|don[’\x27]t|jamais|pas|ne)\b'
-BARE_LEAD = re.compile(r'.*' + NEGATION + r'(?:\s+(?:do|ever|faire|faites|fais))?[\s;,:()\-]*')
+# Words that qualify a negation without saying what it forbids: '- Never, ever',
+# '- Never under any circumstances' or '- Do not, at all' still need the next item.
+QUALIFIER = (r'(?:do|ever|faire|faites|fais|under|any|no|circumstances?|conditions?|cases?|situations?|'
+             r'exceptions?|reason|account|time|event|whatsoever|at|all|in|on|for|the|a|en|aucune?|cas|'
+             r'sous|circonstances?|prétexte|du|tout)')
+LEAD_GAP = r'[\s;,:()\-–—>]'
+BARE_LEAD = re.compile(r'.*' + NEGATION + r'(?:' + LEAD_GAP + r'+' + QUALIFIER + r')*' + LEAD_GAP + r'*')
 POINTER_LEAD = re.compile(
     NEGATION + r'.*\b(?:following|below|these|those|this|suivante?s?|ci[\s-]dessous|ces|ceci)\b')
 
@@ -283,10 +289,10 @@ POINTER_LEAD = re.compile(
 def negated_lead(text):
     """A negated list item that introduces its later siblings.
 
-    It is a bare negation ('- Never,'), points forward ('- Do not do the
-    following for now' above '- merge pull requests') or carries hold wording
-    ('- Do not, until I approve'); a complete rule such as '- Do not add
-    dependencies' does not.
+    It is a bare or only qualified negation ('- Never,', '- Never under any
+    circumstances'), points forward ('- Do not do the following for now' above
+    '- merge pull requests') or carries hold wording ('- Do not, until I
+    approve'); a complete rule such as '- Do not add dependencies' does not.
     """
     plain = text.strip(' \t*_`:')
     # Lead-ins are short; the bound also keeps the backtracking patterns cheap.
@@ -311,13 +317,14 @@ def units(lines, hold_found):
     and a table's header row. Sibling list items and table data rows never give
     each other context. A fenced block is one unit.
 
-    hold_found is called once when a pause or approval restriction spreads over
-    adjacent list items and table rows.
+    hold_found is called when a pause or approval restriction spreads over
+    adjacent list items and table rows, or when a merge item follows a negated
+    lead-in item of the same list.
     """
     headings = []  # (level, text) of the current heading path
     lead = []      # unterminated blocks that introduce what follows
     items = []     # (indent, text) of the open list item chain
-    intros = {}    # indent -> latest negated lead-in item, for its later siblings
+    intros = set()  # indents whose list holds a negated lead-in item so far
     header = None  # first row of the current table
     block, kind, indent = [], None, 0
     fence = None   # (marker, context, lines) of an open fenced block
@@ -382,19 +389,20 @@ def units(lines, hold_found):
             sibling = None
             while items and items[-1][0] >= indent:
                 sibling = items.pop()
-            for deeper in [i for i in intros if i > indent]:
-                del intros[deeper]
+            intros.difference_update([i for i in intros if i > indent])
             parents = [t for _, t in items]
-            # Added after the cut, so a long parent item cannot push them out.
+            # Added after the cut, so a long parent item cannot push it out.
             near = []
-            if indent in intros:
-                near.append(intros[indent])  # '- Do not do the following' introduces later siblings
             if sibling and sibling[0] == indent and label(sibling[1]):
                 near.append(sibling[1][-CONTEXT_LIMIT:])  # '- **Merges:**' labels the next sibling
+            if indent in intros and re.search(MERGE_WORD, text):
+                # '- Do not do the following' may govern every later sibling, whatever
+                # comes between, so a merge item after it is ambiguous.
+                hold_found()
             pair = context(parents, near), text
             items.append((indent, text))
             if negated_lead(text):
-                intros[indent] = text
+                intros.add(indent)
             extend_run(text)
             return pair
         if items and indent:
