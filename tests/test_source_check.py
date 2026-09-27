@@ -95,7 +95,10 @@ class SourceCheckTests(unittest.TestCase):
                         "ssh://" + "@".join(["person", "github.com"]) + "/owner/repo.git",
                         "https://" + "@".join(["person", "github.com"]) + "/owner/repo.git",
                         "ssh://" + "@".join(["//git", "github.com"]) + "/owner/repo.git",
-                        "@".join(["//git", "github.com"]) + "/owner/repo.git"]:
+                        "@".join(["//git", "github.com"]) + "/owner/repo.git",
+                        # Only an all-numeric last label reads as a ref or tag.
+                        "@".join(["owner/action", "feature.1a"]), "@".join(["person", "mail.example-host.co1"]),
+                        "@".join(["person", "host.\u0661"])]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
@@ -153,6 +156,9 @@ class SourceCheckTests(unittest.TestCase):
             "[clone](ssh://" + "@".join(["git", "github.com"]) + "/owner/repo.git)",
             "ssh://" + "@".join(["git", "github.com"]) + ":22/owner/repo.git",
             "git+ssh://" + "@".join(["git", "github.com"]) + "/owner/repo.git",
+            "@".join(["owner/action", "feature.1"]),
+            "@".join(["npm install pkg", "beta.1"]),
+            "@".join(["pkg", "rc.2.10"]),
         ]
         with tempfile.TemporaryDirectory(prefix="harness-neutral-email-") as directory:
             root = Path(directory)

@@ -121,7 +121,12 @@ def check_emails(relative, text):
                 # token is a local part too, except a code span around a Markdown
                 # import such as `@AGENTS.md`.
                 continue
-            if (VERSION.match(domain) and not domain.rpartition(".")[2].isalpha()) or COMMIT.match(domain):
+            last = domain.rpartition(".")[2]
+            if (VERSION.match(domain) and not last.isalpha()) or COMMIT.match(domain):
+                continue
+            if "." in domain and last.isascii() and last.isdigit():
+                # No top-level domain is all-numeric (RFC 3696), so owner/action@feature.1
+                # or pkg@beta.1 names a ref or tag; dotted IPv4 already reads as a version.
                 continue
             if "." not in domain and (domain in DIST_TAGS or "/" in local and not local.startswith("/")):
                 # A repository or package reference such as actions/checkout@main or pkg@latest;
