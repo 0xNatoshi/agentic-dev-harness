@@ -287,7 +287,7 @@ def units(lines, hold_found):
     each other context. A fenced block is one unit.
 
     hold_found is called once when a pause or approval restriction spreads over
-    the items of one list or the rows of one table.
+    adjacent list items and table rows.
     """
     headings = []  # (level, text) of the current heading path
     lead = []      # unterminated blocks that introduce what follows
@@ -295,9 +295,9 @@ def units(lines, hold_found):
     header = None  # first row of the current table
     block, kind, indent = [], None, 0
     fence = None   # (marker, context, lines) of an open fenced block
-    run = collections.deque()  # (text, words) of recent items of the current list or table
+    run = collections.deque()  # (text, words) of recent adjacent list items and table rows
     run_words = collections.Counter()  # RUN_WORDS classes across the run
-    run_size, run_table, run_held = 0, False, False
+    run_size, run_held = 0, False
 
     def context(extra=()):
         path = ' '.join(t for _, t in headings)[-CONTEXT_LIMIT:]
@@ -309,11 +309,8 @@ def units(lines, hold_found):
             size += len(part) + 1
         return (path + ' ' + ' '.join(reversed(parts))[-CONTEXT_LIMIT:]).strip()
 
-    def extend_run(text, table):
-        nonlocal run_size, run_table, run_held
-        if run_table != table:
-            end_run()
-        run_table = table
+    def extend_run(text):
+        nonlocal run_size, run_held
         if run_held:
             return
         # Sized on the text the patterns read, so padding or example markers
@@ -363,11 +360,11 @@ def units(lines, hold_found):
                 parents.append(sibling[1])  # '- **Merges:**' labels the next sibling
             pair = context(parents), text
             items.append((indent, text))
-            extend_run(text, False)
+            extend_run(text)
             return pair
         if items and indent:
             # Indented content continues the list item above it.
-            extend_run(text, False)
+            extend_run(text)
             return context(t for i, t in items if i < indent), text
         if items:
             # Unterminated open items still introduce the block after the list.
@@ -375,9 +372,8 @@ def units(lines, hold_found):
             items = []
         if current == 'row':
             pair = context([header] if header else []), text
-            if header is None:
-                end_run()  # a new table
-            extend_run(text, True)
+            # Adjacent lists and tables share one run, as a whole-file reading would.
+            extend_run(text)
             header = header or text
             return pair
         header = None

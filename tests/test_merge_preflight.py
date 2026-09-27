@@ -311,6 +311,9 @@ TEXT_CASES = (
     Case("kept pause past marker examples", 2,
          "- Merging\n- " + "Autonomous merge suspended — request dated <date> " * 7 + "\n- blocked"),
     Case("kept pause phrase split across items", 2, "- Merging\n- on\n- hold"),
+    Case("kept pause from table row to list item", 2, "| a |\n|---|\n| Merging |\n- blocked"),
+    Case("kept pause from list item to table row", 2, "- Merging\n\n| a |\n|---|\n| blocked |"),
+    Case("kept pause across adjacent tables", 2, "| Merging |\n|---|\n\n| x |\n|---|\n| blocked |"),
     Case("cleared method item beside CI wait item", 0, "- Merge requests use squash\n- Wait for CI before tagging"),
     Case("cleared marker example beside list item", 0,
          "- Use the `Autonomous merge suspended — request dated <date>` marker\n- Read prose restrictions too"),
@@ -356,8 +359,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 262 or len({case.name for case in ALL_CASES}) != 262:
-    raise RuntimeError("Merge fixture inventory must contain 262 unique cases")
+if len(ALL_CASES) != 265 or len({case.name for case in ALL_CASES}) != 265:
+    raise RuntimeError("Merge fixture inventory must contain 265 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
