@@ -196,9 +196,11 @@ Exit 1 means no unresolved placeholder; 0 means fill it; any other code means re
 Propose settings and obtain missing specific authorization. A README/About request only authorizes its description change, as the guide explains.
 
 ```bash
-gh repo edit "$workflow_host/$workflow_repo" --enable-squash-merge --squash-merge-commit-message pr-title
+gh api --hostname "$workflow_host" --method PATCH "repos/$workflow_repo" -F allow_squash_merge=true -f squash_merge_commit_title=PR_TITLE
 gh repo edit "$workflow_host/$workflow_repo" --description "…"
 ```
+
+The first command uses the documented [repository update API](https://docs.github.com/en/rest/repos/repos#update-a-repository) to allow squash merges and default their titles to the PR title. Inspect the prior values for rollback and reread the authorized settings after success.
 
 About uses the guide's sentence, length and rollback checks. Archived repositories stay read-only. Suggest Secret scanning, Push protection and Dependabot alerts when supported; this is not permission to enable them.
 

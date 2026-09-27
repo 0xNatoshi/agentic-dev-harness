@@ -6,6 +6,7 @@ Development version: 6.5.0. No release tag has been published for this version.
 
 - Condense the project template to v6.5 with required skill procedures, explicit command targeting, a defined instruction scan set and single template-family ownership; preserve old snapshots and repository-specific content during migration.
 - Bind documented GitHub commands to origin and an explicit PR/run, capture PR URLs, and select a working Python interpreter for portable examples.
+- Add a standalone workflow-command verifier and mutation fixtures for repository binding, required operands, shell redirections and portable interpreter use; use the supported API for default squash titles.
 - Add the approved contributor grant-back to the proprietary template for new adoptions only, with an exact-text source assertion. Existing licenses remain unchanged unless their owner decides otherwise.
 - Define portable conversation reports, resolved-objection records, authenticated GitHub noreply evidence and documentation-with-code review scope.
 - Require one recorded active owner per shared template family across branches, worktrees and runtimes, with comment-based proposals and explicit handoff.
@@ -14,6 +15,7 @@ Development version: 6.5.0. No release tag has been published for this version.
 - Preserve decisions, review dispositions and handoffs in issue/PR comments and explain non-obvious code constraints.
 - Explicitly process human, agent and automated reviewer feedback, including chatgpt-codex-connector, before merge.
 - Align common, Claude and Hermes profiles; advance the project template to v6.4 with authentic history.
+- Compare the staged license blob with the official text, probe Python like `merge-preflight.sh`, and exit 2 when the comparison cannot run; cover the documented command with an offline test.
 - Reject ambiguous package destinations, generated-manifest collisions and Windows-reserved path components before writing output. The v6.4.0 installation payload and published tag are unchanged.
 
 ## 6.4.0
