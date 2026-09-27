@@ -139,7 +139,7 @@ Repair technical gaps; complete merge/verification/cleanup this turn. Ask only f
 
 Immediately record project-wide holds outside this block with date/scope: `Autonomous merge suspended — request dated <date>`. Equivalent aliases: `Autonomous merge suspended — requested on <date>`, `Autonomous merge suspended — asked on <date>`, `Merge autonome suspendu — demande du <date>`, `Merge autonome suspendu — demandé le <date>`. Preserve historical restrictions when normalizing English.
 
-The suspension scan set is: applicable root `AGENTS.md`/`CLAUDE.md`, applicable nested instruction files, globals actually loaded by the runtime, and their recursively resolved `@path` imports. After successful origin fetch, published `origin/<default>:AGENTS.md` is scanned automatically. Read skill sources (`SKILL.md`, references, templates, history) as policy, not as project holds. Applicable project instructions are not exempt by filename.
+The suspension scan set is: existing project-root `AGENTS.md` and `CLAUDE.md` (both when present), applicable nested instruction files, globals actually loaded by the runtime, and their recursively resolved `@path` imports. After successful origin fetch, published `origin/<default>:AGENTS.md` is scanned automatically. Read skill sources (`SKILL.md`, references, templates, history) as policy, not as project holds. Applicable project instructions are not exempt by filename.
 
 Manually resolve imports/deduplicate cycles; assume no automatic resolver. Missing/unreadable applicable inputs block. After successful `git fetch origin`, run `bash <skill-dir>/scripts/merge-preflight.sh suspension <files...>`. Exit 0: no known pattern; 1: dated veto; 2: ambiguity/error. Read restrictions: 0 is not permission; free-form holds remain indeterminate until context/current specific authorization resolves them.
 
@@ -160,7 +160,7 @@ Reread head/checks/protections/feedback/restrictions; execute skill `reviews`/`p
 ```bash
 workflow_sha=$(gh pr view --repo "$workflow_host/$workflow_repo" "$workflow_pr" --json headRefOid --jq .headRefOid) || exit 2
 # Require a nonempty valid final-head SHA with complete evidence above.
-git fetch origin && git merge-base --is-ancestor origin/main "$workflow_sha"
+git fetch origin && git merge-base --is-ancestor origin/main "$workflow_sha" || exit 2
 gh pr merge --repo "$workflow_host/$workflow_repo" "$workflow_pr" --squash --match-head-commit "$workflow_sha"
 ```
 

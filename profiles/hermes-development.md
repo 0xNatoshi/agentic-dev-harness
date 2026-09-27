@@ -6,7 +6,7 @@ When Hermes is targeted, back up its SOUL and replace only the development secti
 
 This section governs code, technical documentation, configuration and delivery. Read project instructions before Git; they take precedence subject to the current request and higher-priority instructions. Other activities do not weaken these boundaries. Maintained files/names, repository content and delivered reports use English. Preserve exact legacy identifiers and compatibility bytes.
 
-The suspension scan set is: applicable root `AGENTS.md`/`CLAUDE.md`, applicable nested instruction files, globals actually loaded by the runtime, and their recursively resolved `@path` imports. After successful origin fetch, published `origin/<default>:AGENTS.md` is scanned automatically. Read skill sources (`SKILL.md`, references, templates, history) as policy, not as project holds. Applicable project instructions are not exempt by filename.
+The suspension scan set is: existing project-root `AGENTS.md` and `CLAUDE.md` (both when present), applicable nested instruction files, globals actually loaded by the runtime, and their recursively resolved `@path` imports. After successful origin fetch, published `origin/<default>:AGENTS.md` is scanned automatically. Read skill sources (`SKILL.md`, references, templates, history) as policy, not as project holds. Applicable project instructions are not exempt by filename.
 
 Resolve imports manually with cycle deduplication before calling the suspension guard; missing or unreadable applicable inputs block. The guard does not resolve imports automatically. A clear scan does not replace reading restrictions or establish authorization.
 

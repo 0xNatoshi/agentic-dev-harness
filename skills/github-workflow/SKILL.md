@@ -282,7 +282,7 @@ gh pr view --repo "$workflow_host/$workflow_repo" <pr> --comments
 bash <skill-dir>/scripts/merge-preflight.sh reviews <owner> <repo> <pr>
 gh api --hostname "$workflow_host" repos/$workflow_repo/deployments --jq length
 bash <skill-dir>/scripts/merge-preflight.sh pages <owner> <repo>
-git fetch origin && git merge-base --is-ancestor origin/<default> <headRefOid>
+git fetch origin && git merge-base --is-ancestor origin/<default> <headRefOid> || exit 2
 gh pr merge --repo "$workflow_host/$workflow_repo" <pr> --<method> --match-head-commit <headRefOid>
 ```
 
