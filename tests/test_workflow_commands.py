@@ -124,6 +124,9 @@ class WorkflowCommandTests(unittest.TestCase):
         reference_dir = guide / "references"
         reference_dir.mkdir(parents=True)
         (guide / "SKILL.md").write_text(skill, encoding="utf-8")
+        (guide / "templates").mkdir()
+        (guide / "templates/AGENTS.md").write_text("", encoding="utf-8")
+        (root / "AGENTS.md").write_text("", encoding="utf-8")
         for name, contents in (references or {}).items():
             (reference_dir / name).write_text(contents, encoding="utf-8")
         return root
@@ -543,7 +546,7 @@ gh pr create --repo "$workflow_host/$workflow_repo" --title="<type>(scope): summ
         for command, expected in cases:
             with self.subTest(command=command), tempfile.TemporaryDirectory(prefix="workflow-reviewed-") as directory:
                 root = self.root(directory, references={"examples.md": "# Examples\n\n```bash\n" + command + "\n```\n"})
-                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, check=False)
+                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("skills/github-workflow/references/examples.md:4:", result.stderr)
                 self.assertIn(expected, result.stderr)
@@ -567,12 +570,12 @@ gh pr create --repo "$workflow_host/$workflow_repo" --title="<type>(scope): summ
                         bad += "\npayload\nEOF"
                         good += "\npayload\nEOF"
                     root = self.root(directory, references={"examples.md": "# Examples\n\n```bash\n" + bad + "\n```\n"})
-                    result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, check=False)
+                    result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
                     self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                     self.assertIn("skills/github-workflow/references/examples.md:4:", result.stderr)
                     self.assertIn(expected, result.stderr)
                     (root / "skills/github-workflow/references/examples.md").write_text("# Examples\n\n```bash\n" + good + "\n```\n", encoding="utf-8")
-                    result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, check=False)
+                    result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
                     if redirect == "<<-EOF":
                         # The operand is valid, but unquoted bodies are outside
                         # the explicitly bounded here-document grammar.
@@ -635,7 +638,7 @@ gh pr create --repo "$workflow_host/$workflow_repo" --title="<type>(scope): summ
         for command, expected in cases:
             with self.subTest(command=command), tempfile.TemporaryDirectory(prefix="workflow-skeptical-") as directory:
                 root = self.root(directory, references={"examples.md": "`" + command + "`\n"})
-                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, check=False)
+                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("skills/github-workflow/references/examples.md:1:", result.stderr)
                 self.assertIn(expected, result.stderr)
@@ -906,7 +909,7 @@ gh pr view \\
                 result = subprocess.run(
                     [bash, "--noprofile", "--norc", "-O", "extglob", "-c",
                      'gh() { printf "called\n" >> "$WORKFLOW_WITNESS"; }\n' + command],
-                    env=environment, capture_output=True, text=True, timeout=5,
+                    env=environment, capture_output=True, text=True, encoding="utf-8", timeout=5,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls = witness.read_text(encoding="utf-8").splitlines() if witness.exists() else []
@@ -991,17 +994,127 @@ gh pr view \\
             history = root / "skills/github-workflow/templates/history"
             history.mkdir(parents=True)
             (history / "AGENTS-v1.md").write_text("```bash\ngh issue view 1\n```\n", encoding="utf-8")
-            (root / "skills/github-workflow/templates/AGENTS.md").write_text("```bash\npython3 - x.py\n```\n", encoding="utf-8")
             self.assertEqual(check_repository(root), [])
+            for name in ("AGENTS.md", "skills/github-workflow/templates/AGENTS.md"):
+                with self.subTest(name=name):
+                    target = root / name
+                    target.write_text("```bash\ngh issue view 1\n```\n", encoding="utf-8")
+                    findings = check_repository(root)
+                    self.assertTrue(any(item.file == name and item.line == 2 and "valued --repo" in item.message for item in findings), [str(item) for item in findings])
+                    target.write_text("", encoding="utf-8")
+
+    def test_v63_commands_are_rejected_in_both_active_inputs(self):
+        old = (ROOT / "skills/github-workflow/templates/history/AGENTS-v6.3.md").read_text(encoding="utf-8")
+        for name in ("AGENTS.md", "skills/github-workflow/templates/AGENTS.md"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(prefix="workflow-old-template-") as directory:
+                root = self.root(directory)
+                (root / name).write_text(old, encoding="utf-8")
+                findings = check_repository(root)
+                self.assertTrue(any(item.file == name and "PR selector" in item.message for item in findings), [str(item) for item in findings])
+                self.assertTrue(any(item.file == name and "valued --repo" in item.message for item in findings), [str(item) for item in findings])
+
+    def test_project_python_exception_is_limited_to_root_command_rows(self):
+        for launcher in ("python3", "python", "py", "py -3"):
+            table = f"## Project commands\n\n| Role | Command |\n|---|---|\n| Build | `{launcher} scripts/build.py` |\n"
+            with tempfile.TemporaryDirectory(prefix="workflow-project-command-") as directory:
+                root = self.root(directory)
+                instructions = root / "AGENTS.md"
+                instructions.write_text(table, encoding="utf-8")
+                self.assertEqual(check_repository(root), [])
+                for content in (
+                    table.replace("## Project commands", "## Workflow examples"),
+                    table + f"\n`{launcher} scripts/check.py`\n",
+                    table + f"\n```bash\n{launcher} scripts/check.py\n```\n",
+                    table.replace("| Build |", "| Example |"),
+                    table.replace("scripts/build.py` |", f"scripts/build.py` and `{launcher} -c 'print(1)'` |"),
+                ):
+                    with self.subTest(content=content):
+                        instructions.write_text(content, encoding="utf-8")
+                        self.assertTrue(any(f"direct {launcher.split()[0]}" in item.message for item in check_repository(root)))
+                instructions.write_text(table + '| Tests | `gh pr checks --repo "$workflow_host/$workflow_repo"` |\n', encoding="utf-8")
+                self.assertTrue(any("PR selector" in item.message for item in check_repository(root)))
+                instructions.write_text(table, encoding="utf-8")
+                for name in ("templates/AGENTS.md", "references/example.md", "SKILL.md"):
+                    with self.subTest(name=name):
+                        target = root / "skills/github-workflow" / name
+                        previous = target.read_text(encoding="utf-8") if target.exists() else ""
+                        target.write_text(table, encoding="utf-8")
+                        self.assertTrue(any(item.file.endswith(name) and f"direct {launcher.split()[0]}" in item.message for item in check_repository(root)))
+                        target.write_text(previous, encoding="utf-8")
+
+    def test_current_repository_examples_satisfy_contract(self):
+        self.assertEqual(check_repository(ROOT), [])
+
+    def test_merge_method_placeholder_is_only_an_active_template_merge_option(self):
+        command = 'gh pr merge --repo "$workflow_host/$workflow_repo" "$workflow_pr" --{{MERGE_METHOD}} --match-head-commit "$workflow_sha"'
+        for name in ("AGENTS.md", "skills/github-workflow/templates/AGENTS.md", "skills/github-workflow/references/example.md"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(prefix="workflow-method-placeholder-") as directory:
+                root = self.root(directory)
+                target = root / name
+                target.write_text("```bash\n" + command + "\n```\n", encoding="utf-8")
+                findings = check_repository(root)
+                if name == "skills/github-workflow/templates/AGENTS.md":
+                    self.assertEqual(findings, [])
+                    for method in ("--{{MERGE_METHOD}}=garbage", "--{{MERGE_METHOD}}=", "--{{MERGE_METHOD}} --{{MERGE_METHOD}}=garbage"):
+                        with self.subTest(method=method):
+                            target.write_text("```bash\n" + command.replace("--{{MERGE_METHOD}}", method) + "\n```\n", encoding="utf-8")
+                            self.assertTrue(any("unsupported gh option --{{MERGE_METHOD}}" in item.message for item in check_repository(root)))
+                    target.write_text("```bash\n" + command.replace("gh pr merge", "gh pr checks") + "\n```\n", encoding="utf-8")
+                    findings = check_repository(root)
+                self.assertTrue(any("unsupported gh option --{{MERGE_METHOD}}" in item.message for item in findings), [str(item) for item in findings])
+
+    def test_existing_claude_instructions_are_checked_after_the_import(self):
+        with tempfile.TemporaryDirectory(prefix="workflow-claude-") as directory:
+            root = self.root(directory)
+            target = root / "CLAUDE.md"
+            self.assertFalse(target.exists())
+            self.assertEqual(check_repository(root), [])
+            target.write_text("@AGENTS.md\n", encoding="utf-8")
+            self.assertEqual(check_repository(root), [])
+            for command, expected in (("gh pr view 1", "valued --repo"), ("python3 -u", "direct python3")):
+                with self.subTest(command=command):
+                    target.write_text(f"@AGENTS.md\n\n```bash\n{command}\n```\n", encoding="utf-8")
+                    findings = check_repository(root)
+                    self.assertTrue(any(item.file == "CLAUDE.md" and item.line == 4 and expected in item.message for item in findings), [str(item) for item in findings])
+            target.write_text("@AGENTS.md\n\n## Project commands\n\n| Build | `python3 scripts/build.py` |\n", encoding="utf-8")
+            self.assertTrue(any(item.file == "CLAUDE.md" and "direct python3" in item.message for item in check_repository(root)))
+
+    def test_unreadable_existing_claude_instructions_block_the_cli(self):
+        for kind in ("directory", "invalid-utf8", "dangling-symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix="workflow-claude-read-") as directory:
+                root = self.root(directory)
+                target = root / "CLAUDE.md"
+                if kind == "directory":
+                    target.mkdir()
+                elif kind == "invalid-utf8":
+                    target.write_bytes(b"@AGENTS.md\n\xff")
+                else:
+                    try:
+                        target.symlink_to(root / "missing.md")
+                    except (OSError, NotImplementedError):
+                        self.skipTest("symlink creation unavailable in this environment")
+                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("CLAUDE.md", result.stderr)
+                self.assertNotIn("passed", result.stdout)
+
+    def test_missing_active_input_blocks_the_cli(self):
+        for name in ("AGENTS.md", "skills/github-workflow/templates/AGENTS.md"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(prefix="workflow-missing-template-") as directory:
+                root = self.root(directory)
+                (root / name).unlink()
+                result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(name, result.stderr)
 
     def test_cli_returns_nonzero_with_file_and_line(self):
         with tempfile.TemporaryDirectory(prefix="workflow-cli-") as directory:
             root = self.root(directory, references={"examples.md": "```bash\ngh issue view 1\n```\n"})
-            result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, check=False)
+            result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn("skills/github-workflow/references/examples.md:2:", result.stderr)
             (root / "skills/github-workflow/references/examples.md").write_text("", encoding="utf-8")
-            result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, check=False)
+            result = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, encoding="utf-8", check=False)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 

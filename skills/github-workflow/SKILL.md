@@ -234,11 +234,11 @@ Use chore/agent-workflow-update and the same PR delivery. The policy applicable 
 4. Run the init placeholder check, covering README.md, LICENSE*, .yml/.yaml and absent CI, distinguishing exit 1 from errors.
 5. Show the diff and summarize added/modified rules.
 
-**Package v6.5.0; active repository template v6.4.** This package adds technical initiative, incidental issue capture, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement.
+**Development package v6.5.0; active repository template v6.5.** The shared profiles/skill include initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance. The compact template preserves delivery gates and local rules, defines the suspension inputs, and uses this skill's explicit PR selector and required lifecycle procedures. Verify the matching skill is actually loaded before dependent actions. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement. Source updates alone do not establish release or destination readiness.
 
 ## What's new
 
-- **v6.5.0 / template v6.4**: proactive technical judgment, deduplicated incidental issues, useful next-action reporting and durable issue/PR/code reasoning across Codex, Claude Code and Hermes. Shared profiles record verified agent attribution and observed model/provider provenance. Shared profiles and the skill also require review convergence: targeted rechecks, a root-design checkpoint after repeated unresolved cycles and delivery once ready. Existing delivery and authorization safeguards remain applicable.
+- **v6.5.0 / template v6.5 (development)**: compact project instructions, explicit PR/repository targeting, defined suspension inputs, one owner per template family and required skill procedures. Preserve the preceding initiative, written collaboration, review convergence, verified agent attribution, observed model/provider provenance, reporting and authorization safeguards; compare real loading and historical customizations before delivery.
 - **v6.4.0**: versioned source repository, neutral profile source, reproducible packages, portable regression checks and issue/PR handoff guidance. Runtime guards and the active repository template retain their behavior.
 - **v6.3.1**: English personal instructions, skill, references and distribution files; README.md and English installer names. Runtime guards, licenses, role files and authentic template history retain their bytes. French remains the conversation language; historical aliases/test inputs remain exact data.
 - **v6.3**: origin binding, detached rebase/bisect guards, Unicode/published holds, inherited reporting preferences, qualified Claude installation/status, public-license authorization, historical word comparisons and lockfile synchronization.
@@ -314,16 +314,36 @@ grep -nE '^[[:space:]]*-[[:space:]]*Independent review:[[:space:]]*(not required
 grep -nF 'TO FILL' <pr-body-file>
 ```
 
+The suspension scan set is: existing project-root `AGENTS.md` and `CLAUDE.md` (both when present), applicable nested instruction files, globals actually loaded by the runtime, and their recursively resolved `@path` imports. After successful origin fetch, published `origin/<default>:AGENTS.md` is scanned automatically. Read skill sources (`SKILL.md`, references, templates, history) as policy, not as project holds. Applicable project instructions are not exempt by filename.
+
+Resolve imports manually with cycle deduplication and record the resolved input set before calling the guard; it does not resolve imports automatically. Missing or unreadable applicable inputs block.
+
 After successful git fetch origin, resolve all applicable instructions/imports and run `bash <skill-dir>/scripts/merge-preflight.sh suspension <files...>`: 0 means no known pattern, 1 dated veto, 2 blocking ambiguity/error. It normalizes case, Unicode dashes, NBSP, BOM, CRLF and wrapped lines; ignores only full-line managed blocks and literal date examples; recognizes the v5 and French aliases below; and reads published origin/default AGENTS.md after verifying its tree. Refresh origin first. Zero is not semantic proof of absence. Read all instructions: an applicable free-form restriction missed by the scanner still makes the gate indeterminate (state 2) until context resolves it; current specific authorization may already do so. A scan result is not authorization. Normalize historical French review labels in the current PR to Independent review.
 
+Retain `workflow_sha` from completed final-head checks and reviews; do not replace it with a later observation. Read the final review and deployment inputs:
+
 ```bash
-gh pr view --repo "$workflow_host/$workflow_repo" <pr> --json state,isDraft,mergeable,reviewDecision,reviewRequests,statusCheckRollup,headRefOid,title
-gh pr view --repo "$workflow_host/$workflow_repo" <pr> --comments
-bash <skill-dir>/scripts/merge-preflight.sh reviews <owner> <repo> <pr>
-gh api --hostname "$workflow_host" repos/$workflow_repo/deployments --jq length
-bash <skill-dir>/scripts/merge-preflight.sh pages <owner> <repo>
-git fetch origin && git merge-base --is-ancestor origin/<default> <headRefOid>
-gh pr merge --repo "$workflow_host/$workflow_repo" <pr> --<method> --match-head-commit <headRefOid>
+gh pr view --repo "$workflow_host/$workflow_repo" <pr> --json state,isDraft,mergeable,reviewDecision,reviewRequests,statusCheckRollup,headRefOid,title || exit 2
+gh pr view --repo "$workflow_host/$workflow_repo" <pr> --comments || exit 2
+bash <skill-dir>/scripts/merge-preflight.sh reviews <owner> <repo> <pr> || exit 2
+gh api --hostname "$workflow_host" repos/$workflow_repo/deployments --jq length || exit 2
+workflow_pages_status=0
+bash <skill-dir>/scripts/merge-preflight.sh pages <owner> <repo> || workflow_pages_status=$?
+case "$workflow_pages_status" in
+  0) ;;
+  1) printf '%s\n' 'Pages is configured; resolve deployment impact before merge.' ;;
+  *) exit 2 ;;
+esac
+```
+
+Inspect those results against all criteria above before continuing; successful reads alone are not an acceptance verdict. Resolve deployment impact, review findings and required authorizations. Then require the observed head to equal the head whose checks/reviews are complete; missing, malformed or changed evidence blocks:
+
+```bash
+[[ ${workflow_sha:-} =~ ^[0-9a-f]{40}$ ]] || exit 2
+workflow_observed_sha=$(gh pr view --repo "$workflow_host/$workflow_repo" <pr> --json headRefOid --jq .headRefOid) || exit 2
+[ "$workflow_observed_sha" = "$workflow_sha" ] || exit 2
+git fetch origin && git merge-base --is-ancestor origin/<default> "$workflow_sha" || exit 2
+gh pr merge --repo "$workflow_host/$workflow_repo" <pr> --<method> --match-head-commit "$workflow_sha"
 ```
 
 Pages verifies explicit repository existence/origin identity first. Only its real HTTP 404 means no configuration reported. 200 requires deployment-impact analysis; 401/403/5xx/network/read errors block. This does not exclude other deployment integrations.

@@ -4,12 +4,14 @@
 
 Development version: 6.5.0. No release tag has been published for this version.
 
+- Condense the project template to v6.5 with required skill procedures, explicit command targeting, a defined instruction scan set and single template-family ownership; preserve old snapshots and repository-specific content during migration.
 - Use one bounded shell-boundary analysis for documented command comments, continuations and here-documents; reject unsupported active quote/expansion forms explicitly and preserve executable command diagnostics.
 - Track configured automatic review triggers through revision-specific completion, including delayed ready-triggered feedback, and avoid duplicate manual review requests.
 - Distinguish Python string delimiters from literal privacy-screen content, preserving quoted address checks and physical diagnostic lines without reconstructing assembled values.
 - Bind documented GitHub commands to origin and an explicit PR/run, capture PR URLs, and select a working Python interpreter for portable examples.
 - Add a standalone workflow-command verifier and mutation fixtures for repository binding (including default-repository repair), explicit targets, command-specific options, required values and minimum/maximum operand counts, executable shorthand rejection, shell redirections and portable interpreter use including module mode, fallback launchers and interactive starts; distinguish supported execution prefixes from command arguments, reject coprocesses and ambiguous here-documents, recognize bounded literal bodies and use the supported API for default squash titles.
 - Bound review cycles by acceptance, demonstrated regressions and material risk; require a root-design checkpoint after repeated unresolved cycles, targeted rechecks and justified full reviews while preserving every delivery gate.
+- Extend command verification to the active project template and rendered root AGENTS.md/CLAUDE.md instructions, preserving authentic history and the root AGENTS.md configured Python command table.
 - Add the approved contributor grant-back to the proprietary template for new adoptions only, with an exact-text source assertion. Existing licenses remain unchanged unless their owner decides otherwise.
 - Define portable conversation reports, resolved-objection records, authenticated GitHub noreply evidence and documentation-with-code review scope.
 - Require one recorded active owner per shared template family across branches, worktrees and runtimes, with comment-based proposals and explicit handoff.

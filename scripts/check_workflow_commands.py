@@ -2,13 +2,12 @@
 """Check executable workflow examples for explicit targets and interpreters.
 
 This intentionally recognizes the Bash and Markdown forms used by the workflow
-guide. It is not a general Bash parser: dynamic evaluation, aliases/functions,
-indirect executables and substitutions inside quoted tokens need manual review.
-Unsupported coprocesses and ambiguous here-document headers fail explicitly.
-Only standalone cat and selected-Python commands with literal quoted delimiters
-have recognized body boundaries; their bodies are not shell commands.
-Active templates may be added by their own check; historical snapshots are
-never current guidance inputs.
+guide and active project instructions. It is not a general Bash parser: dynamic
+evaluation, aliases/functions, indirect executables and substitutions inside
+quoted tokens need manual review. Unsupported coprocesses and ambiguous
+here-document headers fail explicitly. Only standalone cat and selected-Python
+commands with literal quoted delimiters have recognized body boundaries; their
+bodies are not shell commands. Historical snapshots are never current inputs.
 """
 
 import argparse
@@ -260,6 +259,7 @@ FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 SHORTHAND = re.compile(r'gh\s+(?:pr|run|issue|repo)\s+\w+(?:[|/]\w+)+(?:\s+--repo\s+"\$workflow_host/\$workflow_repo")?')
 REDIRECTION = re.compile(r"^(?:&(?:>>|>)|\d*(?:<<<|<<-|<<|<>|<&|>>|>\||>&|<|>))(.*)$")
+PROJECT_COMMAND_ROW = re.compile(r"\s*\|\s*(?:Install|Build|Lint|Typecheck|Tests)\s*\|\s*`([^`]+)`\s*\|\s*")
 PLACEHOLDER = r"<[A-Za-z_][A-Za-z_0-9-]*>"
 DOCUMENTED_OPERAND = re.compile(
     rf"{PLACEHOLDER}(?:(?:[/-]{PLACEHOLDER})+|\([A-Za-z_0-9-]+\): [^<>]+)?\Z"
@@ -597,11 +597,11 @@ def _option_value(flag, value):
     )
 
 
-def _options(args, command):
+def _options(args, command, *, extra_boolean_flags=()):
     """Return operands, option values/switches and malformed-input evidence."""
     value_options, boolean_options, _ = GH_OPTIONS[command]
     value_flags = set(value_options.split())
-    boolean_flags = set(boolean_options.split()) | {"--help"}
+    boolean_flags = set(boolean_options.split()) | {"--help"} | set(extra_boolean_flags)
     if not command.startswith("repo "):
         value_flags.update({"--repo", "-R"})
     positional = []
@@ -673,7 +673,7 @@ def _direct_python(tail, *, windows_launcher=False):
     return True, False
 
 
-def _analyze(command, file, line, *, inline=False, probe=False, origin_comparison=False):
+def _analyze(command, file, line, *, inline=False, probe=False, origin_comparison=False, project_python=False):
     # Bare executable names in prose are references, like gh family shorthand.
     # Their standalone shell-fence/command-line form is executable and checked.
     if inline and (SHORTHAND.fullmatch(command) or command in {"python3", "python", "py", "py -3", "coproc"}):
@@ -698,7 +698,7 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
         tail = _arguments(words, index + 1)
         if word != "gh":
             direct, unsupported = _direct_python(tail, windows_launcher=word == "py")
-            if direct and not probe:
+            if direct and not (probe or project_python):
                 findings.append(Diagnostic(file, line, f"direct {word} invocation; use the selected python_cmd array"))
             elif unsupported:
                 findings.append(Diagnostic(file, line, f"unsupported {word} invocation; cannot verify interpreter usage"))
@@ -711,7 +711,10 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
         if command_name not in GH_OPTIONS:
             findings.append(Diagnostic(file, line, f"unsupported gh command {command_name}; cannot verify command operands"))
             continue
-        positional, valued, switches, missing, unknown, incomplete = _options(tail[2:], command_name)
+        template_merge = file == "skills/github-workflow/templates/AGENTS.md" and family == "pr" and subcommand == "merge"
+        positional, valued, switches, missing, unknown, incomplete = _options(
+            tail[2:], command_name, extra_boolean_flags=("--{{MERGE_METHOD}}",) if template_merge else (),
+        )
         minimum, maximum = GH_OPTIONS[command_name][2]
         default_view = command_name == "repo set-default" and bool(switches & {"--view", "-v"})
         default_unset = command_name == "repo set-default" and bool(switches & {"--unset", "-u"})
@@ -871,9 +874,17 @@ def scan_document(file, text):
             heading = heading_match.group(1)
         for inline_match in INLINE.finditer(source):
             snippet = inline_match.group(1).strip()
+            # The rendered root table declares this project's verified toolchain.
+            # It is not a portable skill recipe. Keep gh checks in these rows.
+            row = PROJECT_COMMAND_ROW.fullmatch(source)
+            project_python = (
+                file == "AGENTS.md" and heading == "Project commands"
+                and row is not None and row.group(1).strip() == snippet
+            )
             findings.extend(_analyze(
                 snippet, file, number, inline=True,
                 origin_comparison=_origin_comparison(file, heading, source, snippet),
+                project_python=project_python,
             ))
         if re.match(r"^\s*(?:gh|python3|python|py)(?:\s|$)", source):
             findings.extend(_analyze(source, file, number))
@@ -885,14 +896,33 @@ def scan_document(file, text):
 
 
 def check_repository(root):
-    """Scan only active workflow guidance, never templates or history."""
+    """Scan guidance and current/root instructions, never historical snapshots."""
     root = Path(root)
     skill = GUIDE / "SKILL.md"
     references = GUIDE / "references"
     if not (root / references).is_dir():
         raise FileNotFoundError(f"workflow references directory missing: {root / references}")
-    files = [skill, *(path.relative_to(root) for path in sorted((root / references).glob("*.md")))]
-    return [finding for path in files for finding in scan_document(path.as_posix(), (root / path).read_text(encoding="utf-8"))]
+    files = [
+        skill, GUIDE / "templates/AGENTS.md", Path("AGENTS.md"),
+        *(path.relative_to(root) for path in sorted((root / references).glob("*.md"))),
+    ]
+    claude = Path("CLAUDE.md")
+    try:
+        (root / claude).lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        # lstat includes dangling symlinks: an existing but unreadable input
+        # must fail the check instead of disappearing from its inventory.
+        files.append(claude)
+    findings = []
+    for path in files:
+        try:
+            text = (root / path).read_text(encoding="utf-8")
+        except UnicodeError as error:
+            raise OSError(f"{path}: expected UTF-8 guidance") from error
+        findings.extend(scan_document(path.as_posix(), text))
+    return findings
 
 
 def main(argv=None):
