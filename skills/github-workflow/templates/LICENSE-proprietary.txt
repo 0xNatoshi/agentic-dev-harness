@@ -28,7 +28,14 @@ confidential except as separately authorized or required by applicable law.
 The development permission applies while the contributor is authorized to work
 on the project and complies with these terms. It ends when that authorization
 is withdrawn or these terms are breached. This license does not transfer
-ownership of contributions. Separate agreements and third-party licenses remain
+ownership of contributions.
+
+Each Authorized Contributor grants the copyright holder a perpetual,
+irrevocable, worldwide, royalty-free license to use, copy, modify, distribute and
+relicense their contributions to this project, under any terms. This grant
+survives the end of their authorization.
+
+Separate agreements and third-party licenses remain
 applicable to the material and rights they cover. Rights that cannot lawfully
 be excluded are not restricted by this license.
 
