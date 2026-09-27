@@ -361,6 +361,10 @@ TEXT_CASES = (
     Case("kept one-word negated lead-in", 2, "- Do not proceed\n- merge pull requests"),
     Case("kept determiner negated lead-in", 2, "- Do not do such things\n- merge PRs"),
     Case("kept French moment lead-in", 2, "- À aucun moment\n- fusionner les PR"),
+    Case("kept conditional negated lead-in", 2, "- Never, if possible\n- merge PRs"),
+    Case("kept conjunction negated lead-in", 2, "- Never so long as\n- merge PRs"),
+    Case("kept French preposition negated lead-in", 2, "- Ne pas vers main\n- fusionner les PR"),
+    Case("cleared negated branch rule beside merge item", 0, "- Do not touch main or release branches\n- Merges use squash"),
     Case("kept negated lead-in between table rows", 2, "| Rule |\n|---|\n| Do not do the following |\n| merge PRs |"),
     Case("kept idiom lead-in between table rows", 2, "| Rule |\n|---|\n| Under no circumstances |\n| merge PRs |"),
     Case("cleared French negated rule beside merge method", 0, "- Ne pas ajouter de dépendances\n- Merges use squash"),
@@ -416,8 +420,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 313 or len({case.name for case in ALL_CASES}) != 313:
-    raise RuntimeError("Merge fixture inventory must contain 313 unique cases")
+if len(ALL_CASES) != 317 or len({case.name for case in ALL_CASES}) != 317:
+    raise RuntimeError("Merge fixture inventory must contain 317 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

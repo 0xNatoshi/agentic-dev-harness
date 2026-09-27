@@ -296,7 +296,8 @@ POINTER_LEAD = re.compile(
 # A preposition before the negation marks an idiom: '- Under no circumstances',
 # '- At no point', '- By no means', '- D’aucune façon'.
 IDIOM_LEAD = re.compile(r'(?:under|at|in|by|on|for|en|à|sous|dans|pour|de|d[’\x27])\s*(?:no|aucune?)\b')
-FUNCTION_WORD = re.compile(LEAD_START + r'|of|it|them|to|a|an|do|faire|faites|fais|de|d|l|un|une|des')
+FUNCTION_WORD = re.compile(LEAD_START + r'|of|it|them|to|a|an|do|if|as|so|long|other|than|possible|'
+                           r'faire|faites|fais|de|d|l|un|une|des|sur|vers|si')
 
 
 def negated_lead(text):
