@@ -135,6 +135,49 @@ TEXT_CASES = (
     Case("conservative blank-separated", 2, "Do not add dependencies\n\nMerge requests use squash"),
     Case("conservative heading", 2, "## Never commit secrets\nMerge PRs with squash."),
     Case("conservative comment", 2, "<!-- do not merge this block -->"),
+    Case("kept upstream note then bare ban", 2, "Keep the upstream remote read-only. Do not merge anything."),
+    Case("kept bare ban then upstream pull", 2, "Do not merge. Pull from upstream."),
+    Case("kept upstream or anywhere else", 2, "- Never merge from the upstream remote or from anywhere else."),
+    Case("kept French upstream note then ban", 2, "Le dépôt upstream est en lecture seule. Ne fusionnez rien."),
+    Case("kept ban then upstream clause", 2, "- Never merge anything; only pull from upstream."),
+    Case("kept ban including upstream", 2, "Do not merge anything, including from upstream."),
+    Case("kept verb merge commits from bots", 2, "Never merge commits authored by bots."),
+    Case("kept verb merge commits", 2, "Never merge commits."),
+    Case("kept every merge method banned", 2, "No squash merges, rebase merges or merge commits."),
+    Case("kept method ban without alternative", 2, "Do not squash-merge anything."),
+    Case("kept method ban pending review", 2, "No squash merges pending review."),
+    Case("kept method ban then ask", 2, "Do not squash-merge anything; ask first."),
+    Case("kept French method ban today", 2, "Pas de squash merge aujourd’hui."),
+    Case("kept method ban at the moment", 2, "No rebase merges at the moment."),
+    Case("kept upstream for the time being", 2, "Do not merge from the upstream remote for the time being."),
+    Case("kept French upstream this week", 2, "Ne fusionnez rien depuis le dépôt upstream cette semaine."),
+    Case("kept method ban owner reviews", 2, "No squash merges; the owner reviews everything first."),
+    Case("kept French method ban ask first", 2, "Ne pas faire de squash merge ; demandez d’abord."),
+    Case("kept table header gives context", 2, "| Change type | Merge policy |\n| --- | --- |\n| Any | On hold until I approve |"),
+    Case("kept table paused cell", 2, "| Merges | Deploys |\n|---|---|\n| Paused | Allowed |"),
+    Case("kept item lead after list", 2, "- Merges:\n\nOn hold until further notice."),
+    Case("kept paragraph lead after list", 2, "Merges:\n- use squash\n\nOn hold until further notice."),
+    Case("kept label item after list", 2, "- Merging PRs\n\nPaused until I approve."),
+    Case("kept wrapped hold in fence", 2, "```text\nAutonomous merges are\npaused until I approve.\n```"),
+    Case("caught fence under item", 2, "- Merging:\n  ```text\n  wait for my approval\n  ```"),
+    Case("kept indented backticks are not a fence", 2, "Example:\n\n    ```\n\nDo not squash-merge anything\nuntil I confirm."),
+    Case("kept unclosed fence", 2, "~~~\nx\n```\n\nDo not squash-merge anything\nuntil I confirm."),
+    Case("kept inline backticks are not a fence", 2, "```merge``` is paused until I approve."),
+    Case("kept comment label", 2, "<!-- Merge policy -->\nPaused until I approve."),
+    Case("caught numbered lead-in list", 2, "Do not do the following until I approve:\n1. merge pull requests"),
+    Case("caught numbered parent item", 2, "1. Merging:\n   1. wait for my approval"),
+    Case("caught setext heading", 2, "Merge policy\n------------\n\nWe use squash merges.\n\nOn hold until further notice."),
+    Case("caught mixed invisible splits", 2, "Do\u200bnot mer\u200bge until I approve."),
+    Case("kept parent method ban child hold", 2, "- Never squash-merge\n  - until I approve"),
+    Case("kept blockquote lead then item", 2, "> Merges\n> - on hold"),
+    Case("cleared upstream variant original", 0, "- Never merge from the original repository."),
+    Case("cleared French upstream mechanics", 0, "- Ne fusionnez jamais depuis le dépôt upstream."),
+    Case("cleared code span method", 0, "- No `squash` merges; use merge commits."),
+    Case("cleared GitHub method labels", 0, "- Use Squash and merge; never Rebase and merge."),
+    Case("cleared i.e. is not first person", 0, "- No fast-forward merges, i.e. always use merge commits."),
+    Case("cleared blockquote sibling items", 0, "> - Do not add dependencies\n> - Merge requests use squash"),
+    Case("clear numbered sibling items", 0, "1. Do not add dependencies\n2. Merge requests use squash"),
+    Case("conservative method ban alone", 2, "- No merge commits."),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -172,8 +215,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 110 or len({case.name for case in ALL_CASES}) != 110:
-    raise RuntimeError("Merge fixture inventory must contain 110 unique cases")
+if len(ALL_CASES) != 153 or len({case.name for case in ALL_CASES}) != 153:
+    raise RuntimeError("Merge fixture inventory must contain 153 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

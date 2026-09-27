@@ -93,14 +93,22 @@ IGNORABLE = re.compile('[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u3164\ufe00
                        '\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]')
 
 
+def invisible(c):
+    return unicodedata.category(c) == 'Cf' or bool(IGNORABLE.match(c))
+
+
 def normalize(text, joiner=''):
     """Casefold and map dashes; replace invisible characters with joiner."""
     # A spaced soft hyphen is read as a dash; elsewhere it is invisible.
     text = re.sub('(?<=\\s)\u00ad|\u00ad(?=\\s)', '-', text)
     text = unicodedata.normalize('NFKC', text)
-    text = IGNORABLE.sub(joiner, ''.join(joiner if unicodedata.category(c) == 'Cf' else c for c in text))
-    text = ''.join('-' if unicodedata.category(c) == 'Pd' or c == '\u2212' else c for c in text)
-    return text.replace('\r\n', '\n').replace('\r', '\n').casefold()
+    table = {}
+    for c in set(text):
+        if invisible(c):
+            table[ord(c)] = joiner
+        elif unicodedata.category(c) == 'Pd' or c == '\u2212':
+            table[ord(c)] = '-'
+    return text.translate(table).replace('\r\n', '\n').replace('\r', '\n').casefold()
 
 
 START = re.compile(r'^\s*<!--\s*github-workflow:start\b(?:(?!-->).)*-->\s*$')
@@ -123,78 +131,140 @@ FREE = re.compile(
 # A flagged unit that only states git mechanics is cleared when none of these apply.
 HOLD_CONTEXT = re.compile(
     PAUSE_WORD + r'|' + APPROVAL_WORD
-    + r'|\b(?:i|me|my|mine|we|us|our|je|j|moi|mon|ma|mes|nous|notre|nos|until|unless|without|before|wait\w*|stop\w*|hold\w*'
-    r'|confirm\w*|decision|decide\w*|notice|further|today|tomorrow|week|month|now|currently|temporar\w*'
-    r'|jusqu\w*|sans|avant|attend\w*|tant|décision|nouvel\w*|ordre)\b')
+    + r'|\bi\b(?!\.e\b)|\bj(?=[’\x27])'
+    r'|\b(?:me|my|mine|we|us|our|je|moi|mon|ma|mes|nous|notre|nos|until|unless|without|before|wait\w*|stop\w*'
+    r'|hold\w*|ask\w*|review\w*|pending|confirm\w*|decision|decide\w*|notice|further|today|tomorrow|week\w*'
+    r'|month\w*|sprint\w*|time\s+being|moment|instant|now|currently|temporar\w*|freez\w*|frozen'
+    r'|jusqu\w*|sans|avant|attend\w*|tant|décision|décid\w*|nouvel\w*|ordre|demand\w*|revue|valid\w*'
+    r'|semaines?|mois|aujourd\w*|demain|actuellement|provisoire\w*|gel\w*)\b')
 SCOPE = re.compile(
     r'\b(?:prs?|mrs?|pull[\s-]+requests?|merge[\s-]+requests?|demandes?\s+de\s+fusion|branch\w*|branche\w*'
-    r'|main|master|trunk|default|develop|production|release\w*)\b')
+    r'|main|master|trunk|default[\s-]+branch\w*|develop|production|release\w*)\b')
 NEVER_EXEMPT = re.compile(r'\bauto[\s-]*merg\w*|\bautomerg\w*|' + MERGE_WORD + r'[\s-]+(?:buttons?|queues?)\b')
-QUALIFIED = re.compile(
-    r'\b(?:squash|rebase|fast-forward|ff|no-ff|three-way|3-way|octopus|recursive|ort|resolve|subtree)[\s-]*merg\w*'
-    r'|' + MERGE_WORD + r'[\s-]+(?:conflicts?|commits?|bases?|markers?|drivers?|tools?|strateg\w*|messages?|parents?)\b'
-    r'|\b(?:conflits?|commits?)\s+de\s+fusion\b')
-UPSTREAM = re.compile(
-    r'\bupstream\s+(?:remote|repository|repo)\b|\b(?:remote|dépôt|depot)\s+upstream\b'
-    r'|\bfrom\s+(?:the\s+)?upstream\s*(?:[,.;:)]|$)')
-LIST_ITEM = re.compile(r'^(\s*)(?:[-*+]|\d{1,9}[.)])(?:\s|$)')
-HEADING = re.compile(r'^\s{0,3}(#{1,6})(?:\s|$)')
-FENCE = re.compile(r'^\s*(`{3,}|~{3,})')
-RULE = re.compile(r'^\s*(?:(?:-\s*){3,}|(?:=\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$')
+# Merge methods; a negated method is cleared only beside a permitted alternative.
+METHOD_PREFIX = re.compile(
+    r'\b(?:squash|rebase|fast[\s-]*forward|ff|no-ff|three-way|3-way|octopus|recursive|ort|resolve|subtree)'
+    r'(?:\s+and\s+|[\s-]*)$')
+METHOD_FLAG = re.compile(r'\s+--?(?:ff-only|no-ff|ff|squash|no-commit)\b')
+MECHANICS_NOUN = re.compile(
+    r'[\s-]+(?:conflicts?|markers?|bases?|drivers?|tools?|strateg\w*|messages?|parents?|polic\w*|methods?'
+    r'|settings?|options?)\b')
+COMMIT_NOUN = re.compile(r'[\s-]+commits?\b')
+# 'Never merge commits' uses merge as a verb: it restricts what may be merged.
+VERB_BEFORE = re.compile(
+    r'\b(?:not|never|n[’\x27]t|to|please|cannot|can|may|must|should|shall|will|would|could|ne|pas|jamais)\s*$')
+ARTICLE_BEFORE = re.compile(r'\b(?:the|a|an|this|that|each|every|its|their|your|our|le|la|chaque)\s*$')
+POSITIVE = {'use', 'uses', 'using', 'always', 'prefer', 'prefers', 'only', 'utilise', 'utilisez', 'utiliser',
+            'toujours', 'privilégier', 'privilégiez', 'uniquement', 'seulement'}
+NEGATIVE = {'no', 'not', 'never', 'don\x27t', 'don’t', 'avoid', 'without', 'pas', 'jamais', 'aucun', 'aucune',
+            'ne', 'sans'}
+# An upstream-sync rule names an upstream remote as the single source that ends its clause.
+UPSTREAM_SOURCE = re.compile(
+    r'\b(?:from|depuis|du|de)\s+(?:the\s+|le\s+|la\s+|l[’\x27]\s*)?'
+    r'(?:(?:upstream|original|parent|vendor)\s+(?:remote|repository|repo|project)s?'
+    r'|(?:dépôt|depot|remote|projet)\s+(?:upstream|amont|d[’\x27]origine|parent)|upstream)\b')
+UPSTREAM_END = re.compile(
+    r'(?:\s*\b(?:directly|wholesale|as[\s-]is|blindly|directement|en\s+bloc|tel\s+quel)\b)*[\s,)\]"\x27»”’]*')
+WIDEN = re.compile(r'\b(?:anywhere|elsewhere|else|other\w*|including|ailleurs|autres?|y\s+compris|notamment)\b')
+SOURCE_WORD = re.compile(r'\b(?:from|depuis)\b')
+LIST_ITEM = re.compile(r'^(\s*)(?:[-*+]|\d{1,9}[.)])(?:\s+|$)')
+HEADING = re.compile(r'^ {0,3}(#{1,6})(?:\s|$)')
+FENCE = re.compile(r'^ {0,3}(`{3,}(?!.*`)|~{3,})(.*)$')
+RULE = re.compile(r'^ {0,3}(?:(?:-[ \t]*){3,}|(?:=[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$')
+SETEXT = re.compile(r'^ {0,3}(=+|-+)[ \t]*$')
+QUOTE = re.compile(r'^ {0,3}>[ \t]?')
+# FREE spans at most a few hundred characters, so older context cannot change a result.
+CONTEXT_LIMIT = 600
+LEAD_BLOCKS = 3
 
 
 def terminated(block):
-    return block.rstrip(' \t*_`"\'\u00bb\u201d\u2019)]').endswith(('.', '!', '?'))
+    return block.rstrip(' \t*_`"\'»”’)]').endswith(('.', '!', '?'))
 
 
 def units(lines):
     """Yield (context, unit) for each Markdown block and its wrapped lines.
 
-    Context is the heading path, unterminated lead-in blocks and parent list
-    items. Sibling list items and table rows never give each other context.
+    Context is the heading path, unterminated lead-in blocks, parent list items
+    and a table's header row. Sibling list items and table data rows never give
+    each other context. A fenced block is one unit.
     """
     headings = []  # (level, text) of the current heading path
     lead = []      # unterminated blocks that introduce what follows
-    items = []     # (indent, text) of open list items
-    listed = False
-    block, kind, indent, fence = [], None, 0, None
+    items = []     # (indent, text) of the open list item chain
+    header = None  # first row of the current table
+    block, kind, indent = [], None, 0
+    fence = None   # (marker, context, lines) of an open fenced block
+
+    def context(extra=()):
+        path = ' '.join(t for _, t in headings)[-CONTEXT_LIMIT:]
+        parts, size = [], 0
+        for part in reversed(lead + list(extra)):
+            if size >= CONTEXT_LIMIT:
+                break
+            parts.append(part)
+            size += len(part) + 1
+        return (path + ' ' + ' '.join(reversed(parts))[-CONTEXT_LIMIT:]).strip()
 
     def flush():
-        nonlocal block, kind, lead, items, listed
+        nonlocal block, kind, lead, items, header
         if not block:
             return None
         text = ' '.join(part.strip() for part in block)
         current, block, kind = kind, [], None
-        path = [t for _, t in headings]
         if current == 'item':
-            items = [x for x in items if x[0] < indent]
-            pair = (' '.join(path + lead + [t for _, t in items]), text)
+            text = LIST_ITEM.sub('', text, 1)
+            while items and items[-1][0] >= indent:
+                items.pop()
+            pair = context(t for _, t in items), text
             items.append((indent, text))
-            listed = True
             return pair
         if items and indent:
             # Indented content continues the list item above it.
-            return ' '.join(path + lead + [t for i, t in items if i < indent]), text
-        items = []
-        if listed and current != 'row':
-            lead, listed = [], False
-        pair = (' '.join(path + lead), text)
+            return context(t for i, t in items if i < indent), text
+        if items:
+            # Unterminated open items still introduce the block after the list.
+            lead = (lead + [t for _, t in items if not terminated(t)])[-LEAD_BLOCKS:]
+            items = []
         if current == 'row':
-            listed = True
-        elif current == 'para':
-            lead = [] if terminated(text) else lead + [text]
+            pair = context([header] if header else []), text
+            header = header or text
+            return pair
+        header = None
+        pair = context(), text
+        body = re.sub(r'<!--|-->', ' ', text).strip() if current == 'comment' else text
+        lead = [] if terminated(body) else (lead + [body])[-LEAD_BLOCKS:]
+        return pair
+
+    def enter_heading(level, text):
+        nonlocal lead, items, header
+        while headings and headings[-1][0] >= level:
+            headings.pop()
+        pair = context(), text
+        headings.append((level, text[:CONTEXT_LIMIT]))
+        lead, items, header = [], [], None
         return pair
 
     for line in lines:
+        while QUOTE.match(line):
+            line = QUOTE.sub('', line, 1)
         stripped = line.strip()
         if fence:
-            if re.fullmatch(re.escape(fence[0]) + '{%d,}' % len(fence), stripped):
+            marker, fenced_context, fenced = fence
+            if re.fullmatch(r' {0,3}' + re.escape(marker[0]) + '{%d,}\\s*' % len(marker), line):
+                yield fenced_context, ' '.join(fenced)
                 fence = None
             elif stripped:
-                yield ' '.join([t for _, t in headings] + lead), stripped
+                fenced.append(stripped)
             continue
         if kind == 'comment' and not block[-1].rstrip().endswith('-->'):
             block.append(line)
+            continue
+        setext = kind == 'para' and not (items and indent) and SETEXT.match(line)
+        if setext:
+            text = ' '.join(part.strip() for part in block)
+            block, kind = [], None
+            yield enter_heading(1 if setext.group(1)[0] == '=' else 2, text)
             continue
         heading = HEADING.match(line)
         opening = FENCE.match(line)
@@ -203,14 +273,9 @@ def units(lines):
             if pair:
                 yield pair
             if opening:
-                fence = opening.group(1)
+                fence = opening.group(1), context(t for _, t in items), [opening.group(2).strip()]
             elif heading:
-                level = len(heading.group(1))
-                while headings and headings[-1][0] >= level:
-                    headings.pop()
-                yield ' '.join(t for _, t in headings), stripped
-                headings.append((level, stripped))
-                lead, items, listed = [], [], False
+                yield enter_heading(len(heading.group(1)), stripped)
             continue
         item = LIST_ITEM.match(line)
         starts = 'item' if item else 'row' if stripped.startswith('|') else 'comment' if stripped.startswith('<!--') else None
@@ -220,9 +285,54 @@ def units(lines):
                 yield pair
             kind, indent = starts or 'para', len(line) - len(line.lstrip())
         block.append(line)
+    if fence:
+        yield fence[1], ' '.join(fence[2])
     pair = flush()
     if pair:
         yield pair
+
+
+def upstream_source(clause, match):
+    after = clause[match.end():]
+    sources = list(UPSTREAM_SOURCE.finditer(after))
+    if len(sources) != 1 or len(SOURCE_WORD.findall(after)) > 1 or WIDEN.search(clause):
+        return False
+    return bool(UPSTREAM_END.fullmatch(after[sources[0].end():]))
+
+
+def positive_method(clause, start, end):
+    words = re.findall(r'[\w’\x27-]+', clause[:start])[-3:]
+    if re.match(r'[\s-]*(?:only|uniquement|seulement)\b', clause[end:]):
+        return not NEGATIVE.intersection(words)
+    return bool(POSITIVE.intersection(words)) and not NEGATIVE.intersection(words)
+
+
+def mechanics_only(unit):
+    """True when every merge word in the unit is a git-mechanics term or an upstream-sync clause."""
+    plain = re.sub(r'[*_`]', ' ', unit)
+    methods = positive = False
+    for clause in re.split(r'[.!?;:]', plain):
+        for match in re.finditer(MERGE_WORD, clause):
+            before, after = clause[:match.start()], clause[match.end():]
+            prefix = METHOD_PREFIX.search(before)
+            commit = COMMIT_NOUN.match(after)
+            verb = VERB_BEFORE.search(before)
+            if upstream_source(clause, match):
+                continue
+            if prefix or METHOD_FLAG.match(after) or (commit and not verb and not ARTICLE_BEFORE.search(before)):
+                methods = True
+                start = prefix.start() if prefix else match.start()
+                end = match.end() + (commit.end() if commit else 0)
+                positive = positive or positive_method(clause, start, end)
+            elif not verb and (MECHANICS_NOUN.match(after) or commit):
+                continue
+            elif match.group() == 'fusion' and re.search(r'\bconflits?\s+de\s*$', before):
+                continue
+            elif match.group() == 'fusion' and re.search(r'\bcommits?\s+de\s*$', before):
+                methods = True
+            else:
+                return False
+    return positive or not methods
 
 
 def free_restriction(context, unit):
@@ -231,7 +341,7 @@ def free_restriction(context, unit):
         return False
     if HOLD_CONTEXT.search(text) or SCOPE.search(text) or NEVER_EXEMPT.search(text):
         return True
-    return bool(re.search(MERGE_WORD, QUALIFIED.sub(' ', unit))) and not UPSTREAM.search(unit)
+    return not mechanics_only(unit)
 
 
 def scan_normalized(text):
@@ -280,10 +390,30 @@ def scan_normalized(text):
     return 1 if found else 0
 
 
+def hidden_splits(text):
+    """Count in-word invisible characters near merge or pause vocabulary."""
+    count = 0
+    hidden = ''.join(filter(invisible, set(text)))
+    for found in re.finditer('[' + re.escape(hidden) + ']', text) if hidden else ():
+        index = found.start()
+        if not (index and text[index - 1].isalnum()):
+            continue
+        following = next((x for x in text[index + 1:] if not invisible(x)), '')
+        if not following.isalnum():
+            continue
+        window = ''.join(x for x in text[max(0, index - 40):index + 40] if not x.isspace() and not invisible(x))
+        if re.search(r'merg|fusion|suspen|paus|hold|attente', window.casefold()):
+            count += 1
+    return count
+
+
 def scan_text(text):
     """0 clear, 1 dated canonical veto, 2 ambiguous/malformed evidence."""
     # Invisible characters may split a word or separate two words: check both readings.
     results = [scan_normalized(normalize(text, joiner)) for joiner in ('', ' ')]
+    if hidden_splits(text) > 1:
+        # Two readings cannot cover several invisible splits that need different choices.
+        results.append(2)
     return 2 if 2 in results else 1 if 1 in results else 0
 
 
