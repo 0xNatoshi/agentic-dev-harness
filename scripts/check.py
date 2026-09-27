@@ -53,8 +53,12 @@ def check_emails(relative, text):
             wrapper = token[:len(token) - len(local)]
             if not line[match.end():].startswith(wrapper[::-1].translate(CLOSING)):
                 local = token
-            elif not local and (not before or before[-1] in " \t(["):
-                continue  # `@AGENTS.md`-style imports and @mentions have no local part
+            elif not local and (not before or before[-1] in " \t([") and (
+                    not wrapper or wrapper == "`" and match.group(1).endswith(".md")):
+                # No local part at all is an @mention or import; a wrapper-only
+                # token is a local part too, except a code span around a Markdown
+                # import such as `@AGENTS.md`.
+                continue
             domain = match.group(1).lower()
             neutral = domain in NEUTRAL_DOMAINS or f"{local.lower()}@{domain}" in NEUTRAL_ADDRESSES
             # Report the location only, so the gate never echoes an address.

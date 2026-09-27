@@ -71,7 +71,9 @@ class SourceCheckTests(unittest.TestCase):
                         "@".join(["first`", "personal-mail.net"]), "@".join(["`first`", "personal-mail.net"]),
                         "@".join(["`", "personal-mail.net"]), "@".join(["*git", "github.com"]),
                         "@".join(["~noreply", "anthropic.com"]), "@".join(["`git", "github.com"]),
-                        "@".join(["'git", "github.com"]), "@".join(["{git", "github.com"])]:
+                        "@".join(["'git", "github.com"]), "@".join(["{git", "github.com"]),
+                        "*" + "@".join(["", "personal-mail.net"]) + "*",
+                        "`" + "@".join(["", "personal-mail.net"]) + "`"]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
