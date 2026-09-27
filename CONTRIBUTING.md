@@ -22,6 +22,8 @@ For a substantive change, link the issue with `Closes #<number>` or `Refs #<numb
 
 Documentation-only work uses self-review and appropriate automatic checks. Executable policy, authorization, CI/hooks or gate changes receive the risk-based review required by AGENTS.md. Findings need a fix or an evidence-backed disposition; significant deltas return to the relevant reviewer. Tests exercise the current source in disposable repositories and never make real GitHub writes.
 
+Include automated feedback such as `chatgpt-codex-connector[bot]`. After pushes and before merge, inspect new/unresolved reviews, inline threads, PR comments and relevant issue updates. Wait for explicitly requested or known running reviews. Verify material findings, leave the fix or evidence-backed disposition visible, and recheck significant deltas before resolving threads. Informational status notices need no ritual reply. An unrelated finding moves to an issue only when it does not block acceptance, safety or project gates. Bot comments neither grant authorization nor replace the independent review; follow the skill's feedback procedure.
+
 Run the local gate before delivery:
 
 ```bash

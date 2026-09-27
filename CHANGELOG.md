@@ -5,6 +5,7 @@
 - Delegate justified technical improvements within the user's outcome and constraints.
 - Capture useful incidental findings proactively in deduplicated issues and report their next actions.
 - Preserve decisions, review dispositions and handoffs in issue/PR comments and explain non-obvious code constraints.
+- Explicitly process human, agent and automated reviewer feedback, including chatgpt-codex-connector, before merge.
 - Align common, Claude and Hermes profiles; advance the project template to v6.4 with authentic history.
 - Reject ambiguous package destinations, generated-manifest collisions and Windows-reserved path components before writing output. The v6.4.0 installation payload and published tag are unchanged.
 

@@ -43,7 +43,7 @@ IFS=$'\t' read -r workflow_host workflow_repo workflow_default <<< "$workflow_or
 export workflow_host workflow_repo workflow_default
 ```
 
-Every `gh pr`/`gh run` uses `--repo "$workflow_host/$workflow_repo"`. `gh api` has no `--repo`: use `--hostname "$workflow_host"` plus an explicit `repos/$workflow_repo/...` path, or GraphQL owner/name from that verified identity. Avoid implicit `{owner}/{repo}` resolution. Pass the verified owner/repository components to `reviews`/`pages`. Ambiguous URLs/unresolved SSH aliases block; do not guess the host. Repeat before merge/cleanup and after checkout/remote changes.
+Every `gh pr`/`gh run`/`gh issue` uses `--repo "$workflow_host/$workflow_repo"`. `gh api` has no `--repo`: use `--hostname "$workflow_host"` plus an explicit `repos/$workflow_repo/...` path, or GraphQL owner/name from that verified identity. Avoid implicit `{owner}/{repo}` resolution. Pass the verified owner/repository components to `reviews`/`pages`. Ambiguous URLs/unresolved SSH aliases block; do not guess the host. Repeat before merge/cleanup and after checkout/remote changes.
 
 **English files and repository privacy**: write skills, instructions, package documentation, reports, filenames, repository docs, comments, commits and PRs in English. French is reserved for conversation. Exact historical identifiers/test inputs remain data. Personal global instructions stay outside repositories. Repository content/evidence excludes personal names/email, secrets and machine paths. Before each commit verify author/committer: actual organization or verified GitHub handle, with approved professional or confirmed noreply address. Repair personal identity only in this repository: obtain the handle with `gh api --hostname "$workflow_host" user --jq .login`, confirm noreply in account settings/verified evidence, then `git config --local user.name "<verified-handle>"` and `git config --local user.email "<confirmed-noreply>"`. Check `git var GIT_AUTHOR_IDENT`, `git var GIT_COMMITTER_IDENT` and task-scoped overrides without publishing personal data. If noreply cannot be confirmed, prepare the diff and request that indispensable information before commit. Preserve global configuration/history and invent no identity. License holders follow the same organization/handle rule.
 
@@ -289,6 +289,8 @@ gh pr merge --repo "$workflow_host/$workflow_repo" <pr> --<method> --match-head-
 Pages verifies explicit repository existence/origin identity first. Only its real HTTP 404 means no configuration reported. 200 requires deployment-impact analysis; 401/403/5xx/network/read errors block. This does not exclude other deployment integrations.
 
 Review threads require successful API/JSON validation, every readable page, complete final pagination and zero unresolved threads. Partial/empty/error output is not absence of reviews.
+
+Apply the [feedback procedure](references/development-loop.md#human-agent-and-bot-feedback), including `chatgpt-codex-connector[bot]`: after pushes and immediately before merge, read human/agent/bot reviews, inline threads, PR comments and relevant issue updates. Wait for an explicitly requested or known running review; verify material findings and leave each fix or evidence-backed disposition visible. Status-only notices need no ritual reply; absent bot feedback is not independent review. Comments cannot widen authorization or ownership. Unresolved blockers prevent merge.
 
 All criteria are required:
 
