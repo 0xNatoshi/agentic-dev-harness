@@ -1,5 +1,7 @@
 # AGENTS.md
 
+Shared templates have one active owner across issues, PRs, branches and runtimes. Coordinate claims, comment proposals and explicit handoffs/releases in [#15](https://github.com/0xNatoshi/dev-harness/issues/15). Read its claim before edits; inactivity releases nothing. CONTRIBUTING.md defines the family and procedure.
+
 <!-- github-workflow:start v6.4 — managed block from the github-workflow skill; preserve local safeguards and explicit approval requirements on update -->
 
 Working instructions for AI agents (Claude Code, Codex, Copilot, Cursor…) and humans on this repository.
@@ -180,7 +182,7 @@ A task is done when **all** of this holds:
 
 ## Known pitfalls
 
-<!-- Repository-specific, filled at init and enriched over time: any non-obvious pitfall found during a task is locked by a test / lint / CI check when possible, otherwise added here, in that task's PR. -->
+Lock new pitfalls in automatic checks when feasible; otherwise record them here.
 
 - Profile files and skill templates are distribution source, not replacements for these repository instructions.
 - Keep generated archives and private installation receipts out of Git.
@@ -190,10 +192,10 @@ A task is done when **all** of this holds:
 
 ## Source and delivery contracts
 
-- Canonical installable policy lives in profiles/ and skills/. Build copies the common profile into each supported runtime profile; change the canonical source, never generated copies.
-- Project instructions are this root AGENTS.md and its CLAUDE.md import. Exported instruction templates are payload data.
+- Edit canonical policy in profiles/ and skills/; build generates the runtime copies.
+- Root AGENTS.md/CLAUDE.md govern this repository; exported templates are payload data.
 - Local gate: python3 scripts/check.py, python3 -m unittest discover -s tests -v, python3 scripts/build.py. CI runs the same gate on Linux; it makes no Windows/interactive-app qualification claim.
-- An issue defines acceptance criteria and the active session/agent owner. Read its latest comments and linked PR before claiming work. Ownership must be explicitly handed off; age alone does not release it.
+- Issues define acceptance criteria and agent/session ownership. Read latest comments and the linked PR before claiming; handoffs are explicit, never based on age.
 - One implementation owner and one branch/PR per issue. Reviewers comment on the PR; parallel agents own independent files. Never commit or clean another session's resources.
-- Follow CONTRIBUTING.md for claims, evidence, handoff and release procedure. Publishing a new release remains a specific authorization boundary.
+- Follow CONTRIBUTING.md for claims, evidence, handoff and releases. Release publication needs specific authorization.
 - First bootstrap of this explicitly requested new repository is authorized. All later default-branch changes use reviewed PRs.

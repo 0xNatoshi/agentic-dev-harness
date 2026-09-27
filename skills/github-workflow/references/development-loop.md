@@ -64,6 +64,12 @@ Documentation-only work, regardless of diff size, uses self-review and automatic
 
 Otherwise delegate only when time/quality gain exceeds coordination/context cost. The parent owns acceptance criteria, architectural boundaries and integration. Each brief includes objective, file scope, contracts, deliverable and expected evidence. Git mutations/shared files have one owner.
 
+### Single active template owner
+
+A shared template family has one active agent/session owner, including its rendered copies, version metadata and historical snapshots. This scope crosses issues, PRs, branches, worktrees, computers and runtimes; a separate checkout does not create another owner. Locate the family's common coordination issue through project instructions and related issues/PRs. If none exists, designate one existing issue (create one only if needed), record its link and family scope outside the project's managed instruction block, and link all related work to it. Read its latest claim before editing; record owner/scope/revision there, then reread to catch simultaneous claims. Resolve conflicting claims before shared writes. A claim is coordination evidence, not an atomic lock.
+
+Other agents send proposed wording, patches or review findings in comments to that owner, who integrates and validates the combined change. Record transfer in the common issue with outgoing state, exact revision, pending edits and next owner; the incoming owner confirms before editing. A direct user reassignment also counts and must be recorded. At closure, explicitly release the claim with delivered revision and remaining work, or retain it with the reason and next checkpoint. A closed task issue, silence or elapsed time never releases a claim. Independent files remain available for parallel work. Preserve authentic historical bytes; ownership does not authorize rewriting history.
+
 | Available role | Use |
 |---|---|
 | `explorer` | Map callers/tests and gather evidence for a bounded question. |

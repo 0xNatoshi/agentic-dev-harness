@@ -8,6 +8,8 @@ Use an issue for a substantial change. Before starting, read its latest comments
 
 Do not expire a claim solely because time passed. The current owner hands off explicitly or the user entrusts the work. Independent subtasks get separate file ownership. Reviewers post findings against the PR revision and do not commit to the implementer's branch unless entrusted. Never remove another session's worktree, overwrite its files or close its PR to free resources.
 
+The shared template family covers `profiles/`, `skills/github-workflow/templates/`, rendered copies and template version metadata. It has one active owner across issues, PRs, branches, worktrees, computers and runtimes. Use the common coordination issue identified in AGENTS.md, link every related change there and reread its latest claim before edits and after claiming. Keep the claim's agent/session, scope and revision current; a task issue is not a separate template claim. Send proposals to the owner in comments. Record explicit handoffs/releases with current revision, pending work and successor; the incoming owner confirms before editing. Record any direct user reassignment. Preserve authentic history and resolve conflicting claims before shared writes.
+
 Issue, PR and review updates are part of an explicitly entrusted repository task when the user's authorization covers that collaboration. This guide does not authorize unrelated outreach, messages on the user's behalf or work in other repositories.
 
 ## Useful initiative and written reasoning
