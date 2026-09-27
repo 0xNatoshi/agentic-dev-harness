@@ -2,8 +2,10 @@
 """Check executable workflow examples for explicit targets and interpreters.
 
 This intentionally recognizes the Bash and Markdown forms used by the workflow
-guide. It is not a general Bash parser. Active templates may be added by their
-own check; historical snapshots are never current guidance inputs.
+guide. It is not a general Bash parser: dynamic evaluation, aliases/functions,
+indirect executables and substitutions inside quoted tokens need manual review.
+Active templates may be added by their own check; historical snapshots are
+never current guidance inputs.
 """
 
 import argparse
@@ -309,25 +311,97 @@ def _tokens(command):
     return tokens
 
 
-def _command_start(tokens, index):
-    arrays = []
-    for offset, word in enumerate(tokens[:index]):
-        if word and set(word) <= {"(", ")"}:
-            for character in word:
-                if character == "(":
-                    arrays.append(bool(offset and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*\+?=", tokens[offset - 1])))
-                elif arrays:
-                    arrays.pop()
-    # Array entries name executable/arguments; a nested $(...) executes a
-    # command and gets its own non-array parenthesis frame above.
-    if arrays and arrays[-1]:
-        return False
-    prefix, incomplete = _without_redirections(tokens[:index])
+def _execution_prefix(prefix):
+    """Consume supported shell introducers and wrappers only before execution."""
+    prefix, incomplete = _without_redirections(prefix)
     if incomplete:
-        return False
-    if not prefix or prefix[-1] in CONTROL | {"if", "elif", "else", "then", "while", "until", "!", "do", "env", "time", "command", "$"}:
-        return True
-    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*=.*", prefix[-1]))
+        return False, None
+
+    offset = 0
+    while offset < len(prefix):
+        word = prefix[offset]
+        offset += 1
+        if word in {"if", "elif", "else", "then", "while", "until", "!", "do", "{"} or re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*\+?=.*", word):
+            continue
+        if word not in {"exec", "command", "env", "time"}:
+            return False, None
+        wrapper = word
+        while offset < len(prefix) and prefix[offset].startswith("-"):
+            option = prefix[offset]
+            offset += 1
+            if option == "--":
+                break
+            if wrapper == "command" and re.fullmatch(r"-[pVv]+", option):
+                if "v" in option or "V" in option:
+                    return False, None
+                continue
+            if wrapper == "exec":
+                if re.fullmatch(r"-[cl]+", option):
+                    continue
+                match = re.fullmatch(r"-[cl]*a(.*)", option)
+                if match:
+                    if not match.group(1):
+                        offset += 1
+                    continue
+            if wrapper == "env":
+                if option in {"-", "-i", "--ignore-environment"}:
+                    continue
+                if option in {"-u", "--unset", "-C", "--chdir"}:
+                    offset += 1
+                    continue
+                if re.fullmatch(r"(?:-[uC].+|--(?:unset|chdir)=.+)", option):
+                    continue
+            if wrapper == "time" and option == "-p":
+                continue
+            return False, f"unsupported execution prefix {wrapper} {option}; cannot identify command operands"
+        if offset > len(prefix):
+            # The candidate itself is a wrapper option's value, not a command.
+            return False, None
+    return True, None
+
+def _command_start(tokens, index):
+    """Return (executable position, unsupported prefix) for a visible word."""
+    frames = []
+    prefix = []
+    array = False
+    case_pattern = False
+    for word in tokens[:index]:
+        if word == "(":
+            child_array = bool(prefix and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*\+?=", prefix[-1]))
+            pattern_group = case_pattern and not (prefix and prefix[-1].endswith("$"))
+            frames.append((prefix, array, child_array, case_pattern, pattern_group))
+            prefix, array = [], child_array
+            case_pattern = pattern_group
+        elif word == ")" and case_pattern:
+            # The optional '(' of a case arm delimits a pattern, not a
+            # subshell. An unparenthesized arm must not close an outer frame.
+            if frames and frames[-1][4]:
+                _, array, _, _, _ = frames.pop()
+            prefix, case_pattern = [], False
+        elif word == ")" and frames:
+            prefix, array, child_array, case_pattern, _ = frames.pop()
+            # A substitution or array is one word in the enclosing command;
+            # its closing parenthesis cannot promote a later argument to a
+            # new executable. A subshell also needs a separator before one.
+            if prefix and (child_array or prefix[-1].endswith("$")):
+                prefix[-1] += "()"
+            else:
+                prefix.append("()")
+        elif word == "|" and case_pattern:
+            prefix.append(word)
+        elif word in CONTROL:
+            # An unmatched ')' remains the boundary of a case-pattern arm.
+            prefix = []
+            case_pattern = word in {";;", ";&", ";;&"}
+        else:
+            prefix.append(word)
+            if word == "esac":
+                case_pattern = False
+            elif len(prefix) >= 3 and prefix[-3] == "case" and word == "in" and _execution_prefix(prefix[:-3])[0]:
+                case_pattern = True
+    if array or case_pattern:
+        return False, None
+    return _execution_prefix(prefix)
 
 
 def _arguments(tokens, start):
@@ -466,7 +540,12 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
 
     findings = []
     for index, word in enumerate(words):
-        if word not in {"gh", "python3", "python", "py"} or not _command_start(words, index):
+        if word not in {"gh", "python3", "python", "py"}:
+            continue
+        executable, prefix_error = _command_start(words, index)
+        if prefix_error:
+            findings.append(Diagnostic(file, line, prefix_error))
+        if not executable:
             continue
         tail = _arguments(words, index + 1)
         if word != "gh":
@@ -587,6 +666,8 @@ def scan_document(file, text):
             if not shell_fence:
                 continue
             stripped = source.rstrip()
+            if language == "console" and not pending and stripped.lstrip().startswith("$ "):
+                stripped = stripped.lstrip()[2:]
             if pending:
                 pending += stripped.lstrip()
             else:

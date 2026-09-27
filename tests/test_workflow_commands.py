@@ -637,6 +637,66 @@ gh pr view \\
             findings = check_repository(root)
             self.assertTrue(any(item.line == 5 and "PR selector" in item.message for item in findings), [str(item) for item in findings])
 
+    def test_execution_prefixes_and_groups_preserve_command_checks(self):
+        wrappers = (
+            "exec {}", "exec -cl {}", "exec -a name {}", "exec -aname {}",
+            "exec -- {}", "command -p {}", "command -- {}", "env {}",
+            "env -i NAME=value {}", "env -u GH_REPO {}", "env -uGH_REPO {}",
+            "env --unset=GH_REPO {}", "env -C . {}", "env --chdir=. {}",
+            "time -p {}", "env -i command -p {}", "NAME=value exec {}",
+            "2>/dev/null exec 2>errors.log {}", "{{ {}; }}",
+            "if true; then {{ {}; }}; fi", "case x in x) exec {}; esac",
+            "case x in (x) {}; esac", "case x in y) true;; (x) {}; esac",
+            "case x in (x|y) {};; esac", "case x in x|y) {};; esac",
+            "time case x in (x) {};; esac", "time -p case x in (x) {};; esac",
+            "time -p case x in x) {};; esac",
+            "(case x in (x) {}; esac)", "(case x in x) {}; esac)",
+            "echo $(case x in (x) {}; esac)", "echo $(case x in x) {}; esac)",
+            "case x in $({})) true;; esac", "case x in ($({})) true;; esac",
+            "args+=($(exec {}))", "args+=($(command -p {}))",
+            "echo $(exec {}) suffix", "(true); exec {}",
+        )
+        for wrapper in wrappers:
+            for command, fixed, expected in (
+                ("gh pr view 1", 'gh pr view 1 --repo "$workflow_host/$workflow_repo"', "valued --repo"),
+                ("python3 -u", '"${python_cmd[@]}" -u', "direct python3"),
+            ):
+                with self.subTest(wrapper=wrapper, command=command), tempfile.TemporaryDirectory(prefix="workflow-prefix-") as directory:
+                    root = self.root(directory, references={"examples.md": "```bash\n" + wrapper.format(command) + "\n```\n"})
+                    findings = check_repository(root)
+                    self.assertTrue(any(item.line == 2 and expected in item.message for item in findings), [str(item) for item in findings])
+                    (root / "skills/github-workflow/references/examples.md").write_text("```bash\n" + wrapper.format(fixed) + "\n```\n", encoding="utf-8")
+                    self.assertEqual(check_repository(root), [])
+
+    def test_execution_prefix_words_in_data_do_not_start_commands(self):
+        examples = (
+            "printf %s env gh pr view 1", "printf %s command gh pr view 1",
+            "printf %s NAME=value gh pr view 1", "printf %s { gh pr view 1",
+            "printf %s exec python3 -u", "echo $(true) gh pr view 1",
+            "echo $(echo $(true)) python3 -u", "exec -a gh true",
+            "exec -a python3 true", "env -u gh true", "env -C python3 true",
+            "command -v gh", "command -pV python3", "command -pv gh",
+            "args=(exec gh pr view 1)", "args+=(env python3 -u)",
+            "printf %s NAME=$(true) gh pr view 1",
+            "echo $(true) env gh pr view 1", "echo $(true) command python3 -u",
+            "case x in (gh) true;; (python3) true;; esac",
+            "case x in gh) true;; python3) true;; esac",
+            "case x in (gh|python3) true;; esac",
+            "echo $(case x in (x) true;; esac) gh pr view 1",
+        )
+        for command in examples:
+            with self.subTest(command=command), tempfile.TemporaryDirectory(prefix="workflow-prefix-data-") as directory:
+                root = self.root(directory, references={"examples.md": "```bash\n" + command + "\n```\n"})
+                self.assertEqual(check_repository(root), [])
+
+    def test_unknown_execution_prefix_options_are_not_silently_accepted(self):
+        for wrapper in ("exec --future", "command -x", "env --future", "time -o log.txt", "env -S"):
+            for command in ("gh pr view 1", "python3 -u"):
+                with self.subTest(wrapper=wrapper, command=command), tempfile.TemporaryDirectory(prefix="workflow-prefix-unknown-") as directory:
+                    root = self.root(directory, references={"examples.md": f"```bash\n{wrapper} {command}\n```\n"})
+                    findings = check_repository(root)
+                    self.assertTrue(any(item.line == 2 and "unsupported execution prefix" in item.message for item in findings), [str(item) for item in findings])
+
     def test_only_active_guidance_is_scanned(self):
         with tempfile.TemporaryDirectory(prefix="workflow-scope-") as directory:
             root = self.root(directory)
