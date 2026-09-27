@@ -35,6 +35,7 @@ SCENARIOS = (
     "update_refs_invalid_oid",
     "update_refs_invalid_ref",
     "update_refs_nul",
+    "update_refs_wide_oid",
     "am_marker_only",
     "am_counter_extra_line",
     "am_counter_range",
@@ -63,6 +64,7 @@ STATUS = {
     "update_refs_invalid_oid": 2,
     "update_refs_invalid_ref": 2,
     "update_refs_nul": 2,
+    "update_refs_wide_oid": 2,
     "am_marker_only": 2,
     "am_counter_extra_line": 2,
     "am_counter_range": 2,
@@ -167,6 +169,8 @@ class BranchCleanupTests(unittest.TestCase):
                 "update_refs_invalid_oid": "refs/heads/other\nnot-an-object-id\n" + "0" * 40 + "\n",
                 "update_refs_invalid_ref": f"refs/heads/other bad\n{oid}\n{oid}\n",
                 "update_refs_nul": f"refs/heads/target\0\n{oid}\n{oid}\n",
+                # A SHA-256-width object ID is malformed in this SHA-1 repository.
+                "update_refs_wide_oid": "refs/heads/other\n" + "0" * 64 + "\n" + "0" * 64 + "\n",
                 "update_refs_alias": f"refs/heads/other\n{oid}\n{oid}\nrefs/heads/alias\n{oid}\n{oid}\n",
                 "update_refs_symref_cycle": f"refs/heads/loop-a\n{oid}\n{oid}\n",
             }

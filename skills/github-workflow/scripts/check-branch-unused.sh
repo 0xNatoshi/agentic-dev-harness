@@ -143,9 +143,14 @@ check_operation_dir() {
       }
       # Git writes one ref, old OID, new OID triplet per branch. A record that
       # is empty, truncated or malformed cannot prove the branch is absent.
-      awk -v ref="$ref" '
+      case $(git rev-parse --show-object-format 2>/dev/null) in
+        sha1) oid_length=40 ;;
+        sha256) oid_length=64 ;;
+        *) printf '%s\n' 'Cannot read the repository object format.' >&2; exit 2 ;;
+      esac
+      awk -v ref="$ref" -v oid_length="$oid_length" '
         NR % 3 == 1 { if ($0 == ref) found = 1; if ($0 !~ /^refs\//) bad = 1; next }
-        (length($0) != 40 && length($0) != 64) || /[^0-9a-f]/ { bad = 1 }
+        length($0) != oid_length || /[^0-9a-f]/ { bad = 1 }
         END { if (bad || NR == 0 || NR % 3 != 0) exit 2; exit found ? 1 : 0 }
       ' "$updates"
       status=$?
