@@ -21,11 +21,6 @@ import sys
 
 GUIDE = Path("skills/github-workflow")
 SHELL_FENCES = {"", "bash", "sh", "shell", "zsh", "console"}
-# Keep physical comments, quotes and escapes intact before joining shell lines.
-SHELL_SPANS = re.compile(
-    r''' '[^']*' | "(?:\\.|[^"\\])*" | \\. | (?P<comment>(?<![^\s;&|()])\#.*$) | (?P<here>(?<!<)<<(?!<)-?) ''',
-    re.VERBOSE,
-)
 # Recognized command options from gh 2.86 help. Unknown commands/options fail
 # closed until their documented contract is added. Inherited flags are added
 # by _options; the merge-method placeholder is guidance syntax, not a CLI flag.
@@ -652,11 +647,14 @@ def _here_document(command):
     """Recognize the bounded body grammar without interpreting its contents."""
     # Preserve quotes here: ordinary shlex tokenization removes the distinction
     # between a redirect and a quoted string that merely contains '<<'.
-    spans = SHELL_SPANS.finditer(command)
+    spans = re.finditer(
+        r''' '[^']*' | "(?:\\.|[^"\\])*" | \\. | (?<![^\s;&|()])\#.*$ | (?P<here>(?<!<)<<(?!<)-?) ''',
+        command, re.VERBOSE,
+    )
     if not any(span.lastgroup == "here" for span in spans):
         return None, None
     header = re.fullmatch(
-        r'''\s*(?:cat|"\$\{python_cmd\[@\]\}"\s+-)\s+<<(?P<tabs>-)?\s*(?P<quote>['"])(?P<end>[A-Za-z_][A-Za-z_0-9]*)(?P=quote)\s*(?:\#.*)?''',
+        r'''\s*(?:cat|"\$\{python_cmd\[@\]\}"\s+-)\s+<<(?P<tabs>-)?\s*(?P<quote>['"])(?P<end>[A-Za-z_][A-Za-z_0-9]*)(?P=quote)(?:\s+\#.*)?\s*''',
         command,
     )
     if header is None:
@@ -710,14 +708,13 @@ def scan_document(file, text):
             else:
                 pending = stripped
                 pending_line = number
-            # A backslash in a comment cannot join physical lines. An actual
-            # continuation may still split a here-document header itself.
-            has_comment = any(span.lastgroup == "comment" for span in SHELL_SPANS.finditer(pending))
-            if pending.endswith("\\") and not has_comment:
+            # In a complete supported header, a final backslash can only be
+            # comment data. Incomplete headers still use normal continuation.
+            here_document, here_error = _here_document(pending)
+            if pending.endswith("\\") and here_document is None:
                 pending = pending[:-1] + " "
                 continue
             is_probe = _interpreter_probe(lines, number)
-            here_document, here_error = _here_document(pending)
             if here_error:
                 findings.append(Diagnostic(file, pending_line, here_error))
             if here_document is not None:

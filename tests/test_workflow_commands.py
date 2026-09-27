@@ -767,6 +767,21 @@ gh pr view \\
                 findings = check_repository(root)
                 self.assertTrue(any(item.line == 2 and "unsupported here-document header" in item.message for item in findings), [str(item) for item in findings])
 
+    def test_hash_concatenation_cannot_change_a_supported_here_document_delimiter(self):
+        for recipient in ("cat", '"${python_cmd[@]}" -'):
+            with self.subTest(recipient=recipient), tempfile.TemporaryDirectory(prefix="workflow-here-hash-") as directory:
+                body = f"```bash\n{recipient} <<'EOF'#tag\nEOF#tag\ngh pr view 1\ncat <<'EOF'\nEOF\n```\n"
+                root = self.root(directory, references={"boundary.md": body})
+                findings = check_repository(root)
+                self.assertTrue(any(item.line == 2 and "unsupported here-document header" in item.message for item in findings), [str(item) for item in findings])
+                self.assertTrue(any(item.line == 4 and "valued --repo" in item.message for item in findings), [str(item) for item in findings])
+
+    def test_hash_in_a_substituted_word_keeps_ordinary_continuation(self):
+        body = "```bash\nprintf '%s\\n' $(printf foo)#bar " + "\\\n  gh pr view 1\n```\n"
+        with tempfile.TemporaryDirectory(prefix="workflow-hash-word-") as directory:
+            root = self.root(directory, references={"boundary.md": body})
+            self.assertEqual(check_repository(root), [])
+
     def test_here_document_boundaries_cannot_hide_later_markdown_or_commands(self):
         for body in (
             "```bash\ncat <<'EOF'\ntext\n```\n",
