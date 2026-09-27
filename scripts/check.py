@@ -41,6 +41,10 @@ VERSION = re.compile(r'v?\d+(?:\.\d+)*(?:-[0-9a-z-]+(?:\.[0-9a-z-]+)*)?\Z')
 # A single-label pin such as actions/checkout@<full commit SHA>.
 COMMIT = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 DIST_TAGS = {"latest", "next"}
+# A ref or tag such as feature.1 or rc.2.10: one name label, then numeric labels only.
+# No top-level domain is all-numeric (RFC 3696), and a real domain before the numbers
+# (gmail.com.1) keeps two alphabetic labels, so it stays screened.
+REF_NAME = re.compile(r'[a-z][a-z0-9_-]*(?:\.[0-9]+)+\Z')
 # Default branch names after owner/repo@; any other dotless ref needs a `uses:` key.
 DEFAULT_BRANCHES = {"main", "master", "trunk", "develop", "head"}
 # An OCI image digest: the image name, then @sha256: and 64 hex digits (or sha512, 128).
@@ -65,10 +69,13 @@ NEUTRAL_DOMAINS = {"users.noreply.github.com"}
 NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "codex@openai.com", "git@github.com"}
 # A URI scheme and // before the local part mark URL user info.
 URI_SCHEME = re.compile(r'(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\Z')
-# The value of a workflow `uses:` key is an action reference by schema.
-USES_KEY = re.compile(r'\s*(?:-\s+)?uses:\s+\Z')
-# pip-style VCS URLs put a revision after the path: git+https://host/owner/repo.git@main.
+# In a YAML file the value of a `uses:` key is an action reference by schema, whatever
+# its ref; elsewhere the same text is prose and stays screened.
+USES_KEY = re.compile(r'\s*(?:-\s+)?uses:\s+["\x27]?\Z')
+YAML_SUFFIXES = (".yml", ".yaml")
+# pip-style VCS URLs put a revision after a plain path: git+https://host/owner/repo.git@main.
 VCS_SCHEME = re.compile(r'(?<![A-Za-z0-9+.-])(?:git|hg|svn|bzr)\+[a-z]+:\Z')
+VCS_PATH = re.compile(r'//[^/?#=&]+(?:/[^/?#=&]+)+\Z')
 
 
 def label_char(char):
@@ -123,8 +130,16 @@ def python_text(text):
     return "".join("".join(row) for row in rows)
 
 
+def ref_shaped(domain):
+    """A revision that cannot be a screened mail domain: dotless, numbered, a version or a SHA."""
+    return "." not in domain or bool(REF_NAME.match(domain) or VERSION.match(domain) or COMMIT.match(domain))
+
+
 def check_emails(relative, text):
-    for number, line in enumerate(text.splitlines(), 1):
+    yaml = str(relative).endswith(YAML_SUFFIXES)
+    # Split on newlines only, as editors and python_text() count lines; splitlines()
+    # also breaks on form feeds and Unicode separators and would shift the reported line.
+    for number, line in enumerate(text.split("\n"), 1):
         for match in re.finditer("@", line):
             end = domain_end(line, match.start())
             if end is None:
@@ -149,23 +164,20 @@ def check_emails(relative, text):
                 # import such as `@AGENTS.md`.
                 continue
             last = domain.rpartition(".")[2]
-            if (VERSION.match(domain) and not last.isalpha()) or COMMIT.match(domain):
-                continue
-            if "." in domain and last.isascii() and last.isdigit():
-                # No top-level domain is all-numeric (RFC 3696), so owner/action@feature.1
-                # or pkg@beta.1 names a ref or tag; dotted IPv4 already reads as a version.
-                continue
+            if (VERSION.match(domain) and not last.isalpha() and not last.startswith("xn--")) \
+                    or COMMIT.match(domain) or REF_NAME.match(domain):
+                continue  # a Punycode label such as xn--p1ai is a top-level domain, not a pin
             if "/" in local and not local.startswith("/") and (
-                    USES_KEY.fullmatch(before) or "." not in domain and domain in DEFAULT_BRANCHES):
-                # A repository reference: any ref after a `uses:` key, or a default branch as in
-                # actions/checkout@main. Elsewhere a slash is a valid local-part character before
+                    yaml and USES_KEY.fullmatch(before) or "." not in domain and domain in DEFAULT_BRANCHES):
+                # A repository reference: any ref after a YAML `uses:` key, or a default branch as
+                # in actions/checkout@main. Elsewhere a slash is a valid local-part character before
                 # an intranet host and .one may be a real top-level domain, so both stay screened;
                 # URL user info keeps its leading // in the local part.
                 continue
             if "." not in domain and domain in DIST_TAGS:
                 continue  # a package dist-tag such as pkg@latest
-            if local.startswith("//") and "/" in local[2:] and VCS_SCHEME.search(before):
-                continue  # a revision after a VCS URL path, not user info
+            if VCS_PATH.match(local) and VCS_SCHEME.search(before) and ref_shaped(domain):
+                continue  # a revision after a plain VCS URL path, not user info
             if local.startswith("//") and URI_SCHEME.search(before):
                 local = local[2:]  # ssh://git@github.com/owner/repo.git names git@github.com
             neutral = neutral_domain(domain) or f"{local.lower()}@{domain}" in NEUTRAL_ADDRESSES

@@ -107,7 +107,17 @@ class SourceCheckTests(unittest.TestCase):
                         # Only a VCS URL path takes a revision; other URL paths and user info stay screened.
                         "https://github.com/" + "@".join(["owner/repo.git", "feature"]),
                         "https://lists.host.test/archive/" + "@".join(["person", "mail-host.co"]),
-                        "git+https://" + "@".join(["person", "github.com"]) + "/owner/repo.git"]:
+                        "git+https://" + "@".join(["person", "github.com"]) + "/owner/repo.git",
+                        # A revision must be ref-shaped and follow a plain path.
+                        "git+https://host.test/" + "@".join(["first.last", "personal-mail.net"]),
+                        "git+https://host.test/owner/repo/issues?author=" + "@".join(["first.last", "personal-mail.net"]),
+                        # A real domain followed by numbers, and a Punycode top-level domain.
+                        "@".join(["first.last", "personal-mail.net.1"]), "@".join(["first", "sub.personal-mail.co.2"]),
+                        "@".join(["person", "1-mail.xn--p1ai"]),
+                        # Outside YAML a `uses:` line is prose.
+                        "uses: " + "@".join(["owner/action", "feature.one"]),
+                        # A form feed is not a line break, so the reported line stays exact.
+                        "\x0c" + "@".join(["first.last", "personal-mail.net"])]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
@@ -118,7 +128,7 @@ class SourceCheckTests(unittest.TestCase):
             profile = source / "profiles/AGENTS.template.md"
             text = profile.read_text(encoding="utf-8")
             profile.write_text(text + f"\nContact: {address}\n", encoding="utf-8")
-            line = len((text + "\nContact:").splitlines())
+            line = len((text + "\nContact:").split("\n"))
             environment, _ = fixture_environment(root)
             result = run([sys.executable, "scripts/check.py"], source, environment)
             self.assertNotEqual(result.returncode, 0)
@@ -169,21 +179,25 @@ class SourceCheckTests(unittest.TestCase):
             "@".join(["npm install pkg", "beta.1"]),
             "@".join(["pkg", "rc.2.10"]),
         ]
-        # Workflow lines: the whole value of a `uses:` key is an action reference.
+        lines = [
+            "git+https://github.com/" + "@".join(["owner/repo.git", "feature"]),
+            "git+ssh://" + "@".join(["git", "github.com/owner/repo.git", "main"]),
+        ]
+        # Workflow lines: in YAML the whole value of a `uses:` key is an action reference.
         uses = [
             "  - uses: " + "@".join(["owner/action", "feature.one"]),
             "        uses: '" + "@".join(["owner/action", "release.candidate"]) + "'",
+            "        uses: \"" + "@".join(["owner/action", "feature.one"]) + "\"",
             "    uses: " + "@".join(["owner/repo/.github/workflows/ci.yml", "feature.one"]),
             "    uses: " + "@".join(["owner/action", "feature"]),
-            "git+https://github.com/" + "@".join(["owner/repo.git", "feature"]),
-            "git+ssh://" + "@".join(["git", "github.com/owner/repo.git", "main"]),
         ]
         with tempfile.TemporaryDirectory(prefix="harness-neutral-email-") as directory:
             root = Path(directory)
             source = self.copy_source(root)
             profile = source / "profiles/AGENTS.template.md"
-            profile.write_text(profile.read_text(encoding="utf-8") + "\n" + " ".join(addresses) + "\n" + "\n".join(uses) + "\n",
+            profile.write_text(profile.read_text(encoding="utf-8") + "\n" + " ".join(addresses) + "\n" + "\n".join(lines) + "\n",
                                encoding="utf-8")
+            (source / ".github/workflows/fixture-uses.yml").write_text("jobs:\n  steps:\n" + "\n".join(uses) + "\n", encoding="utf-8")
             environment, _ = fixture_environment(root)
             result = run([sys.executable, "scripts/check.py"], source, environment)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
