@@ -10,6 +10,7 @@ Development version: 6.5.0. No release tag has been published for this version.
 - Delegate justified technical improvements within the user's outcome and constraints.
 - Capture useful incidental findings proactively in deduplicated issues and report their next actions.
 - Preserve decisions, review dispositions and handoffs in issue/PR comments and explain non-obvious code constraints.
+- Credit verified agent contributions, record observed model/provider provenance when available, and preserve applicable attribution through squash merges.
 - Explicitly process human, agent and automated reviewer feedback, including chatgpt-codex-connector, before merge.
 - Align common, Claude and Hermes profiles; advance the project template to v6.4 with authentic history.
 - Compare the staged license blob with the official text, probe Python like `merge-preflight.sh`, and exit 2 when the comparison cannot run; cover the documented command with an offline test.
