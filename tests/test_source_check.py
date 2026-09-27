@@ -88,7 +88,14 @@ class SourceCheckTests(unittest.TestCase):
                         # An @ inside a quoted local part is still a separator, so a
                         # single-label host cannot hide there (conservative).
                         "@".join(['"first', 'privatehost"', "example.com"]),
-                        "@".join(["image", "sha256:" + "0" * 63]), "@".join(["image", "sha512:" + "0" * 64])]:
+                        "@".join(["image", "sha256:" + "0" * 63]), "@".join(["image", "sha512:" + "0" * 64]),
+                        # URL user info is screened like any local part.
+                        "ssh://" + "@".join(["person", "privatehost"]) + "/owner/repo.git",
+                        "ssh://" + "@".join(["git", "github.com.evil"]) + "/owner/repo.git",
+                        "ssh://" + "@".join(["person", "github.com"]) + "/owner/repo.git",
+                        "https://" + "@".join(["person", "github.com"]) + "/owner/repo.git",
+                        "ssh://" + "@".join(["//git", "github.com"]) + "/owner/repo.git",
+                        "@".join(["//git", "github.com"]) + "/owner/repo.git"]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
@@ -140,6 +147,12 @@ class SourceCheckTests(unittest.TestCase):
             "Write to " + "@".join(["noreply", "anthropic.com"]) + ".",
             "@".join(["FROM ubuntu", "sha256:" + "0123456789abcdef" * 4]),
             "@".join(["image", "sha512:" + "0123456789abcdef" * 8]),
+            "ssh://" + "@".join(["git", "github.com"]) + "/owner/repo.git",
+            "`ssh://" + "@".join(["git", "github.com"]) + "/owner/repo.git`",
+            "\"ssh://" + "@".join(["git", "github.com"]) + "/owner/repo.git\"",
+            "[clone](ssh://" + "@".join(["git", "github.com"]) + "/owner/repo.git)",
+            "ssh://" + "@".join(["git", "github.com"]) + ":22/owner/repo.git",
+            "git+ssh://" + "@".join(["git", "github.com"]) + "/owner/repo.git",
         ]
         with tempfile.TemporaryDirectory(prefix="harness-neutral-email-") as directory:
             root = Path(directory)
