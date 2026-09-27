@@ -18,6 +18,78 @@ class SourceCheckTests(unittest.TestCase):
         shutil.copytree(ROOT, source, ignore=shutil.ignore_patterns(".git", "dist", "__pycache__", "TASKS.md"))
         return source
 
+    def append_workflow_examples(self, source, relative, commands):
+        path = source / relative
+        original = path.read_text(encoding="utf-8")
+        opening = "\n```bash\n"
+        first_line = len((original + opening).splitlines()) + 1
+        path.write_text(original + opening + "\n".join(commands) + "\n```\n", encoding="utf-8")
+        return [f"{relative}:{first_line + offset}:" for offset in range(len(commands))]
+
+    def test_source_gate_accepts_healthy_workflow_guidance(self):
+        with tempfile.TemporaryDirectory(prefix="harness-workflow-healthy-") as directory:
+            root = Path(directory)
+            source = self.copy_source(root)
+            environment, _ = fixture_environment(root)
+            result = run([sys.executable, "scripts/check.py"], source, environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('"source_checks": "passed"', result.stdout)
+
+    def test_source_gate_rejects_each_unsafe_workflow_command(self):
+        cases = [
+            ('gh pr view --repo "$workflow_host/$workflow_repo" --json body', "gh pr view needs an explicit PR selector"),
+            ('gh run view --repo "$workflow_host/$workflow_repo" --log-failed', "gh run view needs an explicit run ID"),
+            ('gh issue view <n>', "gh issue view needs a valued --repo"),
+            ('gh repo view --json nameWithOwner', "gh repo view needs an explicit repository"),
+            ('gh repo edit --description text', "gh repo edit needs an explicit repository"),
+            ('gh pr merge --repo "$workflow_host/$workflow_repo" "$workflow_pr" --match-head-commit', "--match-head-commit needs a commit value"),
+            ("python3 -c 'print(1)'", "direct python3 invocation"),
+            ("python3 - <<'PY'", "direct python3 invocation"),
+            ("python3 scripts/check.py", "direct python3 invocation"),
+        ]
+        relative = "skills/github-workflow/references/development-loop.md"
+        for command, message in cases:
+            with self.subTest(command=command), tempfile.TemporaryDirectory(prefix="harness-workflow-command-") as directory:
+                root = Path(directory)
+                source = self.copy_source(root)
+                location, = self.append_workflow_examples(source, relative, [command])
+                environment, _ = fixture_environment(root)
+                result = run([sys.executable, "scripts/check.py"], source, environment)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(location + " " + message, result.stderr)
+                self.assertNotIn('"source_checks": "passed"', result.stdout + result.stderr)
+
+    def test_source_gate_collects_workflow_findings_across_active_files(self):
+        with tempfile.TemporaryDirectory(prefix="harness-workflow-collected-") as directory:
+            root = Path(directory)
+            source = self.copy_source(root)
+            skill_location, = self.append_workflow_examples(
+                source, "skills/github-workflow/SKILL.md", ["gh issue view <n>"],
+            )
+            reference_locations = self.append_workflow_examples(
+                source, "skills/github-workflow/references/readme-guide.md",
+                ["gh repo view --json nameWithOwner", "python3 scripts/check.py"],
+            )
+            environment, _ = fixture_environment(root)
+            result = run([sys.executable, "scripts/check.py"], source, environment)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn(skill_location + " gh issue view needs a valued --repo", result.stderr)
+            self.assertIn(reference_locations[0] + " gh repo view needs an explicit repository", result.stderr)
+            self.assertIn(reference_locations[1] + " direct python3 invocation", result.stderr)
+            self.assertNotIn('"source_checks": "passed"', result.stdout + result.stderr)
+
+    def test_source_gate_excludes_authentic_workflow_history(self):
+        with tempfile.TemporaryDirectory(prefix="harness-workflow-history-") as directory:
+            root = Path(directory)
+            source = self.copy_source(root)
+            self.append_workflow_examples(
+                source, "skills/github-workflow/templates/history/AGENTS-v6.1.md", ["gh issue view <n>"],
+            )
+            environment, _ = fixture_environment(root)
+            result = run([sys.executable, "scripts/check.py"], source, environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('"source_checks": "passed"', result.stdout)
+
     def test_project_hold_allows_source_gate_but_still_blocks_merge(self):
         with tempfile.TemporaryDirectory(prefix="harness-project-hold-") as directory:
             root = Path(directory)
