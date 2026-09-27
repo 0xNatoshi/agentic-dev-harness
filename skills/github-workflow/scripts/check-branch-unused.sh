@@ -8,6 +8,13 @@ if [ -z "$branch" ] || [ "$#" -ne 1 ] || [[ "$branch" == refs/heads/* ]] || ! gi
   exit 2
 fi
 ref="refs/heads/$branch"
+# update-ref -d follows a symbolic branch and would delete the ref it names.
+if git symbolic-ref -q "$ref" >/dev/null; then
+  printf '%s\n' 'Branch is a symbolic ref; retain it.' >&2
+  exit 2
+elif [ "$?" -ne 1 ]; then
+  exit 2
+fi
 common=$(git rev-parse --path-format=absolute --git-common-dir) || exit 2
 [ -n "$common" ] || exit 2
 
@@ -28,10 +35,34 @@ fi
 # -z keeps worktree paths unambiguous, including whitespace and newlines.
 git worktree list --porcelain -z > "$inventory_z" || exit 2
 
+# Git writes these state files as one record; command substitution would hide
+# extra lines and control bytes, so reject them before reading the value.
+single_record() {
+  [ "$(grep -c '' "$1")" = 1 ] && LC_ALL=C tr -d '\000-\011\013-\037\177' < "$1" | cmp -s - "$1"
+}
+
+# Git follows symbolic refs when an operation updates a recorded name, so an
+# alias such as refs/heads/alias -> refs/heads/target still rewrites target.
+# The branch itself is never symbolic, so the terminal referent is enough.
+names_ref() {
+  [ "$1" = "$ref" ] && return 0
+  if referent=$(git -C "$worktree" symbolic-ref -q "$1"); then
+    [ "$referent" = "$ref" ]
+  else
+    # Status 1 is a plain or missing ref; cycles and deep chains cannot be trusted.
+    [ "$?" -eq 1 ] || {
+      printf 'Unresolvable symbolic ref %s in %s\n' "$1" "$worktree" >&2
+      exit 2
+    }
+    return 1
+  fi
+}
+
 check_operation_file() {
   operation=$1
   file=$2
-  [ -f "$file" ] && [ -r "$file" ] || {
+  # A symlink could borrow another file's content, such as the detached literal.
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || {
     printf 'Cannot read %s state: %s\n' "$operation" "$file" >&2
     exit 2
   }
@@ -40,9 +71,18 @@ check_operation_file() {
     printf 'Empty %s state: %s\n' "$operation" "$file" >&2
     exit 2
   }
+  single_record "$file" || {
+    printf 'Malformed %s state: %s\n' "$operation" "$file" >&2
+    exit 2
+  }
   if [ "$state" = "$ref" ] || [ "$state" = "$branch" ]; then
     printf 'Branch is in use by %s in %s; retain it.\n' "$operation" "$worktree" >&2
     exit 1
+  fi
+  # Git writes this exact literal as head-name when rebasing a detached HEAD.
+  if [ "$operation" != bisect ] && [ "$state" = "detached HEAD" ]; then
+    check_detached_head "$operation"
+    return 0
   fi
   case "$state" in
     refs/heads/*) state_ref=$state ;;
@@ -52,16 +92,128 @@ check_operation_file() {
     printf 'Unknown %s state: %s\n' "$operation" "$file" >&2
     exit 2
   }
+  if names_ref "$state_ref"; then
+    printf 'Branch is in use by %s in %s through %s; retain it.\n' "$operation" "$worktree" "$state_ref" >&2
+    exit 1
+  fi
+}
+
+# A detached operation names no branch only while HEAD resolves to a real commit;
+# a truncated or dangling HEAD leaves the operation's base untrusted.
+check_detached_head() {
+  git -C "$worktree" rev-parse -q --verify 'HEAD^{commit}' >/dev/null || {
+    printf 'Unresolvable HEAD during %s in %s\n' "$1" "$worktree" >&2
+    exit 2
+  }
+}
+
+check_am_head() {
+  if am_head=$(git -C "$worktree" symbolic-ref -q HEAD); then
+    [ "$am_head" != "$ref" ] || {
+      printf 'Branch is in use by git am in %s; retain it.\n' "$worktree" >&2
+      exit 1
+    }
+  else
+    # Status 1 is a detached HEAD; anything else cannot be trusted.
+    [ "$?" -eq 1 ] || exit 2
+    check_detached_head "git am"
+  fi
 }
 
 check_operation_dir() {
   operation=$1
   directory="$gitdir/$operation"
   if [ -e "$directory" ] || [ -L "$directory" ]; then
-    [ -d "$directory" ] && [ -r "$directory" ] && [ -x "$directory" ] || {
+    # A linked directory could hold another worktree's state; Git never writes one.
+    [ -d "$directory" ] && [ ! -L "$directory" ] && [ -r "$directory" ] && [ -x "$directory" ] || {
       printf 'Cannot read %s state in %s\n' "$operation" "$gitdir" >&2
       exit 2
     }
+    # rebase --update-refs lists branches Git rewrites when the rebase ends.
+    updates="$directory/update-refs"
+    if [ -e "$updates" ] || [ -L "$updates" ]; then
+      [ -f "$updates" ] && [ ! -L "$updates" ] && [ -r "$updates" ] || {
+        printf 'Cannot read %s update-refs in %s\n' "$operation" "$gitdir" >&2
+        exit 2
+      }
+      # Control bytes such as NUL can be dropped by awk or read and hide a name.
+      LC_ALL=C tr -d '\000-\011\013-\037\177' < "$updates" | cmp -s - "$updates" || {
+        printf 'Malformed %s update-refs in %s\n' "$operation" "$gitdir" >&2
+        exit 2
+      }
+      # Git writes one ref, old OID, new OID triplet per branch. A record that
+      # is empty, truncated or malformed cannot prove the branch is absent.
+      case $(git rev-parse --show-object-format 2>/dev/null) in
+        sha1) oid_length=40 ;;
+        sha256) oid_length=64 ;;
+        *) printf '%s\n' 'Cannot read the repository object format.' >&2; exit 2 ;;
+      esac
+      awk -v ref="$ref" -v oid_length="$oid_length" '
+        NR % 3 == 1 { if ($0 == ref) found = 1; if ($0 !~ /^refs\//) bad = 1; next }
+        length($0) != oid_length || /[^0-9a-f]/ { bad = 1 }
+        END { if (bad || NR == 0 || NR % 3 != 0) exit 2; exit found ? 1 : 0 }
+      ' "$updates"
+      status=$?
+      # awk only checks the shape; Git's own rules decide whether a name is a ref.
+      if [ "$status" -ne 2 ]; then
+        awk 'NR % 3 == 1' "$updates" | {
+          in_use=$status
+          while IFS= read -r name; do
+            git check-ref-format "$name" || exit 2
+            ! names_ref "$name" || in_use=1
+          done
+          exit "$in_use"
+        }
+        status=$?
+      fi
+      case $status in
+        0) ;;
+        1)
+          printf 'Branch is in use by %s --update-refs in %s; retain it.\n' "$operation" "$worktree" >&2
+          exit 1
+          ;;
+        *)
+          printf 'Malformed %s update-refs in %s\n' "$operation" "$gitdir" >&2
+          exit 2
+          ;;
+      esac
+    fi
+    # git am uses rebase-apply with an applying marker and no head-name; it
+    # applies onto the worktree's own HEAD, which the attached check covers.
+    if [ "$operation" = rebase-apply ] && [ -f "$directory/applying" ] && [ ! -L "$directory/applying" ] &&
+      [ ! -e "$directory/rebasing" ] && [ ! -L "$directory/rebasing" ] &&
+      [ ! -e "$directory/head-name" ] && [ ! -L "$directory/head-name" ]; then
+      # git am always records its patch counters; a bare marker is truncated state.
+      for counter in next last; do
+        [ -f "$directory/$counter" ] && [ ! -L "$directory/$counter" ] && [ -r "$directory/$counter" ] &&
+          single_record "$directory/$counter" && grep -Eqx '[0-9]{1,9}' "$directory/$counter" || {
+          printf 'Incomplete git am state in %s\n' "$gitdir" >&2
+          exit 2
+        }
+      done
+      # A stopped git am sits on patch next of last, so 1 <= next <= last.
+      next=$(cat "$directory/next") && last=$(cat "$directory/last") &&
+        [ "$next" -ge 1 ] && [ "$next" -le "$last" ] || {
+        printf 'Inconsistent git am state in %s\n' "$gitdir" >&2
+        exit 2
+      }
+      # git am resumes only with the message and author it recorded, as in its
+      # validate_resume_state(); without them the state is truncated.
+      for record in final-commit author-script; do
+        [ -f "$directory/$record" ] && [ ! -L "$directory/$record" ] && [ -r "$directory/$record" ] || {
+          printf 'Incomplete git am state in %s\n' "$gitdir" >&2
+          exit 2
+        }
+      done
+      for key in NAME EMAIL DATE; do
+        grep -q "^GIT_AUTHOR_$key=" "$directory/author-script" || {
+          printf 'Incomplete git am state in %s\n' "$gitdir" >&2
+          exit 2
+        }
+      done
+      check_am_head
+      return 0
+    fi
     check_operation_file "$operation" "$directory/head-name"
   fi
 }
