@@ -1,10 +1,12 @@
 """Merge routing, suspension and Pages fixtures against the source skill."""
 
 from dataclasses import dataclass
+import importlib.util
 import json
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
+import time
 import unicodedata
 import unittest
 
@@ -195,6 +197,25 @@ TEXT_CASES = (
     Case("kept hold lead-in over blocks", 2, "Until I approve:\n\nA\n\nB\n\nC\n\nNo fast-forward merges; use merge commits."),
     Case("caught distant invisible splits", 2, "Do​not touch anything in this repository at all, or mer​ge anything, until I approve."),
     Case("conservative method ban alone", 2, "- No merge commits."),
+    Case("kept method rule with sign-off condition", 2, "Never squash-merge; use rebase merges once the owner signs off."),
+    Case("kept method rule once approved", 2, "No squash merges; merge commits only once approved."),
+    Case("kept French method rule after green light", 2,
+         "Pas de squash merge ; utiliser des merge commits après le feu vert du mainteneur."),
+    Case("kept French method rule once approved", 2,
+         "Pas de squash merge ; merge commits uniquement une fois approuvés par le propriétaire."),
+    Case("kept all methods banned", 2, "Never use squash merges, rebase merges or merge commits."),
+    Case("kept all methods banned with serial comma", 2, "Do not use squash merges, rebase merges, or merge commits."),
+    Case("kept hold after cleared method rule", 2, "No fast-forward merges; use merge commits.\n\nWait for the owner."),
+    Case("kept hold after paragraph separator", 2, "No fast-forward merges; use merge commits.\u2029\u2029Wait for the owner."),
+    Case("kept hold after record separator", 2, "No fast-forward merges; use merge commits.\x1e\x1eWait for the owner."),
+    Case("kept sibling heading pause", 2, "## Merging\n\n## Status\n\nPaused until I approve."),
+    Case("kept sibling item pause", 2, "- Merging pull requests\n- Status: paused until I approve"),
+    Case("kept sibling task pause", 2, "- [ ] Merging\n- [x] paused until I approve"),
+    Case("kept upstream ban continued after semicolon", 2, "Never merge from upstream; ever."),
+    Case("cleared method rule then unrelated rule", 0,
+         "No fast-forward merges; use merge commits.\n\nRun the tests before pushing."),
+    Case("cleared method ban then permitted method", 0, "Do not use squash merges; use merge commits."),
+    Case("oversized input is not scanned", 2, "Use squash merges.\n" * 7000),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -232,8 +253,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 170 or len({case.name for case in ALL_CASES}) != 170:
-    raise RuntimeError("Merge fixture inventory must contain 170 unique cases")
+if len(ALL_CASES) != 186 or len({case.name for case in ALL_CASES}) != 186:
+    raise RuntimeError("Merge fixture inventory must contain 186 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
@@ -301,3 +322,14 @@ def make_test(case: Case):
 for number, fixture in enumerate(ALL_CASES, 1):
     slug = re.sub(r"[^a-z0-9]+", "_", fixture.name.lower()).strip("_")
     setattr(MergePreflightTests, f"test_{number:02d}_{slug}", make_test(fixture))
+
+
+class ScanTimeTests(unittest.TestCase):
+    def test_long_invisible_run_stays_linear(self) -> None:
+        # A quadratic hidden-split scan took over 10 s on this input; linear takes milliseconds.
+        spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        start = time.monotonic()
+        self.assertEqual(module.scan_text("merge" + "\u200b" * 80000 + " x"), 0)
+        self.assertLess(time.monotonic() - start, 3)

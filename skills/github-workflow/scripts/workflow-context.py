@@ -94,7 +94,8 @@ IGNORABLE = re.compile('[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u3164\ufe00
 
 
 def invisible(c):
-    return unicodedata.category(c) == 'Cf' or bool(IGNORABLE.match(c))
+    category = unicodedata.category(c)
+    return category == 'Cf' or (category == 'Cc' and c not in '\t\n\r') or bool(IGNORABLE.match(c))
 
 
 def normalize(text, joiner=''):
@@ -118,7 +119,7 @@ EXAMPLE = re.compile(PREFIX + r'\s*<date>(?!\s*\d)')
 DATED = re.compile(PREFIX + r'\s*(\d{4}-\d{2}-\d{2})(?![\w-])')
 MERGE_WORD = r'\b(?:merges?|merging|merger|mergez|fusions?|fusionner|fusionnement|fusionnez)\b'
 PAUSE_WORD = r'\b(?:suspend\w*|paused?|on\s+hold|disabled|forbidden|blocked|en\s+attente|interdit\w*|interdic\w*|bloqu\w*|désactiv\w*|différ\w*)\b'
-APPROVAL_WORD = r'\b(?:approval|approve|agreement|consent|permission|authorization|authorisation|sign[ -]?off|green\s+light|accord|go|confirmation|autorisation)\b'
+APPROVAL_WORD = r'\b(?:approv\w*|agreement|consent|permission|authorization|authorisation|sign[ -]?off|green\s+light|accord|go|confirmation|autorisation)\b'
 FREE = re.compile(
     MERGE_WORD + r'[^.!?]{0,120}' + PAUSE_WORD
     + r'|' + PAUSE_WORD + r'[^.!?]{0,120}' + MERGE_WORD
@@ -157,8 +158,22 @@ VERB_BEFORE = re.compile(
 ARTICLE_BEFORE = re.compile(r'\b(?:the|a|an|this|that|each|every|its|their|your|our|le|la|chaque)\s*$')
 POSITIVE = {'use', 'uses', 'using', 'always', 'prefer', 'prefers', 'only', 'utilise', 'utilisez', 'utiliser',
             'toujours', 'privilégier', 'privilégiez', 'uniquement', 'seulement'}
-NEGATIVE = {'no', 'not', 'never', 'don\x27t', 'don’t', 'avoid', 'without', 'pas', 'jamais', 'aucun', 'aucune',
-            'ne', 'sans'}
+NEGATIVE = {'no', 'not', 'never', 'don', 'avoid', 'nor', 'pas', 'jamais', 'ne', 'n', 'ni'}
+# A method clause clears only when every word is method vocabulary or plain grammar:
+# a condition such as 'once the owner signs off' is never read as a permitted method.
+METHOD_TOKENS = POSITIVE | NEGATIVE | {
+    'merge', 'merges', 'merging', 'fusion', 'fusions', 'squash', 'rebase', 'rebases', 'fast', 'forward', 'ff',
+    'three', 'way', '3', 'octopus', 'recursive', 'ort', 'resolve', 'subtree', 'commit', 'commits', 'git', 'method',
+    'methods', 'strategy', 'strategies', 'do', 'does', 't', 'the', 'a', 'an', 'and', 'or', 'but', 'instead',
+    'rather', 'than', 'of', 'over', 'with', 'via', 'de', 'des', 'les', 'le', 'la', 'du', 'd', 'l', 'ou', 'et',
+    'mais', 'plutôt', 'que', 'qu', 'au', 'lieu', 'par', 'ie', 'by', 'default', 'défaut'}
+# A hold sentence right after a cleared method rule may qualify that rule.
+FOLLOW_HOLD = re.compile(
+    PAUSE_WORD + r'|' + APPROVAL_WORD + r'|\b(?:until|unless|wait\w*|hold\w*|jusqu\w*|attend\w*|tant\s+que)\b')
+# Pause wording is also read across Markdown blocks, as sibling headings or items can carry it.
+STRONG_PAUSE = r'\b(?:suspend\w*|paused?|on\s+hold|en\s+attente)\b'
+CROSS_PAUSE = re.compile(
+    MERGE_WORD + r'[^.!?]{0,120}' + STRONG_PAUSE + r'|' + STRONG_PAUSE + r'[^.!?]{0,120}' + MERGE_WORD)
 # An upstream-sync rule names an upstream remote as the single source that ends its clause.
 UPSTREAM_SOURCE = re.compile(
     r'\b(?:from|depuis|du|de)\s+(?:the\s+|le\s+|la\s+|l[’\x27]\s*)?'
@@ -184,6 +199,9 @@ CONTEXT_LIMIT = 600
 # Bound the work per unit; a longer unit stays blocking.
 WORD_WINDOW = 250
 MAX_MERGE_WORDS = 50
+# Instruction files are far smaller; a larger input is not scanned and stays ambiguous,
+# which also bounds the scan time on adversarial input.
+MAX_SCAN_CHARS = 128 * 1024
 
 
 def unquote(line):
@@ -335,11 +353,26 @@ def upstream_source(before, after):
     return bool(UPSTREAM_BETWEEN.fullmatch(between) and UPSTREAM_END.fullmatch(rest))
 
 
-def positive_method(before, after):
-    words = re.findall(r'[\w’\x27-]+', before)[-3:]
-    if re.match(r'[\s-]*(?:only|uniquement|seulement)\b', after):
-        return not NEGATIVE.intersection(words)
-    return bool(POSITIVE.intersection(words)) and not NEGATIVE.intersection(words)
+def permitted_method(clause):
+    """None if the clause is not plain method wording, else whether it permits a method.
+
+    Polarity is read per comma or 'but' segment from its start; a segment with
+    neither polarity word continues the previous one, so 'never use squash
+    merges, rebase merges or merge commits' bans all three.
+    """
+    words = re.findall(r'[^\W_]+', clause)
+    if not set(words) <= METHOD_TOKENS:
+        return None
+    permitted, polarity = False, None
+    for segment in re.split(r',|\b(?:but|mais|instead|plutôt)\b', clause):
+        tokens = set(re.findall(r'[^\W_]+', segment))
+        if tokens & NEGATIVE:
+            polarity = False
+        elif tokens & POSITIVE:
+            polarity = True
+        if polarity and re.search(MERGE_WORD + r'|\bcommits?\b', segment):
+            permitted = True
+    return permitted
 
 
 def mechanics_only(unit):
@@ -348,20 +381,23 @@ def mechanics_only(unit):
     methods = positive = False
     if len(re.findall(MERGE_WORD, plain)) > MAX_MERGE_WORDS:
         return False
-    for clause in re.split(r'[.!?;:]', plain):
+    # 'i.e.' restates the rule inside one clause.
+    pieces = re.split(r'([.!?;:])', re.sub(r'\bi\.e\.', ' ie ', plain))
+    for index in range(0, len(pieces), 2):
+        clause = pieces[index]
+        # 'Never merge from upstream; ever.' continues the clause after ';' or ':'.
+        final = index + 1 >= len(pieces) or pieces[index + 1] in '.!?' or not re.search(r'\w', ''.join(pieces[index + 2:]))
+        method_clause = False
         for match in re.finditer(MERGE_WORD, clause):
             before = clause[max(0, match.start() - WORD_WINDOW):match.start()]
             after = clause[match.end():match.end() + WORD_WINDOW]
             prefix = METHOD_PREFIX.search(before)
             commit = COMMIT_NOUN.match(after)
             verb = VERB_BEFORE.search(before)
-            if len(clause) - match.end() <= WORD_WINDOW and upstream_source(before, after):
+            if final and len(clause) - match.end() <= WORD_WINDOW and upstream_source(before, after):
                 continue
             if prefix or METHOD_FLAG.match(after) or (commit and not verb and not ARTICLE_BEFORE.search(before)):
-                methods = True
-                start = prefix.start() if prefix else len(before)
-                end = commit.end() if commit else 0
-                positive = positive or positive_method(before[:start], after[end:])
+                method_clause = True
             elif not verb and (MECHANICS_NOUN.match(after) or commit):
                 continue
             elif not verb and CHOICE_NOUN.match(after) and not ANY_BEFORE.search(before):
@@ -369,25 +405,32 @@ def mechanics_only(unit):
             elif match.group() == 'fusion' and re.search(r'\bconflits?\s+de\s*$', before):
                 continue
             elif match.group() == 'fusion' and re.search(r'\bcommits?\s+de\s*$', before):
-                methods = True
+                method_clause = True
             else:
                 return False
+        if method_clause:
+            permitted = permitted_method(clause)
+            if permitted is None:
+                return False
+            methods, positive = True, positive or permitted
     return positive or not methods
 
 
 def free_restriction(context, unit):
+    """True for a restriction, 'cleared' for an exempted git-mechanics rule, else False."""
     text = (context + ' ' + unit).strip()
     if not FREE.search(text):
         return False
     if HOLD_CONTEXT.search(text) or SCOPE.search(text) or NEVER_EXEMPT.search(text):
         return True
-    return not mechanics_only(unit)
+    return 'cleared' if mechanics_only(unit) else True
 
 
 def scan_normalized(text):
     outside = []
     managed = False
-    for line in text.splitlines():
+    # Only newlines end Markdown lines; str.splitlines would also split on U+2028 or \x1e.
+    for line in text.split('\n'):
         if START.match(line):
             if managed:
                 return 2
@@ -420,14 +463,22 @@ def scan_normalized(text):
     joined = DATED.sub(take_date, joined)
     if invalid_date or re.search(r'autonomous\s+merge\s+suspended|merge\s+autonome\s+suspendu', joined):
         return 2
+    if CROSS_PAUSE.search(joined):
+        return 2
 
     def strip_markers(value):
         return DATED.sub('', EXAMPLE.sub('', re.sub(r'\s+', ' ', value)))
     # Free-form restrictions are read per Markdown unit so that sibling list
     # items and separate sentences are not joined into one false restriction.
+    cleared = False
     for context, unit in units(outside):
-        if free_restriction(strip_markers(context), strip_markers(unit)):
+        unit = strip_markers(unit)
+        if cleared and FOLLOW_HOLD.search(unit):
             return 2
+        result = free_restriction(strip_markers(context), unit)
+        if result is True:
+            return 2
+        cleared = result == 'cleared'
     return 1 if found else 0
 
 
@@ -442,8 +493,11 @@ def hidden_splits(text):
     visible = re.compile('[^' + re.escape(hidden) + ']')
     for found in re.finditer('[' + re.escape(hidden) + ']', text):
         index = found.start()
+        # Check the cheap left neighbour first: a long invisible run stays linear.
+        if not (index and text[index - 1].isalnum()):
+            continue
         following = visible.search(text, index + 1)
-        if not (index and text[index - 1].isalnum() and following and following.group().isalnum()):
+        if not (following and following.group().isalnum()):
             continue
         window = text[max(0, index - 250):index + 250].translate(strip)
         if vocabulary.search(re.sub(r'\s+', '', window).casefold()):
@@ -455,6 +509,8 @@ def hidden_splits(text):
 
 def scan_text(text):
     """0 clear, 1 dated canonical veto, 2 ambiguous/malformed evidence."""
+    if len(text) > MAX_SCAN_CHARS:
+        return 2
     # Invisible characters may split a word or separate two words: check both readings.
     results = [scan_normalized(normalize(text, joiner)) for joiner in ('', ' ')]
     if hidden_splits(text) > 1:
