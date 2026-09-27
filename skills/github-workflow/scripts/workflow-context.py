@@ -341,7 +341,7 @@ def units(lines, hold_found):
 
     hold_found is called when a pause or approval restriction spreads over
     adjacent list items and table rows, or when a merge item follows a negated
-    lead-in item of the same list.
+    lead-in item of the same list or a negated lead-in row of the same table.
     """
     headings = []  # (level, text) of the current heading path
     lead = []      # unterminated blocks that introduce what follows
