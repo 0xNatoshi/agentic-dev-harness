@@ -80,7 +80,8 @@ class SourceCheckTests(unittest.TestCase):
                         "@".join(["first", "\u0909\u0926\u093e\u0939\u0930\u0923.\u092d\u093e\u0930\u0924"]),
                         "@".join(["first", "personal-mail\u3002net"]), "@".join(["first", "example.com.personal-mail.net"]),
                         "@".join(["person", "privatehost"]), "@".join(["person", "[192.168.1.10]"]),
-                        "@".join(["person", "[IPv6:2001:db8::1]"]), "@".join(["person", "ci-runner-7"])]:
+                        "@".join(["person", "[IPv6:2001:db8::1]"]), "@".join(["person", "ci-runner-7"]),
+                        "https://" + "@".join(["person", "privatehost"])]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
@@ -116,6 +117,9 @@ class SourceCheckTests(unittest.TestCase):
             "package@v1.2.3-beta.1",
             "package@4.2",
             "actions/checkout@v5",
+            "@".join(["actions/checkout", "main"]),
+            "@".join(["uses: owner/repo/.github/workflows/ci.yml", "main"]),
+            "@".join(["npx package", "latest"]),
             "actions/checkout@" + "0123456789abcdef" * 2 + "01234567",
             "@".join(["fixture", "localhost"]),
             "\"@codex review\" `@codex review` '@codex'",

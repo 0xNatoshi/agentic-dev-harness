@@ -37,6 +37,7 @@ IDNA_DOTS = str.maketrans(DOTS[1:], "...")
 VERSION = re.compile(r'v?\d+(?:\.\d+)*(?:-[0-9a-z-]+(?:\.[0-9a-z-]+)*)?\Z')
 # A single-label pin such as actions/checkout@<full commit SHA>.
 COMMIT = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
+DIST_TAGS = {"latest", "next"}
 # RFC 5321 address literals: IPv4, or a tag such as IPv6 followed by dcontent.
 ADDRESS_LITERAL = re.compile(r'\[(?:[0-9.]+|[A-Za-z0-9-]*[A-Za-z0-9]:[!-Z^-~]+)\]')
 # The local part is the token before @, including RFC quoted strings and
@@ -115,6 +116,10 @@ def check_emails(relative, text):
                 # import such as `@AGENTS.md`.
                 continue
             if (VERSION.match(domain) and not domain.rpartition(".")[2].isalpha()) or COMMIT.match(domain):
+                continue
+            if "." not in domain and (domain in DIST_TAGS or "/" in local and not local.startswith("/")):
+                # A repository or package reference such as actions/checkout@main or pkg@latest;
+                # URL user info keeps its leading // in the local part and stays screened.
                 continue
             neutral = neutral_domain(domain) or f"{local.lower()}@{domain}" in NEUTRAL_ADDRESSES
             # Report the location only, so the gate never echoes an address.
