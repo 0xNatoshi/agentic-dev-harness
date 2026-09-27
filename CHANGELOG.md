@@ -13,9 +13,11 @@ Development version: 6.5.0. No release tag has been published for this version.
 - Delegate justified technical improvements within the user's outcome and constraints.
 - Capture useful incidental findings proactively in deduplicated issues and report their next actions.
 - Preserve decisions, review dispositions and handoffs in issue/PR comments and explain non-obvious code constraints.
+- Credit verified agent contributions, record observed model/provider provenance when available, and preserve applicable attribution through squash merges.
 - Explicitly process human, agent and automated reviewer feedback, including chatgpt-codex-connector, before merge.
 - Align common, Claude and Hermes profiles; advance the project template to v6.4 with authentic history.
 - Compare the staged license blob with the official text, probe Python like `merge-preflight.sh`, and exit 2 when the comparison cannot run; cover the documented command with an offline test.
+- Reject email addresses, including single-label intranet hosts and bracketed address literals, outside reserved documentation domains (RFC 2606, RFC 6761), GitHub noreply, the Claude and Codex co-author trailers and the GitHub SSH user in the source privacy gate, reporting only file and line.
 - Let the branch guard accept detached-HEAD rebases and `git am` in any worktree, retain branches listed in a rebase's `update-refs` or named there through a symbolic ref, refuse symbolic branch names, and keep untrusted operation state blocking.
 - Reject ambiguous package destinations, generated-manifest collisions and Windows-reserved path components before writing output. The v6.4.0 installation payload and published tag are unchanged.
 
