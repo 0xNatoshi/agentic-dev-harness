@@ -368,7 +368,7 @@ def _shell_boundaries(command):
             index += 1
             continue
         if not word_started and command.startswith("case", index) and (
-            index + 4 == len(command) or command[index + 4].isspace() or
+            index + 4 == len(command) or command[index + 4] in " \t" or
             command[index + 4] in ";&|<>()"
         ) and any(kind == "substitution" for kind, _ in frames):
             case_in_substitution = True
@@ -379,7 +379,8 @@ def _shell_boundaries(command):
                 if frames:
                     return unsupported("unsupported comment inside unfinished shell group")
                 return ShellBoundaries(command[:index], has_here_operator, False, "")
-        if char.isspace():
+        # Bash blanks are ASCII space/tab; Unicode whitespace is word data.
+        if char in " \t":
             word_started = False
         elif char in ";&|<>":
             if char == "<" and command.startswith("<<", index) and (
@@ -793,7 +794,8 @@ def _here_document(boundaries):
 
 def scan_document(file, text):
     """Check a Markdown document and return deterministic file:line findings."""
-    lines = text.splitlines()
+    # Markdown normalizes CR/LF endings, not Unicode/control word characters.
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     findings = []
     fence_mark = None
     shell_fence = False

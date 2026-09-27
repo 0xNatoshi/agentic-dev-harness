@@ -88,6 +88,11 @@ def comment_boundary_cases():
         for count in range(1, 5)
     )
     cases.extend(
+        ("printf '%s\\n' x" + chr(codepoint) + "#word; " + BAD_PR, 2)
+        for codepoint in (0x0B, 0x0C, 0x1C, 0x1D, 0x1E, 0x85, 0xA0, 0x2003, 0x2028, 0x2029, 0x202F)
+    )
+    cases.append(("printf '%s\\n' x\t#comment; " + BAD_PR, None))
+    cases.extend(
         ("printf '%s\\n' " + word + " \\\n" + BAD_PR, None)
         for word in ("x#word", "''#word", "$(printf x)#word")
     )
@@ -862,9 +867,11 @@ gh pr view \\
         fence = chr(96) * 3
         for command, bad_line in comment_boundary_cases():
             with self.subTest(command=command):
-                findings = scan_document("examples.md", f"{fence}bash\n{command}\n{fence}\n")
-                expected = [] if bad_line is None else [(bad_line, "gh pr view needs an explicit PR selector")]
-                self.assertEqual([(item.line, item.message) for item in findings], expected)
+                for ending in ("\n", "\r\n", "\r"):
+                    text = f"{fence}bash\n{command}\n{fence}\n".replace("\n", ending)
+                    findings = scan_document("examples.md", text)
+                    expected = [] if bad_line is None else [(bad_line, "gh pr view needs an explicit PR selector")]
+                    self.assertEqual([(item.line, item.message) for item in findings], expected)
 
     def test_shell_comment_boundary_expectations_match_bash(self):
         bash = shutil.which("bash")

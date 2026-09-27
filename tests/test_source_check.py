@@ -69,6 +69,8 @@ class SourceCheckTests(unittest.TestCase):
                 "printf '%s\\n' x # comment \\",
                 'gh pr view --repo "$workflow_host/$workflow_repo"',
                 "printf $'x\\' # text'; gh pr view --repo \"$workflow_host/$workflow_repo\"",
+                "printf '%s\\n' x" + chr(0xA0) + '#word; gh pr view --repo "$workflow_host/$workflow_repo"',
+                "printf '%s\\n' x" + chr(0x2028) + '#word; gh pr view --repo "$workflow_host/$workflow_repo"',
             ])
             environment, _ = fixture_environment(root)
             result = run([sys.executable, "scripts/check.py"], source, environment)
@@ -77,6 +79,8 @@ class SourceCheckTests(unittest.TestCase):
             self.assertIn(locations[0] + message, result.stderr)
             self.assertIn(locations[2] + message, result.stderr)
             self.assertIn(locations[3] + " unsupported ANSI-C quote boundary", result.stderr)
+            self.assertIn(locations[4] + message, result.stderr)
+            self.assertIn(locations[5] + message, result.stderr)
 
     def test_source_gate_collects_workflow_findings_across_active_files(self):
         with tempfile.TemporaryDirectory(prefix="harness-workflow-collected-") as directory:
