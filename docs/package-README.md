@@ -16,7 +16,7 @@ The [workflow skill](skills/github-workflow/SKILL.md) includes scripts, referenc
 
 ## Version and recovery
 
-The package is v6.5.0; the project template is v6.4, adding proactive technical judgment, incidental issue capture and written collaboration. Authentic template snapshots are retained, including instructions to preserve destination-only v5.1/v5.2 history. The common policy is neutral; merge personal preferences during installation instead of overwriting them.
+The package is v6.5.0; the project template is v6.4. Package policy includes proactive technical judgment, incidental issue capture, written collaboration and review convergence in the shared profiles/skill. Authentic template snapshots are retained, including instructions to preserve destination-only v5.1/v5.2 history. The common policy is neutral; merge personal preferences during installation instead of overwriting them.
 
 MANIFEST.json hashes every payload except itself. The ZIP is reproducibly generated from the versioned source. Read [STATUS.md](STATUS.md) for actual scope and outstanding destination checks. The package contains no private backup, provider credentials or full Hermes SOUL.
 
