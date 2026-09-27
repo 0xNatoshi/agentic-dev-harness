@@ -1,4 +1,4 @@
-# Development harness — v6.5.0
+# Agentic development harness — v6.5.0
 
 Versioned development workflow, agent profiles and safe delivery tooling for Codex, Claude Code and Hermes
 
@@ -22,4 +22,4 @@ MANIFEST.json hashes every payload except itself. The ZIP is reproducibly genera
 
 Installation guides record backups under `%LOCALAPPDATA%\dev-harness\backups`. Restore only files still matching their installed hashes or merge later edits. The [root license](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md) remain applicable.
 
-Maintain changes, reviews and handoffs in the private [source repository](https://github.com/0xNatoshi/dev-harness). Building this package does not publish a release or install a cleanup automation.
+Maintain changes, reviews and handoffs in the private [source repository](https://github.com/0xNatoshi/agentic-dev-harness). Building this package does not publish a release or install a cleanup automation.
