@@ -274,14 +274,19 @@ def label(text):
 
 
 LEAD_LIMIT = 120
-NEGATION = r'\b(?:not|never|no|avoid|don[’\x27]t|jamais|pas|ne)\b'
-# Words that qualify a negation without saying what it forbids: '- Never, ever',
-# '- Never under any circumstances' or '- Do not, at all' still need the next item.
-QUALIFIER = (r'(?:do|ever|faire|faites|fais|under|any|no|circumstances?|conditions?|cases?|situations?|'
-             r'exceptions?|reason|account|time|event|whatsoever|at|all|in|on|for|the|a|en|aucune?|cas|'
-             r'sous|circonstances?|prétexte|du|tout)')
+NEGATION = r'\b(?:not|never|no|avoid|don[’\x27]t|jamais|pas|ne|aucune?)\b'
+# A negation whose next word is an adverb, preposition or determiner qualifies what
+# follows instead of naming what it forbids: '- Never, ever again', '- Never under any
+# circumstances', '- En aucun cas'. A content word ('- Do not add dependencies',
+# '- No secrets in commits') makes the item a complete rule of its own.
+LEAD_START = (r'(?:again|ever|even|any|anymore|at|all|under|in|on|for|by|with|without|'
+              r'from|during|before|after|until|unless|while|when|whatsoever|regardless|really|simply|'
+              r'just|now|yet|today|once|whatever|whenever|except|outside|beyond|within|au|aux|à|en|'
+              r'sous|dans|pour|sans|avant|après|pendant|aucune?|cas|prétexte|'
+              r'circonstances?|conditions?|raison|du|tout|encore|même|maintenant)')
 LEAD_GAP = r'[\s;,:()\-–—>]'
-BARE_LEAD = re.compile(r'.*' + NEGATION + r'(?:' + LEAD_GAP + r'+' + QUALIFIER + r')*' + LEAD_GAP + r'*')
+BARE_LEAD = re.compile(r'.*' + NEGATION + r'(?:\s+(?:do|faire|faites|fais))?'
+                       r'(?:' + LEAD_GAP + r'+' + LEAD_START + r'\b.*|' + LEAD_GAP + r'*)')
 POINTER_LEAD = re.compile(
     NEGATION + r'.*\b(?:following|below|these|those|this|suivante?s?|ci[\s-]dessous|ces|ceci)\b')
 
@@ -289,7 +294,7 @@ POINTER_LEAD = re.compile(
 def negated_lead(text):
     """A negated list item that introduces its later siblings.
 
-    It is a bare or only qualified negation ('- Never,', '- Never under any
+    It is a bare or qualified negation ('- Never,', '- Never under any
     circumstances'), points forward ('- Do not do the following for now' above
     '- merge pull requests') or carries hold wording ('- Do not, until I
     approve'); a complete rule such as '- Do not add dependencies' does not.
