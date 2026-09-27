@@ -47,6 +47,61 @@ class PackageTests(unittest.TestCase):
         shutil.copytree(ROOT, source, ignore=shutil.ignore_patterns(".git", "dist", "__pycache__", "TASKS.md"))
         return source
 
+    def assert_invalid_destinations(self, destinations):
+        with tempfile.TemporaryDirectory(prefix="harness-paths-") as directory:
+            source = self.copied_source(directory)
+            mapping_path = source / "package-files.json"
+            mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+            mapping["docs/package-README.md"].extend(destinations)
+            mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
+            output = Path(directory) / "output"
+            with self.assertRaises(ValueError):
+                BUILD.build(output, root=source)
+            self.assertFalse(output.exists())
+
+    def test_rejects_generated_manifest_destinations(self):
+        for name in ["MANIFEST.json", "manifest.JSON", "MANIFEST.JSON/readme.md"]:
+            with self.subTest(destination=name):
+                self.assert_invalid_destinations([name])
+
+    def test_rejects_destination_collisions(self):
+        for names in [
+            ["extra.txt", "extra.txt"],
+            ["extra/Guide.md", "extra/guide.md"],
+            ["extra", "extra/readme.md"],
+            ["extra/readme.md", "extra"],
+            ["extra/notes.md", "EXTRA/NOTES.MD/child.txt"],
+            ["extra/notes.md/child.txt", "EXTRA/NOTES.MD"],
+        ]:
+            with self.subTest(destinations=names):
+                self.assert_invalid_destinations(names)
+
+    def test_rejects_nonportable_destination_components(self):
+        components = ["notes" + char + "draft" for char in '<>:"\\|?*\x00\x1f']
+        components += ["notes.", "notes ", "CON", "prn.txt", "AUX", "NUL.tar.gz", "CoM1.md", "LPT9", "COM\u00b9.log", "LPT\u00b2", "COM\u00b3"]
+        for component in components:
+            for name in ["extra/" + component, "extra/" + component + "/readme.md"]:
+                with self.subTest(destination=name):
+                    self.assert_invalid_destinations([name])
+
+    def test_accepts_safe_neighboring_destinations(self):
+        destinations = ["extra/.hidden", "extra/COM10.txt", "extra/NUL-marker.md", "extra/notes..md", "extra/MANIFEST.json"]
+        with tempfile.TemporaryDirectory(prefix="harness-safe-paths-") as directory:
+            source = self.copied_source(directory)
+            mapping_path = source / "package-files.json"
+            mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+            mapping["docs/package-README.md"].extend(destinations)
+            mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
+            output = Path(directory) / "output"
+            result = BUILD.build(output, root=source)
+            with zipfile.ZipFile(output / result["archive"]) as archive:
+                archive.extractall(Path(directory) / "extracted")
+                prefix = "dev-harness-v" + result["version"] + "/"
+                manifest = json.loads(archive.read(prefix + "MANIFEST.json"))
+                for name in destinations:
+                    data = archive.read(prefix + name)
+                    self.assertEqual(hashlib.sha256(data).hexdigest(), manifest["files"][name]["sha256"])
+
     def test_rejects_symlinked_payload(self):
         with tempfile.TemporaryDirectory(prefix="harness-link-") as directory:
             source = self.copied_source(directory)
