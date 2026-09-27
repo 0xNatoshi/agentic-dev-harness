@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only origin binding and conservative suspension checks (Python 3.8+)."""
+import collections
 import datetime
-import itertools
 import json
 import re
 import subprocess
@@ -121,14 +121,25 @@ DATED = re.compile(PREFIX + r'\s*(\d{4}-\d{2}-\d{2})(?![\w-])')
 MERGE_WORD = r'\b(?:merges?|merging|merger|mergez|fusions?|fusionner|fusionnement|fusionnez)\b'
 PAUSE_WORD = r'\b(?:suspend\w*|paused?|on\s+hold|disabled|forbidden|blocked|en\s+attente|interdit\w*|interdic\w*|bloqu\w*|désactiv\w*|différ\w*)\b'
 APPROVAL_WORD = r'\b(?:approv\w*|agreement|consent|permission|authorization|authorisation|sign[ -]?off|green\s+light|accord|go|confirmation|autorisation)\b'
-FREE = re.compile(
+# Restrictions that carry pause or approval wording. Unlike a bare negation
+# ('- Do not add dependencies' beside '- Merge requests use squash'), they are
+# also read across the items of one list or the rows of one table.
+HOLD_FREE = (
     MERGE_WORD + r'[^.!?]{0,120}' + PAUSE_WORD
     + r'|' + PAUSE_WORD + r'[^.!?]{0,120}' + MERGE_WORD
-    + r'|\b(?:do\s+not|don[’\x27]t|no|never|stop|hold|wait|attend\w*|ne\s+pas|pas\s+de|ne)\b[^.!?]{0,90}' + MERGE_WORD
     + r'|' + MERGE_WORD + r'\s+(?:only|seulement|uniquement|après|after|requires?|needs?|(?:is|are)\s+subject\s+to)\b[^.!?]{0,90}' + APPROVAL_WORD
     + r'|' + APPROVAL_WORD + r'[^.!?]{0,90}\b(?:before|avant)\s+(?:de\s+|toute?\s+|any\s+)?' + MERGE_WORD
     + r'|\bbefore\s+' + MERGE_WORD + r'[^.!?]{0,90}\b(?:obtain|get|seek|receive|wait\s+for)\b[^.!?]{0,90}' + APPROVAL_WORD
     + r'|' + MERGE_WORD + r'[^.!?]{0,90}\b(?:wait\w*|attend\w*)\b[^.!?]{0,90}' + APPROVAL_WORD)
+SIBLING_HOLD = re.compile(HOLD_FREE)
+# Every HOLD_FREE match holds a merge word and a pause or approval word, and
+# its earlier items end fewer than RUN_WINDOW characters before its last one,
+# so a list or table is read in bounded windows.
+HOLD_WORD = re.compile(PAUSE_WORD + r'|' + APPROVAL_WORD)
+RUN_WINDOW = 300
+FREE = re.compile(
+    HOLD_FREE
+    + r'|\b(?:do\s+not|don[’\x27]t|no|never|stop|hold|wait|attend\w*|ne\s+pas|pas\s+de|ne)\b[^.!?]{0,90}' + MERGE_WORD)
 
 # A flagged unit that only states git mechanics is cleared when none of these apply.
 HOLD_CONTEXT = re.compile(
@@ -242,47 +253,42 @@ def trim(blocks):
 
 
 def label(text):
-    """A list item such as '**Merges:**' or '[ ] Pull request merges' that titles the items after it.
-
-    A short unterminated merge phrase without polarity words is a title, not a rule.
-    """
-    text = re.sub(r'^\[[ xX]\]\s*', '', text)
+    """A list item such as '**Merges:**' or 'Merging' that titles the items after it."""
     if re.fullmatch(r'(\*\*|__)[^*_]+\1:?', text) or text.rstrip(' *_').endswith(':'):
         return True
-    words = re.findall(r'[^\W_]+', text.casefold())
-    return (len(words) <= 5 and not terminated(text) and not set(words) & (NEGATIVE | POSITIVE)
-            and bool(re.search(MERGE_WORD, text)))
+    return len(text.split()) <= 2 and bool(re.search(MERGE_WORD, text))
 
 
 def terminated(block):
     return block.rstrip(' \t*_`"\'»”’)]').endswith(('.', '!', '?'))
 
 
-def units(lines):
+def units(lines, read_run):
     """Yield (section, context, unit) for each Markdown block and its wrapped lines.
 
     Section is the heading path above the unit.
 
     Context is the heading path, unterminated lead-in blocks, parent list items
     and a table's header row. Sibling list items and table data rows never give
-    each other context, except that a label item titles every later sibling and
-    an unterminated sibling reads with a neighbour that has pause wording. A
-    fenced block is one unit.
+    each other context. A fenced block is one unit.
+
+    read_run receives the recent items of one list, or rows of one table,
+    joined, whenever a restriction spread over them could end in the newest one.
     """
-    headings = []  # (level, text, occurrence) of the current heading path
-    occurrences = itertools.count()
+    headings = []  # (level, text) of the current heading path
     lead = []      # unterminated blocks that introduce what follows
-    items = []     # (indent, text, title) of the open list item chain
+    items = []     # (indent, text) of the open list item chain
     header = None  # first row of the current table
     block, kind, indent = [], None, 0
     fence = None   # (marker, context, lines) of an open fenced block
+    run = collections.deque()  # (text, merge, hold) of recent items of the current list or table
+    run_size, run_merges, run_holds, run_table = 0, 0, 0, False
 
     def section():
-        # Occurrence numbers keep two headings with the same text apart.
-        return tuple(n for _, _, n in headings)
+        return tuple(t for _, t in headings)
 
     def context(extra=()):
-        path = ' '.join(t for _, t, _ in headings)[-CONTEXT_LIMIT:]
+        path = ' '.join(t for _, t in headings)[-CONTEXT_LIMIT:]
         parts, size = [], 0
         for part in reversed(lead + list(extra)):
             if size >= CONTEXT_LIMIT:
@@ -290,6 +296,27 @@ def units(lines):
             parts.append(part)
             size += len(part) + 1
         return (path + ' ' + ' '.join(reversed(parts))[-CONTEXT_LIMIT:]).strip()
+
+    def extend_run(text, table):
+        nonlocal run_size, run_merges, run_holds, run_table
+        if run_table != table:
+            end_run()
+        run_table = table
+        # Keep at least RUN_WINDOW characters of earlier items before the new one.
+        while len(run) > 1 and run_size - len(run[0][0]) - 1 >= RUN_WINDOW:
+            old, merge, hold = run.popleft()
+            run_size, run_merges, run_holds = run_size - len(old) - 1, run_merges - merge, run_holds - hold
+        merge, hold = bool(re.search(MERGE_WORD, text)), bool(HOLD_WORD.search(text))
+        run.append((text, merge, hold))
+        run_size, run_merges, run_holds = run_size + len(text) + 1, run_merges + merge, run_holds + hold
+        # Only a restriction that ends in the new item is new; earlier ones were read before.
+        if len(run) > 1 and (merge or hold) and run_merges and run_holds:
+            read_run(' '.join(item for item, _, _ in run))
+
+    def end_run():
+        nonlocal run_size, run_merges, run_holds
+        run.clear()
+        run_size = run_merges = run_holds = 0
 
     def flush():
         nonlocal block, kind, lead, items, header
@@ -302,29 +329,30 @@ def units(lines):
             sibling = None
             while items and items[-1][0] >= indent:
                 sibling = items.pop()
-            parents = [t for _, t, _ in items]
-            title, near = None, []
-            if sibling and sibling[0] == indent:
-                # '- **Merges:**' titles the siblings after it until another label.
-                title = sibling[1] if label(sibling[1]) else sibling[2]
-                # '- Use squash merges' then '- blocked' may say what is blocked.
-                if not terminated(sibling[1]) and re.search(PAUSE_WORD, sibling[1] + ' ' + text):
-                    near = [sibling[1]]
-            pair = section(), context(parents + ([title] if title else []) + near), text
-            items.append((indent, text, title))
+            parents = [t for _, t in items]
+            if sibling and sibling[0] == indent and label(sibling[1]):
+                parents.append(sibling[1])  # '- **Merges:**' labels the next sibling
+            pair = section(), context(parents), text
+            items.append((indent, text))
+            extend_run(text, False)
             return pair
         if items and indent:
             # Indented content continues the list item above it.
-            return section(), context(t for i, t, _ in items if i < indent), text
+            extend_run(text, False)
+            return section(), context(t for i, t in items if i < indent), text
         if items:
             # Unterminated open items still introduce the block after the list.
-            lead = trim(lead + [t for _, t, _ in items if not terminated(t)])
+            lead = trim(lead + [t for _, t in items if not terminated(t)])
             items = []
         if current == 'row':
             pair = section(), context([header] if header else []), text
+            if header is None:
+                end_run()  # a new table
+            extend_run(text, True)
             header = header or text
             return pair
         header = None
+        end_run()
         pair = section(), context(), text
         body = re.sub(r'<!--|-->', ' ', text).strip() if current == 'comment' else text
         lead = [] if terminated(body) else trim(lead + [body])
@@ -335,8 +363,9 @@ def units(lines):
         while headings and headings[-1][0] >= level:
             headings.pop()
         pair = section(), context(), text
-        headings.append((level, text[:CONTEXT_LIMIT], next(occurrences)))
+        headings.append((level, text[:CONTEXT_LIMIT]))
         lead, items, header = [], [], None
+        end_run()
         return pair
 
     for line in lines:
@@ -365,7 +394,7 @@ def units(lines):
             if pair:
                 yield pair
             if opening:
-                fence = opening.group(1), context(t for _, t, _ in items), [opening.group(2).strip()]
+                fence = opening.group(1), context(t for _, t in items), [opening.group(2).strip()]
             elif heading:
                 yield enter_heading(len(heading.group(1)), stripped)
             continue
@@ -540,8 +569,12 @@ def scan_normalized(text):
         return DATED.sub('', EXAMPLE.sub('', re.sub(r'\s+', ' ', value)))
     # Free-form restrictions are read per Markdown unit so that sibling list
     # items and separate sentences are not joined into one false restriction.
-    records = []
-    for section, context, unit in units(outside):
+    records, held = [], []
+
+    def read_run(run):
+        if not held and SIBLING_HOLD.search(strip_markers(run)):
+            held.append(run)
+    for section, context, unit in units(outside, read_run):
         unit = strip_markers(unit)
         result = free_restriction(strip_markers(context), unit)
         if result is True:
@@ -549,6 +582,8 @@ def scan_normalized(text):
         if result == 'cleared' and FOLLOW_HOLD.search(strip_markers(context)):
             return 2  # a heading, lead-in or parent item conditions the rule
         records.append((section, unit, result == 'cleared'))
+    if held:
+        return 2  # a list or table carries a pause or approval restriction across items
     # A hold or approval sentence in the section of a cleared rule, in the
     # sections above or below it, or right after it, may qualify that rule
     # without naming a merge. Prefix sets keep the check linear in section depth.

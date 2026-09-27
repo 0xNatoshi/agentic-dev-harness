@@ -288,10 +288,19 @@ TEXT_CASES = (
     Case("kept pause item then merge item", 2, "- blocked\n- Merging"),
     Case("cleared fast-forward ban with no-ff", 0, "Do not use fast-forward merges; use no-ff merges."),
     Case("kept no-ff banned", 2, "Do not use no-ff merges."),
-    Case("cleared rule beside duplicate heading", 0,
+    Case("kept hold under repeated heading", 2,
          "## Rules\n\nDo not use squash merges; use merge commits.\n\n## Rules\n\nWait for CI before tagging."),
-    Case("kept hold in same heading occurrence", 2,
+    Case("kept hold in rule subsection", 2,
          "## Rules\n\nDo not use squash merges; use merge commits.\n\n### CI\n\nWait for CI before tagging."),
+    Case("kept approval item after method item", 2, "- Merges only\n- after approval"),
+    Case("kept French approval item after method item", 2, "- Fusions uniquement\n- après accord"),
+    Case("kept ordered approval items", 2, "1. Merges only\n2. after approval"),
+    Case("kept pause two items away", 2, "- Merging pull requests into main from feature branches\n- CI green\n- blocked"),
+    Case("kept pause past another label", 2, "- Merging\n- **Docs:**\n- blocked"),
+    Case("kept table rows pause", 2, "| Item |\n|---|\n| Merging |\n| blocked |"),
+    Case("cleared method item beside CI wait item", 0, "- Merge requests use squash\n- Wait for CI before tagging"),
+    Case("cleared marker example beside list item", 0,
+         "- Use the `Autonomous merge suspended — request dated <date>` marker\n- Read prose restrictions too"),
     Case("kept permitted method cancelled by bare never", 2, "Never squash-merge; use merge commits, never."),
     Case("kept permitted method cancelled by bare not", 2, "No fast-forward merges; use merge commits, not."),
     Case("kept only method cancelled by but not", 2, "No rebase merges; squash merges only, but not."),
@@ -334,8 +343,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 247 or len({case.name for case in ALL_CASES}) != 247:
-    raise RuntimeError("Merge fixture inventory must contain 247 unique cases")
+if len(ALL_CASES) != 255 or len({case.name for case in ALL_CASES}) != 255:
+    raise RuntimeError("Merge fixture inventory must contain 255 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
