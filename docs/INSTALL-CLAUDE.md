@@ -1,4 +1,4 @@
-# Personal Claude Desktop Code installation on Windows — v6.4.0
+# Personal Claude Desktop Code installation on Windows — v6.5.0
 
 Use these steps from the extracted ZIP produced by `python3 scripts/build.py`. Paths below are relative to that package root, not this guide's source location in the repository.
 
@@ -22,12 +22,12 @@ The preflight requires Git, gh, Git Bash/Bash, awk/grep/mktemp and **Python 3.8+
 
 ## Back up and compare versions
 
-Before editing, create private `%LOCALAPPDATA%\dev-harness\backups\v6.4.0-claude-<timestamp>` and record its absolute path:
+Before editing, create private `%LOCALAPPDATA%\dev-harness\backups\v6.5.0-claude-<timestamp>` and record its absolute path:
 
 ```powershell
 $backupParent = Join-Path $env:LOCALAPPDATA 'dev-harness\backups'
 New-Item -ItemType Directory -Path $backupParent -Force -ErrorAction Stop | Out-Null
-$backupRoot = Join-Path $backupParent ('v6.4.0-claude-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
+$backupRoot = Join-Path $backupParent ('v6.5.0-claude-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
 if (Test-Path -LiteralPath $backupRoot) { throw 'Backup path already exists' }
 New-Item -ItemType Directory -Path $backupRoot -ErrorAction Stop | Out-Null
 $backupRoot
@@ -35,7 +35,7 @@ $backupRoot
 
 Back up every targeted file/link with its type/tree: CLAUDE.md, AGENTS.md, complete skill, canonical-source link and any targeted older command. Inventory relative paths, types, link targets, SHA-256 and count. Verify backup types/links/counts/hashes by readback before editing. A local receipt records absolute paths, before/after hashes, provenance/version, created/retired files and merge diffs. Keep secrets/unrelated profile files out of the export and preserve earlier backups. Report the exact backup path.
 
-The **personal package is v6.4.0; repository template v6.3 is unchanged**. Compare markers and actual bytes with authentic sources. Preserve newer/unknown versions and merge compatible additions without downgrading. For v6.3.1 or older with an exact base, compare historical base / local file / package file per file. Preserve local customizations, restrictions and imports. Without a verified base, capture and manually compare local content instead of fabricating history. Preserve authentic destination v5.1/v5.2 snapshots absent from this package.
+The **personal package is v6.5.0; repository template v6.4 adds initiative and written collaboration**. Project adoption remains a separate PR after its current task. Compare markers and actual bytes with authentic sources. Preserve newer/unknown versions and merge compatible additions without downgrading. For v6.4.0 or older with an exact base, compare historical base / local file / package file per file. Preserve local customizations, restrictions and imports. Without a verified base, capture and manually compare local content instead of fabricating history. Preserve authentic destination v5.1/v5.2 snapshots absent from this package.
 
 ## Merge instructions
 

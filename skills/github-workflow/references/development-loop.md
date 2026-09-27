@@ -16,6 +16,25 @@ Read before `start` for implementation/fixes, then revisit at `finish`. Scale de
 
 A plan accompanies execution. Make ordinary technical decisions within scope, including required refactoring or a justified dependency. Prepare migration design on a branch; execution on real data retains its authorization boundary.
 
+## Initiative and incidental findings
+
+Use technical judgment proactively. If evidence supports a material improvement in architecture, security, maintainability or project-consistent style, explain the useful tradeoff and implement the better reversible approach within the entrusted outcome. Challenge an existing or requested implementation when warranted; preserve the user's objective and explicit constraints. A real product, budget, scope or irreversible-action decision keeps its existing boundary. Do not invent disagreements, refactors or extra work.
+
+During normal work in an owned or explicitly entrusted repository, handle useful findings outside the current task as well:
+
+1. Verify the observation enough to distinguish facts from a hypothesis; describe impact and uncertainty. Check the affected code, existing issues/PRs and recorded decisions. This is focused investigation, not an automatic audit.
+2. Bind to the verified origin and use `gh issue list/view/create/comment --repo "$workflow_host/$workflow_repo"` as appropriate. Open an actionable issue without another prompt, or add genuinely new evidence to the relevant existing issue. Avoid duplicate issues and repetitive comments. Include evidence, impact, a proposed next action and observable acceptance criteria; name an owner only when ownership is known.
+3. Keep secrets, personal data and sensitive exploit details out of shared content. Use an already authorized private reporting route or retain a sanitized local draft when safe publication/access is unavailable; report the precise missing action. Do not silently change repository visibility, permissions or reporting channels.
+4. Report what was discovered during the task, the issue link and useful next action in the user's preferred next-action section. Keep unrelated implementation out of the current diff; tracking a finding does not itself authorize unrelated implementation. No meaningful finding means no extra issue or filler next step.
+
+| Situation | Expected action |
+|---|---|
+| A better implementation within the user's constraints | Explain the benefit briefly, implement it and validate the outcome. |
+| A useful unrelated defect or maintenance risk | Verify, deduplicate, open/update an issue and report the next action. |
+| The finding is already tracked | Add only new evidence to that issue; preserve its active owner. |
+| A vague suspicion or preference without meaningful impact | Investigate only as useful; do not invent a task. |
+| A product, budget, permission or public-license decision changes | Prepare the concrete choice and respect its authorization boundary. |
+
 ## Verify neighboring behavior
 
 Before editing, identify stable consumers of the same contracts: callers, formats, persistence, configuration and user paths. Choose tests by these links, not just edited files.
@@ -60,6 +79,10 @@ Review scale: documentation-only and low-risk mechanical work use self-review/ch
 Reviews supplement tests and the parent's final check. Reuse agents for deltas in the same task instead of restarting a whole team for a covered adjustment. Lightweight scores/critiques may guide exploration; they do not decide readiness.
 
 ## Continuity and reporting
+
+Leave enough written reasoning for another agent to continue and challenge the work without private chat history. Use issue comments for material discoveries, decisions, ownership and handoffs. Use PR comments/reviews for revision-specific concerns, affected code and expected proof; answer every material finding with a fix or an evidence-backed disposition, then recheck significant changes. Record the actual agent/session and revision; a shared account is not proof of independent review or another session's consent.
+
+Put concise comments beside non-obvious code intent, invariants, tradeoffs or constraints, and lasting design decisions in existing project documentation. Keep transient progress in issues/PRs; avoid comments that merely narrate the code or a new documentation system without a present need. A resolved review thread should leave its fix or disposition and verification visible.
 
 After two attempts on one hypothesis without new evidence, diagnose and switch approach. Repair technical failures; wait for started checks; after about 120 seconds without a runner apply the [local gate](ci-local-gate.md); bring a prepared decision to a genuine authorization boundary.
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 6.5.0 (unreleased)
+
+- Delegate justified technical improvements within the user's outcome and constraints.
+- Capture useful incidental findings proactively in deduplicated issues and report their next actions.
+- Preserve decisions, review dispositions and handoffs in issue/PR comments and explain non-obvious code constraints.
+- Align common, Claude and Hermes profiles; advance the project template to v6.4 with authentic history.
+
 ## 6.4.0
 
 - Establish the private versioned repository from the v6.3.1 distribution.

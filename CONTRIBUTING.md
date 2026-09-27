@@ -10,6 +10,12 @@ Do not expire a claim solely because time passed. The current owner hands off ex
 
 Issue, PR and review updates are part of an explicitly entrusted repository task when the user's authorization covers that collaboration. This guide does not authorize unrelated outreach, messages on the user's behalf or work in other repositories.
 
+## Useful initiative and written reasoning
+
+Improve technical choices within the entrusted outcome when evidence supports a material benefit, respecting the user's objective and explicit constraints. During normal work, verify and deduplicate useful incidental findings, then open or update an issue without another prompt. Record evidence, impact, uncertainty, a useful next action and acceptance criteria; report the link in the user's preferred next-action section. Preserve active ownership. Keep unrelated implementation in a later scoped task, and do not manufacture work or issue noise.
+
+Use issue comments for material discoveries, decisions and handoffs. In PR comments/reviews, identify the actual agent/session and revision, explain objections and expected proof, and leave each finding's fix or evidence-backed disposition visible before resolving it. Put durable non-obvious intent and constraints beside the code; keep status chatter in issues/PRs and broader lasting decisions in existing project documentation. Another agent should be able to continue and challenge the reasoning without private chat history. Sanitize shared content; use an already authorized private route or a sanitized local draft when safe publication/access is unavailable.
+
 ## Evidence and review
 
 For a substantive change, link the issue with `Closes #<number>` or `Refs #<number>`, write observable acceptance criteria, and open a draft PR at the first branch push. Include the actual commands/results, exact head, meaningful environment limits and rollback. Use the visible `Independent review` line in the PR template and complete it before marking ready.

@@ -8,6 +8,8 @@ argument-hint: "[init [all] | update | license [all] | readme | start <issue> | 
 
 The Git lifecycle serves an observable outcome. For implementation/fixes (`start`/`finish`), read the [development loop](references/development-loop.md): framing, cause, architecture, neighboring behavior, delegation and delivery. The repository template carries its essential invariants; actual commands/contracts belong in the project.
 
+**Initiative and written collaboration**: improve justified technical choices within the entrusted outcome. Verify and deduplicate useful incidental findings, open/update issues without another prompt in owned or explicitly entrusted repositories, and report their links and next actions. Leave decisions and review dispositions in issue/PR comments and explain non-obvious code constraints. Follow the [initiative procedure](references/development-loop.md#initiative-and-incidental-findings); preserve scope, sensitive-data and authorization boundaries, without inventing extra work.
+
 **Documentation-only path**: at any diff size, use self-review and automatic checks without subagents or workflow orchestration, including `ultracode`. Group a task's documentation fixes in one PR. This alone does not trigger `init`/`update`, orchestration or new CI; existing publication gates apply. Changes to executable rules, authorization, CI, hooks or gate configuration remain behavior changes even in Markdown, reviewed by risk.
 
 **Tools**: Bash/Git Bash, Git, gh and Python 3.8+ (standard library for Unicode/origin checks); Git Bash supplies awk/grep/mktemp. No external jq: gh has built-in `--jq`. Avoid the unsupported gh 2.93 combination `--paginate --slurp --jq`; supplied checks process `--paginate --jq` page by page. Resolve missing tools before the gate. On Windows, install Python 3 from python.org and reopen Git Bash; python3, py -3 or python is detected. An error is not green evidence.
@@ -192,10 +194,11 @@ Use chore/agent-workflow-update and the same PR delivery. The policy applicable 
 4. Run the init placeholder check, covering README.md, LICENSE*, .yml/.yaml and absent CI, distinguishing exit 1 from errors.
 5. Show the diff and summarize added/modified rules.
 
-**Package v6.4.0; active repository template v6.3.** Repository packaging does not require a new model block in already-current repositories. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement.
+**Package v6.5.0; active repository template v6.4.** This behavior update adds technical initiative, incidental issue capture and written collaboration. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement.
 
 ## What's new
 
+- **v6.5.0 / template v6.4**: proactive technical judgment, deduplicated incidental issues, useful next-action reporting and durable issue/PR/code reasoning across Codex, Claude Code and Hermes. Existing delivery and authorization safeguards remain applicable.
 - **v6.4.0**: versioned source repository, neutral profile source, reproducible packages, portable regression checks and issue/PR handoff guidance. Runtime guards and the active repository template retain their behavior.
 - **v6.3.1**: English personal instructions, skill, references and distribution files; README.md and English installer names. Runtime guards, licenses, role files and authentic template history retain their bytes. French remains the conversation language; historical aliases/test inputs remain exact data.
 - **v6.3**: origin binding, detached rebase/bisect guards, Unicode/published holds, inherited reporting preferences, qualified Claude installation/status, public-license authorization, historical word comparisons and lockfile synchronization.
@@ -213,14 +216,14 @@ Apply by default in owned repositories, and on request in forks/third parties. T
 ### `start <n>`
 
 ```bash
-gh issue view <n>
+gh issue view <n> --repo "$workflow_host/$workflow_repo"
 git status --short
 git ls-remote --heads origin "*/<n>-*"
 gh pr list --repo "$workflow_host/$workflow_repo" --state open --search "<n>"
-gh issue develop <n> --name <type>/<n>-<slug> --base <default> --checkout
+gh issue develop <n> --repo "$workflow_host/$workflow_repo" --name <type>/<n>-<slug> --base <default> --checkout
 ```
 
-- For nontrivial work without an issue, propose one (`gh issue create`). Otherwise use `git fetch origin && git switch --no-track -c <type>/<slug> origin/<default>`; no-track prevents accidentally tracking origin/default.
+- For nontrivial entrusted work without an issue, check for duplicates and create one (`gh issue create --repo "$workflow_host/$workflow_repo"`) without another prompt. Otherwise use `git fetch origin && git switch --no-track -c <type>/<slug> origin/<default>`; no-track prevents accidentally tracking origin/default.
 - Inventory ownership/activity and reuse a free checkout before creating isolation. Revisit this task's retained resources, preserve other sessions and current work, and push only owned/entrusted branches.
 - For substantial API/schema/security/dependency work, state approach, invariants and validation, then continue authorized work. Technical difficulty alone is not an approval gate. Prepare options for a missing product decision; actual migrations/publication retain their boundary.
 - Open a draft PR on first push with `gh pr create --repo "$workflow_host/$workflow_repo" --draft --base <default> --title "<type>(scope): summary" --body-file <file>` so other agents can see the claim.
