@@ -122,7 +122,7 @@ DATED = re.compile(PREFIX + r'\s*(\d{4}-\d{2}-\d{2})(?![\w-])')
 MERGE_WORD = r'\b(?:merges?|merging|merger|mergez|fusions?|fusionner|fusionnement|fusionnez)\b'
 PAUSE_WORD = r'\b(?:suspend\w*|paused?|on\s+hold|disabled|forbidden|blocked|en\s+attente|interdit\w*|interdic\w*|bloqu\w*|désactiv\w*|différ\w*)\b'
 APPROVAL_WORD = r'\b(?:approv\w*|agreement|consent|permission|authorization|authorisation|sign[ -]?off|green\s+light|accord|go|confirmation|autorisation)\b'
-# Restrictions that carry pause or approval wording. Unlike a bare negation
+# Restrictions that carry pause, approval or wait wording. Unlike a bare negation
 # ('- Do not add dependencies' beside '- Merge requests use squash'), they are
 # also read across the items of one list or the rows of one table.
 # Each branch lists the word classes of RUN_WORDS it needs.
@@ -132,7 +132,8 @@ HOLD_BRANCHES = (
     (MERGE_WORD + r'\s+(?:only|seulement|uniquement|après|after|requires?|needs?|(?:is|are)\s+subject\s+to)\b[^.!?]{0,90}' + APPROVAL_WORD, 'mqa'),
     (APPROVAL_WORD + r'[^.!?]{0,90}\b(?:before|avant)\s+(?:de\s+|toute?\s+|any\s+)?' + MERGE_WORD, 'mab'),
     (r'\bbefore\s+' + MERGE_WORD + r'[^.!?]{0,90}\b(?:obtain|get|seek|receive|wait\s+for)\b[^.!?]{0,90}' + APPROVAL_WORD, 'mboa'),
-    (MERGE_WORD + r'[^.!?]{0,90}\b(?:wait\w*|attend\w*)\b[^.!?]{0,90}' + APPROVAL_WORD, 'mwa'))
+    (MERGE_WORD + r'[^.!?]{0,90}\b(?:wait\w*|attend\w*)\b[^.!?]{0,90}' + APPROVAL_WORD, 'mwa'),
+    (r'\b(?:stop|hold|wait|attend\w*)\b[^.!?]{0,90}' + MERGE_WORD, 'mh'))
 HOLD_FREE = '|'.join(pattern for pattern, _ in HOLD_BRANCHES)
 # Word classes of HOLD_BRANCHES. A phrase such as 'on hold' may be split across
 # two items, so its last word counts on its own.
@@ -143,7 +144,8 @@ RUN_WORDS = {
     'q': re.compile(r'\b(?:only|seulement|uniquement|après|after|requires?|needs?|subject)\b'),
     'b': re.compile(r'\b(?:before|avant)\b'),
     'o': re.compile(r'\b(?:obtain|get|seek|receive|wait)\b'),
-    'w': re.compile(r'\b(?:wait\w*|attend\w*)\b')}
+    'w': re.compile(r'\b(?:wait\w*|attend\w*)\b'),
+    'h': re.compile(r'\b(?:stop|hold|wait|attend\w*)\b')}
 RUN_BRANCHES = tuple((re.compile(pattern), words) for pattern, words in HOLD_BRANCHES)
 # A HOLD_BRANCHES match has no sentence punctuation and, for ordinary word
 # lengths, starts fewer than RUN_WINDOW characters before its last item, so a
@@ -151,7 +153,7 @@ RUN_BRANCHES = tuple((re.compile(pattern), words) for pattern, words in HOLD_BRA
 RUN_WINDOW = 300
 FREE = re.compile(
     HOLD_FREE
-    + r'|\b(?:do\s+not|don[’\x27]t|no|never|stop|hold|wait|attend\w*|ne\s+pas|pas\s+de|ne)\b[^.!?]{0,90}' + MERGE_WORD)
+    + r'|\b(?:do\s+not|don[’\x27]t|no|never|ne\s+pas|pas\s+de|ne)\b[^.!?]{0,90}' + MERGE_WORD)
 
 # A flagged unit that only states git mechanics is cleared when none of these apply.
 HOLD_CONTEXT = re.compile(
@@ -272,19 +274,26 @@ def label(text):
 
 
 LEAD_LIMIT = 120
-# A negated list item that introduces its siblings: a bare negation, or one
-# that points forward ('- Do not do the following' above '- merge pull requests').
-NEGATED_LEAD = re.compile(
-    r'.*\b(?:not|never|no|avoid|don[’\x27]t|jamais|pas|ne)\b(?:\s+(?:do|ever|faire|faites|fais))?'
-    r'|.*\b(?:not|never|no|avoid|don[’\x27]t|jamais|pas|ne)\b.*'
-    r'\b(?:following|below|these|those|this|suivante?s?|ci[\s-]dessous|ces|ceci)')
+NEGATION = r'\b(?:not|never|no|avoid|don[’\x27]t|jamais|pas|ne)\b'
+BARE_LEAD = re.compile(r'.*' + NEGATION + r'(?:\s+(?:do|ever|faire|faites|fais))?[\s;,:()\-]*')
+POINTER_LEAD = re.compile(
+    NEGATION + r'.*\b(?:following|below|these|those|this|suivante?s?|ci[\s-]dessous|ces|ceci)\b')
 
 
 def negated_lead(text):
+    """A negated list item that introduces its later siblings.
+
+    It is a bare negation ('- Never,'), points forward ('- Do not do the
+    following for now' above '- merge pull requests') or carries hold wording
+    ('- Do not, until I approve'); a complete rule such as '- Do not add
+    dependencies' does not.
+    """
     plain = text.strip(' \t*_`:')
-    # Lead-ins are short; the bound also keeps the backtracking pattern linear.
-    return (len(plain) <= LEAD_LIMIT and not terminated(text) and not re.search(MERGE_WORD, plain)
-            and bool(NEGATED_LEAD.fullmatch(plain)))
+    # Lead-ins are short; the bound also keeps the backtracking patterns cheap.
+    if len(plain) > LEAD_LIMIT or terminated(text) or re.search(MERGE_WORD, plain):
+        return False
+    return bool(BARE_LEAD.fullmatch(plain) or POINTER_LEAD.search(plain)
+                or re.search(NEGATION, plain) and HOLD_CONTEXT.search(plain))
 
 
 def terminated(block):
@@ -316,7 +325,8 @@ def units(lines, hold_found):
     run_words = collections.Counter()  # RUN_WORDS classes across the run
     run_size, run_held = 0, False
 
-    def context(extra=()):
+    def context(extra=(), near=()):
+        """Heading path, then lead-ins and extra cut to CONTEXT_LIMIT, then near items uncut."""
         path = ' '.join(t for _, t in headings)[-CONTEXT_LIMIT:]
         parts, size = [], 0
         for part in reversed(lead + list(extra)):
@@ -324,7 +334,7 @@ def units(lines, hold_found):
                 break
             parts.append(part)
             size += len(part) + 1
-        return (path + ' ' + ' '.join(reversed(parts))[-CONTEXT_LIMIT:]).strip()
+        return ' '.join([path, ' '.join(reversed(parts))[-CONTEXT_LIMIT:], *near]).strip()
 
     def extend_run(text):
         nonlocal run_size, run_held
@@ -375,11 +385,13 @@ def units(lines, hold_found):
             for deeper in [i for i in intros if i > indent]:
                 del intros[deeper]
             parents = [t for _, t in items]
+            # Added after the cut, so a long parent item cannot push them out.
+            near = []
             if indent in intros:
-                parents.append(intros[indent])  # '- Do not do the following' introduces later siblings
+                near.append(intros[indent])  # '- Do not do the following' introduces later siblings
             if sibling and sibling[0] == indent and label(sibling[1]):
-                parents.append(sibling[1])  # '- **Merges:**' labels the next sibling
-            pair = context(parents), text
+                near.append(sibling[1][-CONTEXT_LIMIT:])  # '- **Merges:**' labels the next sibling
+            pair = context(parents, near), text
             items.append((indent, text))
             if negated_lead(text):
                 intros[indent] = text
@@ -468,9 +480,11 @@ def upstream_source(before, after):
     if len(sources) != 1 or len(SOURCE_WORD.findall(after)) > 1 or WIDEN.search(before + after):
         return False
     between, rest = after[:sources[0].start()], after[sources[0].end():]
-    if ',' in between and not re.search(r'\b(?:or|and|et|ou)\b[^,]*\Z', between):
-        # 'Never merge, fetch from upstream' is two instructions; only a list
-        # closed by 'or' or 'and' coordinates its verbs with the merge.
+    if ',' in between and (not re.search(r'\b(?:or|and|et|ou)\b[^,]*\Z', between)
+                           or re.match(r'[^,]*,\s*(?:or|and|et|ou)\b', between)):
+        # 'Never merge, fetch from upstream' and 'Never merge, and fetch from
+        # upstream' are two instructions; only a list of two or more verbs
+        # closed by 'or' or 'and' coordinates them with the merge.
         return False
     return bool(UPSTREAM_BETWEEN.fullmatch(between) and UPSTREAM_END.fullmatch(rest))
 
@@ -641,6 +655,25 @@ def scan_normalized(text):
     return 1 if found else 0
 
 
+def outside_managed(text):
+    """Raw lines outside managed blocks under either invisible-character reading."""
+    raw = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    keep = [False] * len(raw)
+    for joiner in ('', ' '):
+        lines = normalize(text, joiner).split('\n')
+        if len(lines) != len(raw):
+            return text  # lines do not align: check the whole file
+        managed = False
+        for index, line in enumerate(lines):
+            if START.match(line):
+                managed = True
+            elif END.match(line):
+                managed = False
+            elif not managed:
+                keep[index] = True
+    return '\n'.join(line for line, kept in zip(raw, keep) if kept)
+
+
 def hidden_splits(text):
     """Count in-word invisible characters, up to two, in text holding merge or pause vocabulary.
 
@@ -673,7 +706,7 @@ def scan_text(text):
         return 2
     # Invisible characters may split a word or separate two words: check both readings.
     results = [scan_normalized(normalize(text, joiner)) for joiner in ('', ' ')]
-    if hidden_splits(text) > 1:
+    if hidden_splits(outside_managed(text)) > 1:
         # Two readings cannot cover several invisible splits that need different choices.
         results.append(2)
     return 2 if 2 in results else 1 if 1 in results else 0

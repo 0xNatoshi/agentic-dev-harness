@@ -325,6 +325,23 @@ TEXT_CASES = (
     Case("kept merge ban before separate upstream action", 2, "Never merge, fetch directly from upstream."),
     Case("kept merge ban before comma list of upstream verbs", 2, "Never merge, rebase, cherry-pick from upstream."),
     Case("cleared upstream verb list closed by or", 0, "Never merge, rebase or cherry-pick from upstream."),
+    Case("kept merge ban before comma and upstream action", 2, "Never merge, and fetch directly from upstream."),
+    Case("kept merge ban before comma or upstream action", 2, "Do not merge, or pull the changes from upstream."),
+    Case("cleared upstream verb list with serial comma", 0, "Never merge, rebase, or fetch from upstream."),
+    Case("kept negated lead-in with trailing hold", 2, "- Do not do the following until I approve\n- merge PRs"),
+    Case("kept bare negated lead-in with hold clause", 2, "- Do not, until I approve\n- merge PRs"),
+    Case("kept negated pointer lead-in with trailing words", 2, "- Do not do the following for now\n- merge PRs"),
+    Case("kept negated lead-in with hold and no pointer", 2, "- Don't, unless I approve\n- merge"),
+    Case("kept French negated lead-in with hold", 2, "- Ne faites pas ceci sans mon accord\n- fusionner les PR"),
+    Case("kept negated lead-in beside a long parent", 2,
+         "- " + ("Without me the notes" + " the notes cover tags and docs for every contributor" * 20)[:590] + "\n  - Never do the following\n  - no rebase merges, use squash merges"),
+    Case("kept wait directive across list items", 2, "- Wait before\n- merging pull requests"),
+    Case("kept hold directive across list items", 2, "- Hold off on\n- merging anything"),
+    Case("kept stop directive across table rows", 2, "| Rule |\n| --- |\n| Stop |\n| merging |"),
+    Case("cleared hidden splits inside managed block", 0,
+         "<!-- github-workflow:start v6.2 -->\nDo\u200bnot mer\u200bge until approval.\n<!-- github-workflow:end -->"),
+    Case("kept hidden splits outside managed block", 2,
+         "<!-- github-workflow:start v6.2 -->\nText\n<!-- github-workflow:end -->\nDo\u200bnot mer\u200bge until approval."),
     Case("cleared method item beside CI wait item", 0, "- Merge requests use squash\n- Wait for CI before tagging"),
     Case("cleared marker example beside list item", 0,
          "- Use the `Autonomous merge suspended — request dated <date>` marker\n- Read prose restrictions too"),
@@ -370,8 +387,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 274 or len({case.name for case in ALL_CASES}) != 274:
-    raise RuntimeError("Merge fixture inventory must contain 274 unique cases")
+if len(ALL_CASES) != 288 or len({case.name for case in ALL_CASES}) != 288:
+    raise RuntimeError("Merge fixture inventory must contain 288 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
