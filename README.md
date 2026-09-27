@@ -1,4 +1,4 @@
-# Development harness
+# Agentic development harness
 
 Versioned development workflow, agent profiles and safe delivery tooling for Codex, Claude Code and Hermes
 
@@ -19,8 +19,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). A GitHub assignee alone cannot identify 
 Contributors need **Python 3.11+, Git and Bash**. The build uses only the Python standard library. Runtime workflow guards separately require Python 3.8+, Git, gh and Bash/Git Bash.
 
 ```bash
-git clone https://github.com/0xNatoshi/dev-harness.git
-cd dev-harness
+git clone https://github.com/0xNatoshi/agentic-dev-harness.git
+cd agentic-dev-harness
 python3 scripts/check.py
 python3 -m unittest discover -s tests -v
 python3 scripts/build.py
