@@ -90,7 +90,14 @@ check_operation_dir() {
         (length($0) != 40 && length($0) != 64) || /[^0-9a-f]/ { bad = 1 }
         END { if (bad || NR == 0 || NR % 3 != 0) exit 2; exit found ? 1 : 0 }
       ' "$updates"
-      case $? in
+      status=$?
+      # awk only checks the shape; Git's own rules decide whether a name is a ref.
+      if [ "$status" -ne 2 ]; then
+        awk 'NR % 3 == 1' "$updates" | while IFS= read -r name; do
+          git check-ref-format "$name" || exit 2
+        done || status=2
+      fi
+      case $status in
         0) ;;
         1)
           printf 'Branch is in use by %s --update-refs in %s; retain it.\n' "$operation" "$worktree" >&2

@@ -33,6 +33,7 @@ SCENARIOS = (
     "update_refs_empty",
     "update_refs_truncated",
     "update_refs_invalid_oid",
+    "update_refs_invalid_ref",
     "free",
 )
 STATUS = {
@@ -45,6 +46,7 @@ STATUS = {
     "update_refs_empty": 2,
     "update_refs_truncated": 2,
     "update_refs_invalid_oid": 2,
+    "update_refs_invalid_ref": 2,
     "free": 0,
     "other_rebase": 0,
     "detached_rebase_merge": 0,
@@ -117,6 +119,7 @@ class BranchCleanupTests(unittest.TestCase):
                 "update_refs_empty": "",
                 "update_refs_truncated": f"refs/heads/other\n{oid}\n",
                 "update_refs_invalid_oid": "refs/heads/other\nnot-an-object-id\n" + "0" * 40 + "\n",
+                "update_refs_invalid_ref": f"refs/heads/other bad\n{oid}\n{oid}\n",
             }
             if scenario in records:
                 (self.gitdir(worktree) / backend / "update-refs").write_text(records[scenario])
