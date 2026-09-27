@@ -75,6 +75,9 @@ class PackageTests(unittest.TestCase):
             ["extra/caf\u00e9.md", "extra/cafe\u0301.md"],
             ["extra/caf\u00e9.md", "extra/CAFE\u0301.MD/child.txt"],
             ["extra/cafe\u0301.md/child.txt", "extra/CAF\u00c9.md"],
+            ["extra/I.txt", "extra/\u0131.txt"],
+            ["extra/I.txt", "extra/\u0131.txt/child.md"],
+            ["extra/\u0131.txt/child.md", "extra/I.txt"],
         ]:
             with self.subTest(destinations=names):
                 self.assert_invalid_destinations(names)
