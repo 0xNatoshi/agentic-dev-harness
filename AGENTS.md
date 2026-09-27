@@ -65,7 +65,7 @@ At start/merge/cleanup and after checkout/remote changes, verify `origin`: reada
 
 ```bash
 workflow_origin=$(bash <skill-dir>/scripts/merge-preflight.sh origin) || exit 2
-IFS=$'\t' read -r workflow_host workflow_repo workflow_default <<< "$workflow_origin"
+IFS="$(printf '\t')" read -r workflow_host workflow_repo workflow_default <<< "$workflow_origin"
 export workflow_host workflow_repo workflow_default
 ```
 

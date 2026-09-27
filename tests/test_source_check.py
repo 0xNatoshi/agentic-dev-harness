@@ -59,6 +59,39 @@ class SourceCheckTests(unittest.TestCase):
                 self.assertIn(location + " " + message, result.stderr)
                 self.assertNotIn('"source_checks": "passed"', result.stdout + result.stderr)
 
+    def test_source_gate_rejects_commands_after_literal_hash_and_comment_newline(self):
+        relative = "skills/github-workflow/references/development-loop.md"
+        with tempfile.TemporaryDirectory(prefix="harness-workflow-comment-boundary-") as directory:
+            root = Path(directory)
+            source = self.copy_source(root)
+            locations = self.append_workflow_examples(source, relative, [
+                "printf '%s\\n' x#word; gh pr view --repo \"$workflow_host/$workflow_repo\"",
+                "printf '%s\\n' x # comment \\",
+                'gh pr view --repo "$workflow_host/$workflow_repo"',
+                "printf $'x\\' # text'; gh pr view --repo \"$workflow_host/$workflow_repo\"",
+                "printf '%s\\n' x" + chr(0xA0) + '#word; gh pr view --repo "$workflow_host/$workflow_repo"',
+                "printf '%s\\n' x" + chr(0x2028) + '#word; gh pr view --repo "$workflow_host/$workflow_repo"',
+                "cat <<'EOF'" + chr(0xA0), "EOF" + chr(0xA0),
+                'gh pr view --repo "$workflow_host/$workflow_repo"', "cat <<'EOF'", "EOF",
+                "printf '%s\\n' <(printf x)#word; gh pr view --repo \"$workflow_host/$workflow_repo\"",
+                "printf '%s\\n' >(cat)#word; gh pr view --repo \"$workflow_host/$workflow_repo\"",
+                "printf '%s\\n' @(x)#word; gh pr view --repo \"$workflow_host/$workflow_repo\"",
+            ])
+            environment, _ = fixture_environment(root)
+            result = run([sys.executable, "scripts/check.py"], source, environment)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            message = " gh pr view needs an explicit PR selector"
+            self.assertIn(locations[0] + message, result.stderr)
+            self.assertIn(locations[2] + message, result.stderr)
+            self.assertIn(locations[3] + " unsupported ANSI-C quote boundary", result.stderr)
+            self.assertIn(locations[4] + message, result.stderr)
+            self.assertIn(locations[5] + message, result.stderr)
+            self.assertIn(locations[6] + " unsupported here-document header", result.stderr)
+            self.assertIn(locations[8] + message, result.stderr)
+            self.assertIn(locations[11] + " unsupported process substitution boundary", result.stderr)
+            self.assertIn(locations[12] + " unsupported process substitution boundary", result.stderr)
+            self.assertIn(locations[13] + " unsupported extended glob boundary", result.stderr)
+
     def test_source_gate_collects_workflow_findings_across_active_files(self):
         with tempfile.TemporaryDirectory(prefix="harness-workflow-collected-") as directory:
             root = Path(directory)

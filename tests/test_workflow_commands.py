@@ -1,6 +1,8 @@
 """Check the workflow command contract in disposable Markdown guidance."""
 
 from pathlib import Path
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/check_workflow_commands.py"
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(SCRIPT.parent))
-from check_workflow_commands import check_repository  # noqa: E402
+from check_workflow_commands import check_repository, scan_document  # noqa: E402
 
 
 PROBE = """```bash
@@ -50,6 +52,69 @@ SKILL = (
     + "```\n\n"
     + "The CLI names `gh pr view|checks|ready|merge|edit`, `gh repo view/edit`, and `gh issue list/view/create/comment` here.\n"
 )
+
+BAD_PR = 'gh pr view --repo "$workflow_host/$workflow_repo"'
+WORD_SPACE_CODEPOINTS = (0x0B, 0x0C, 0x1C, 0x1D, 0x1E, 0x85, 0xA0, 0x2003, 0x2028, 0x2029, 0x202F)
+
+
+def here_document_word_cases():
+    return ["cat <<'EOF'" + chr(codepoint) + "\nEOF" + chr(codepoint) +
+            "\n" + BAD_PR + "\ncat <<'EOF'\nEOF" for codepoint in WORD_SPACE_CODEPOINTS]
+
+
+def unsupported_word_substitutions():
+    cases = [("printf '%s\\n' " + word + "; " + BAD_PR, "process substitution boundary")
+             for word in ("<(printf x)#word", ">(cat)#word")]
+    cases.extend(("printf '%s\\n' " + marker + "(x)#word; " + BAD_PR, "extended glob boundary")
+                 for marker in "@!?*+")
+    return cases
+
+
+def dollar_quote_cases():
+    return (
+        ("printf $'x\\' # text'; " + BAD_PR, "ANSI-C quote boundary"),
+        ('printf $"x # text"; ' + BAD_PR, "locale quote boundary"),
+    )
+
+
+def comment_boundary_cases():
+    cases = [
+        ("printf '%s\\n' x#word; " + BAD_PR, 2),
+        ("printf '%s\\n' ''#word; " + BAD_PR, 2),
+        ("printf '%s\\n' \"\"#word; " + BAD_PR, 2),
+        ("printf '%s\\n' $(printf x)#word; " + BAD_PR, 2),
+        ("printf '%s\\n' $(printf 'case')#word; " + BAD_PR, 2),
+        ("printf '%s\\n' $(printf x) #comment; " + BAD_PR, None),
+        ("(printf x)#comment; " + BAD_PR, None),
+        ("printf '%s\\n' '#'; " + BAD_PR, 2),
+        ("printf '%s\\n' \"#\"; " + BAD_PR, 2),
+        ("printf '%s\\n' \"$'x # text'\"; " + BAD_PR, 2),
+        ("printf '%s\\n' '$\"x # text\"'; " + BAD_PR, 2),
+        ("printf '%s\\n' \\$'x # text'; " + BAD_PR, 2),
+        ("printf '%s\\n' \\#word; " + BAD_PR, 2),
+        ("printf '%s\\n' \\ #word; " + BAD_PR, 2),
+        ("printf '%s\\n' \"<<'EOF'\"; " + BAD_PR, 2),
+        ("printf '%s\\n' '<(printf x)#word'; " + BAD_PR, 2),
+        ("printf '%s\\n' \"@(x)#word\"; " + BAD_PR, 2),
+        ("printf '%s\\n' \\<\\(x\\)#word; " + BAD_PR, 2),
+        ("printf '%s\\n' \\@\\(x\\)#word; " + BAD_PR, 2),
+        ("printf '%s\\n' \\<\\<; " + BAD_PR, 2),
+        ("printf '%s\\n' x # <<'EOF'\n" + BAD_PR, 3),
+    ]
+    cases.extend(
+        ("printf '%s\\n' x # comment " + "\\" * count + "\n" + BAD_PR, 3)
+        for count in range(1, 5)
+    )
+    cases.extend(
+        ("printf '%s\\n' x" + chr(codepoint) + "#word; " + BAD_PR, 2)
+        for codepoint in WORD_SPACE_CODEPOINTS
+    )
+    cases.append(("printf '%s\\n' x\t#comment; " + BAD_PR, None))
+    cases.extend(
+        ("printf '%s\\n' " + word + " \\\n" + BAD_PR, None)
+        for word in ("x#word", "''#word", "$(printf x)#word")
+    )
+    return cases
 
 
 class WorkflowCommandTests(unittest.TestCase):
@@ -818,6 +883,94 @@ gh pr view \\
         with tempfile.TemporaryDirectory(prefix="workflow-hash-word-") as directory:
             root = self.root(directory, references={"boundary.md": body})
             self.assertEqual(check_repository(root), [])
+
+    def test_shell_comment_boundaries_do_not_hide_executable_commands(self):
+        fence = chr(96) * 3
+        for command, bad_line in comment_boundary_cases():
+            with self.subTest(command=command):
+                for ending in ("\n", "\r\n", "\r"):
+                    text = f"{fence}bash\n{command}\n{fence}\n".replace("\n", ending)
+                    findings = scan_document("examples.md", text)
+                    expected = [] if bad_line is None else [(bad_line, "gh pr view needs an explicit PR selector")]
+                    self.assertEqual([(item.line, item.message) for item in findings], expected)
+
+    def test_shell_comment_boundary_expectations_match_bash(self):
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("Bash is unavailable")
+        cases = comment_boundary_cases() + [(command, 2) for command, _ in
+                dollar_quote_cases() + tuple(unsupported_word_substitutions())]
+        cases.extend((command, 4) for command in here_document_word_cases())
+        for command, bad_line in cases:
+            with self.subTest(command=command), tempfile.TemporaryDirectory(prefix="workflow-bash-witness-") as directory:
+                witness = Path(directory) / "gh.calls"
+                environment = os.environ.copy()
+                environment["WORKFLOW_WITNESS"] = str(witness)
+                result = subprocess.run(
+                    [bash, "--noprofile", "--norc", "-O", "extglob", "-c",
+                     'gh() { printf "called\n" >> "$WORKFLOW_WITNESS"; }\n' + command],
+                    env=environment, capture_output=True, text=True, encoding="utf-8", timeout=5,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = witness.read_text(encoding="utf-8").splitlines() if witness.exists() else []
+                self.assertEqual(calls, ["called"] if bad_line is not None else [])
+
+    def test_active_dollar_quotes_block_before_comment_masking(self):
+        fence = chr(96) * 3
+        for command, reason in dollar_quote_cases():
+            with self.subTest(command=command):
+                findings = scan_document("examples.md", f"{fence}bash\n{command}\n{fence}\n")
+                self.assertTrue(any(item.line == 2 and reason in item.message for item in findings),
+                                [str(item) for item in findings])
+
+    def test_literal_hash_words_do_not_hide_real_here_document_operators(self):
+        fence = chr(96) * 3
+        for word in ("x#word", "''#word", "$(printf x)#word", "\\ #word"):
+            with self.subTest(word=word):
+                command = "printf '%s\\n' " + word + " <<'EOF'\ndata\nEOF"
+                findings = scan_document("examples.md", f"{fence}bash\n{command}\n{fence}\n")
+                self.assertTrue(any(item.line == 2 and "unsupported here-document header" in
+                                    item.message for item in findings), [str(item) for item in findings])
+
+    def test_nonblank_header_suffixes_do_not_hide_executed_commands(self):
+        fence = chr(96) * 3
+        for command in here_document_word_cases():
+            with self.subTest(command=command):
+                findings = scan_document("examples.md", f"{fence}bash\n{command}\n{fence}\n")
+                self.assertTrue(any(item.line == 2 and "unsupported here-document header" in
+                                    item.message for item in findings), [str(item) for item in findings])
+                self.assertTrue(any(item.line == 4 and "gh pr view needs an explicit PR selector" in
+                                    item.message for item in findings), [str(item) for item in findings])
+
+    def test_process_and_pattern_substitutions_block_before_comment_masking(self):
+        fence = chr(96) * 3
+        for command, reason in unsupported_word_substitutions():
+            with self.subTest(command=command):
+                findings = scan_document("examples.md", f"{fence}bash\n{command}\n{fence}\n")
+                self.assertTrue(any(item.line == 2 and reason in item.message for item in findings),
+                                [str(item) for item in findings])
+
+    def test_ambiguous_active_shell_boundaries_block_explicitly(self):
+        fence = chr(96) * 3
+        cases = (
+            "echo $((16#ff)); " + BAD_PR,
+            "echo " + chr(96) + "printf x" + chr(96) + "; " + BAD_PR,
+            "echo $(case x in x) true;; esac)#word; " + BAD_PR,
+            "echo $(printf case)#word; " + BAD_PR,
+            "echo $" + "{x:-$(printf x)}#word; " + BAD_PR,
+        )
+        for command in cases:
+            with self.subTest(command=command):
+                findings = scan_document("examples.md", f"{fence}bash\n{command}\n{fence}\n")
+                self.assertTrue(any(item.line == 2 and "unsupported" in item.message and
+                                    "boundary" in item.message for item in findings), [str(item) for item in findings])
+
+        for marker in ("'" + chr(96) + "'", "\\" + chr(96)):
+            with self.subTest(literal=marker):
+                command = "printf '%s\\n' " + marker + "; " + BAD_PR
+                findings = scan_document("examples.md", f"{fence}bash\n{command}\n{fence}\n")
+                self.assertEqual([(item.line, item.message) for item in findings],
+                                 [(2, "gh pr view needs an explicit PR selector")])
 
     def test_here_document_boundaries_cannot_hide_later_markdown_or_commands(self):
         for body in (

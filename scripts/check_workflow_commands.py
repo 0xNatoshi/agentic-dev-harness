@@ -276,10 +276,152 @@ class Diagnostic:
         return f"{self.file}:{self.line}: {self.message}"
 
 
+@dataclass(frozen=True)
+class ShellBoundaries:
+    visible: str
+    has_here_operator: bool
+    continuation: bool
+    error: str
+
+
+def _shell_boundaries(command):
+    """Own the boundary syntax; leave command tokenization and headers bounded."""
+    # Dollar quotes, arithmetic, backticks and execution/quotes inside parameter
+    # expansions need a grammar outside this checker. Case arms inside
+    # substitutions can close with unmatched ')': even an unquoted literal case argument makes
+    # boundary-sensitive forms ambiguous here. Quote that literal to disambiguate.
+    # Process substitutions and extended globs also continue a word after ')';
+    # reject their active forms instead of treating them as ordinary groups.
+    quote = ""
+    escaped = False
+    word_started = False
+    # A substitution resumes its outer word; a shell group ends at control
+    # punctuation. Saved quotes also cover substitutions inside double quotes.
+    frames = []
+    has_here_operator = False
+    case_in_substitution = False
+    index = 0
+
+    def unsupported(reason):
+        return ShellBoundaries(command, has_here_operator, False, reason)
+
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            escaped = False
+            word_started = True
+            index += 1
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            index += 1
+            continue
+        if char == "\\":
+            escaped = True
+            word_started = True
+            index += 1
+            continue
+        if char == '"' and quote == '"':
+            quote = ""
+            index += 1
+            continue
+        if not quote and char in "'\"":
+            quote = char
+            word_started = True
+            index += 1
+            continue
+        if not quote and command.startswith("$'", index):
+            return unsupported("unsupported ANSI-C quote boundary; use ordinary literal quotes")
+        if not quote and command.startswith('$"', index):
+            return unsupported("unsupported locale quote boundary; use ordinary double quotes")
+        if command.startswith("$((", index):
+            return unsupported("unsupported arithmetic expansion boundary")
+        if command.startswith("$(", index):
+            frames.append(("substitution", quote))
+            quote = ""
+            word_started = False
+            index += 2
+            continue
+        if command.startswith("${", index):
+            # Parameter data cannot start comments or redirects. Nested
+            # execution and quoting require a grammar outside this checker.
+            depth = 1
+            end = index + 2
+            while end < len(command) and depth:
+                if command.startswith("$(", end) or command[end] in ("'", '"', "`"):
+                    return unsupported("unsupported complex parameter expansion boundary")
+                if command[end] == "\\":
+                    end += 2
+                    continue
+                if command[end] == "{":
+                    depth += 1
+                elif command[end] == "}":
+                    depth -= 1
+                end += 1
+            if depth:
+                return unsupported("unfinished parameter expansion boundary")
+            word_started = True
+            index = end
+            continue
+        if char == "`":
+            return unsupported("unsupported backtick substitution boundary")
+        if quote == '"':
+            index += 1
+            continue
+        if command.startswith(("<(", ">("), index):
+            return unsupported("unsupported process substitution boundary; split the example")
+        if char in "@!?*+" and command[index + 1:index + 2] == "(":
+            return unsupported("unsupported extended glob boundary; use a literal argument")
+        if not word_started and command.startswith("case", index) and (
+            index + 4 == len(command) or command[index + 4] in " \t" or
+            command[index + 4] in ";&|<>()"
+        ) and any(kind == "substitution" for kind, _ in frames):
+            case_in_substitution = True
+        if char == "#":
+            if case_in_substitution:
+                return unsupported("unsupported case substitution comment boundary; quote literal case arguments or split the example")
+            if not word_started:
+                if frames:
+                    return unsupported("unsupported comment inside unfinished shell group")
+                return ShellBoundaries(command[:index], has_here_operator, False, "")
+        # Bash blanks are ASCII space/tab; Unicode whitespace is word data.
+        if char in " \t":
+            word_started = False
+        elif char in ";&|<>":
+            if char == "<" and command.startswith("<<", index) and (
+                index == 0 or command[index - 1] != "<"
+            ) and not command.startswith("<<<", index):
+                if case_in_substitution:
+                    return unsupported("unsupported case substitution here-document boundary; quote literal case arguments or split the example")
+                has_here_operator = True
+            word_started = False
+        elif char == "(":
+            frames.append(("group", quote))
+            word_started = False
+        elif char == ")":
+            if frames:
+                kind, quote = frames.pop()
+                word_started = kind == "substitution"
+            else:
+                word_started = False
+        else:
+            word_started = True
+        index += 1
+    if case_in_substitution and escaped:
+        return unsupported("unsupported case substitution continuation boundary; quote literal case arguments or split the example")
+    if any(kind == "substitution" for kind, _ in frames) and not escaped:
+        return unsupported("unfinished command substitution boundary")
+    return ShellBoundaries(command, has_here_operator, escaped, "")
+
+
 def _tokens(command):
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+    boundaries = _shell_boundaries(command)
+    if boundaries.error:
+        raise ValueError(boundaries.error)
+    lexer = shlex.shlex(boundaries.visible, posix=True, punctuation_chars=";&|()")
     lexer.whitespace_split = True
-    lexer.commenters = "#"
+    lexer.commenters = ""
     raw = []
     for word in lexer:
         # shlex groups adjacent punctuation, such as ');' or ')&&'. Keep
@@ -646,19 +788,13 @@ def _interpreter_probe(lines, number):
     )
 
 
-def _here_document(command):
+def _here_document(boundaries):
     """Recognize the bounded body grammar without interpreting its contents."""
-    # Preserve quotes here: ordinary shlex tokenization removes the distinction
-    # between a redirect and a quoted string that merely contains '<<'.
-    spans = re.finditer(
-        r''' '[^']*' | "(?:\\.|[^"\\])*" | \\. | (?<![^\s;&|()])\#.*$ | (?P<here>(?<!<)<<(?!<)-?) ''',
-        command, re.VERBOSE,
-    )
-    if not any(span.lastgroup == "here" for span in spans):
+    if not boundaries.has_here_operator:
         return None, None
     header = re.fullmatch(
-        r'''\s*(?:cat|"\$\{python_cmd\[@\]\}"\s+-)\s+<<(?P<tabs>-)?\s*(?P<quote>['"])(?P<end>[A-Za-z_][A-Za-z_0-9]*)(?P=quote)(?:\s+\#.*)?\s*''',
-        command,
+        r'''[ \t]*(?:cat|"\$\{python_cmd\[@\]\}"[ \t]+-)[ \t]+<<(?P<tabs>-)?[ \t]*(?P<quote>['"])(?P<end>[A-Za-z_][A-Za-z_0-9]*)(?P=quote)[ \t]*''',
+        boundaries.visible,
     )
     if header is None:
         return None, "unsupported here-document header; use a standalone cat or selected-Python command with one literal quoted delimiter"
@@ -667,7 +803,8 @@ def _here_document(command):
 
 def scan_document(file, text):
     """Check a Markdown document and return deterministic file:line findings."""
-    lines = text.splitlines()
+    # Markdown normalizes CR/LF endings, not Unicode/control word characters.
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     findings = []
     fence_mark = None
     shell_fence = False
@@ -712,14 +849,14 @@ def scan_document(file, text):
             else:
                 pending = command_line
                 pending_line = number
-            # In a complete supported header, a final backslash can only be
-            # comment data. Incomplete headers still use normal continuation.
-            here_document, here_error = _here_document(pending)
-            # Bash removes only an unpaired final backslash and the newline.
-            # Trailing whitespace prevents continuation; indentation on the
-            # next physical line remains part of the command.
-            backslashes = len(command_line) - len(command_line.rstrip("\\"))
-            if backslashes % 2 and here_document is None:
+            boundaries = _shell_boundaries(pending)
+            if boundaries.error:
+                findings.append(Diagnostic(file, pending_line, boundaries.error))
+                pending = ""
+                pending_line = 0
+                continue
+            here_document, here_error = _here_document(boundaries)
+            if boundaries.continuation and here_document is None:
                 pending = pending[:-1]
                 continue
             is_probe = _interpreter_probe(lines, number)
