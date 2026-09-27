@@ -2,8 +2,9 @@
 """Check source integrity, portable links and syntax, and screen repository privacy.
 
 The privacy screen rejects machine-specific home paths, common credential
-formats and email addresses outside neutral example, GitHub noreply and
-service noreply forms. It does not detect personal names.
+formats and email addresses outside example domains, GitHub noreply,
+the Claude co-author trailer and the GitHub SSH user. It does not detect
+personal names or obfuscated addresses.
 """
 import ast
 import importlib.util
@@ -24,16 +25,18 @@ def require(condition, detail):
         raise ValueError(detail)
 
 
-EMAIL = re.compile(r"[A-Za-z0-9._%+<>-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)")
+# An alphabetic top-level label keeps version pins such as action@v4.2.2 out.
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})\b")
 NEUTRAL_DOMAINS = {"example.invalid", "example.com", "example.org", "users.noreply.github.com"}
+NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "git@github.com"}
 
 
 def check_emails(relative, text):
     for number, line in enumerate(text.splitlines(), 1):
         for match in EMAIL.finditer(line):
-            local = match.group(0).partition("@")[0].lower()
+            neutral = match.group(1).lower() in NEUTRAL_DOMAINS or match.group(0).lower() in NEUTRAL_ADDRESSES
             # Report the location only, so the gate never echoes an address.
-            require(match.group(1).lower() in NEUTRAL_DOMAINS or local == "noreply", f"Email address outside the neutral allowlist: {relative}:{number}")
+            require(neutral, f"Email address outside the neutral allowlist: {relative}:{number}")
 
 
 def check_links(name, text, available):

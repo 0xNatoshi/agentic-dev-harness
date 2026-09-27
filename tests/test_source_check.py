@@ -60,7 +60,11 @@ class SourceCheckTests(unittest.TestCase):
 
     def test_source_gate_rejects_personal_email_without_echoing_it(self):
         # Built at runtime so this file itself stays free of the pattern.
-        address = "@".join(["first.last", "personal-mail.net"])
+        for address in ["@".join(["first.last", "personal-mail.net"]), "@".join(["noreply", "vanity-name.me"])]:
+            with self.subTest(address=address):
+                self.check_rejected(address)
+
+    def check_rejected(self, address):
         with tempfile.TemporaryDirectory(prefix="harness-profile-email-") as directory:
             root = Path(directory)
             source = self.copy_source(root)
@@ -78,7 +82,10 @@ class SourceCheckTests(unittest.TestCase):
         addresses = [
             "@".join(["fixture", "example.invalid"]),
             "@".join(["<id>+<login>", "users.noreply.github.com"]),
-            "@".join(["noreply", "service.example.net"]),
+            "Claude <" + "@".join(["noreply", "anthropic.com"]) + ">",
+            "@".join(["git", "github.com"]) + ":owner/repo.git",
+            "actions/checkout@v4.2.2",
+            "package@1.2.3",
         ]
         with tempfile.TemporaryDirectory(prefix="harness-neutral-email-") as directory:
             root = Path(directory)
