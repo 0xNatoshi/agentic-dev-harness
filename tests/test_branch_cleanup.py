@@ -39,6 +39,7 @@ SCENARIOS = (
     "am_counter_extra_line",
     "am_counter_range",
     "head_name_extra_line",
+    "head_name_symlink",
     "free",
 )
 STATUS = {
@@ -57,6 +58,7 @@ STATUS = {
     "am_counter_extra_line": 2,
     "am_counter_range": 2,
     "head_name_extra_line": 2,
+    "head_name_symlink": 2,
     "free": 0,
     "other_rebase": 0,
     "detached_rebase_merge": 0,
@@ -138,10 +140,12 @@ class BranchCleanupTests(unittest.TestCase):
         if scenario in (
             "unknown_state", "missing_worktree", "wrong_repository", "incomplete_rebase_apply", "invalid_head_name",
             "am_marker_only", "am_counter_extra_line", "am_counter_range", "head_name_extra_line",
+            "head_name_symlink",
         ):
             self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
             am = ("am_marker_only", "am_counter_extra_line", "am_counter_range")
-            if scenario in ("unknown_state", "incomplete_rebase_apply", "invalid_head_name", "head_name_extra_line", *am):
+            if scenario in ("unknown_state", "incomplete_rebase_apply", "invalid_head_name", "head_name_extra_line",
+                            "head_name_symlink", *am):
                 state = "rebase-apply" if scenario in ("incomplete_rebase_apply", *am) else "rebase-merge"
                 (self.gitdir(worktree) / state).mkdir()
                 if scenario == "am_marker_only":
@@ -156,6 +160,11 @@ class BranchCleanupTests(unittest.TestCase):
                 if scenario == "head_name_extra_line":
                     # Command substitution would strip the extra line and accept the literal.
                     (self.gitdir(worktree) / state / "head-name").write_text("detached HEAD\n\n")
+                if scenario == "head_name_symlink":
+                    # The link target holds Git's exact literal, but its source is untrusted.
+                    literal = self.root / "detached-literal"
+                    literal.write_text("detached HEAD\n")
+                    (self.gitdir(worktree) / state / "head-name").symlink_to(literal)
                 if scenario == "invalid_head_name":
                     # Only Git's exact literal is accepted; a near miss stays untrusted.
                     (self.gitdir(worktree) / state / "head-name").write_text("detached HEAD \n")

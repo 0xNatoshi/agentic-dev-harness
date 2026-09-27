@@ -37,7 +37,8 @@ single_record() {
 check_operation_file() {
   operation=$1
   file=$2
-  [ -f "$file" ] && [ -r "$file" ] || {
+  # A symlink could borrow another file's content, such as the detached literal.
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || {
     printf 'Cannot read %s state: %s\n' "$operation" "$file" >&2
     exit 2
   }
