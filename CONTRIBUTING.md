@@ -34,6 +34,8 @@ python3 -m unittest discover -s tests -v
 python3 scripts/build.py
 ```
 
+Source development requires Python 3.11+; on Windows use `py -3` instead of `python3` after checking its version. The distributed workflow helpers require Python 3.8+ and use the working-interpreter probes documented in the skill. A present but failing Windows Store alias is not a usable interpreter.
+
 A running CI check must finish; a failing check blocks. Use the documented local fallback only after establishing the eligible unstarted-run condition. Never lower protections or fabricate a CI result. A ready entrusted PR satisfying all gates is merged and verified without another ritual go. Explicit holds and other irreversible boundaries retain their effect.
 
 ## Handoff comment
