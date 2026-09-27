@@ -203,6 +203,50 @@ class SourceCheckTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+    def test_source_gate_accepts_python_import_content_without_syntax_quotes(self):
+        imported = "@" + "AGENTS.md"
+        snippets = [
+            "value = " + prefix + quote + imported + quote
+            for prefix in ("", "r", "u", "b", "br", "rb", "f", "fr", "rf")
+            for quote in ("'", '"', "'''", '"""')
+        ]
+        snippets.extend("value = " + quote + imported + "\ntext\n" + quote for quote in ("'''", '"""'))
+        snippets.append('target.write_text(f"' + imported + r'\n\n```bash\n{command}\n```\n", encoding="utf-8")')
+        with tempfile.TemporaryDirectory(prefix="harness-python-import-") as directory:
+            root = Path(directory)
+            source = self.copy_source(root)
+            (source / "tests/fixture_imports.py").write_text("\n".join(snippets) + "\n", encoding="utf-8")
+            environment, _ = fixture_environment(root)
+            result = run([sys.executable, "scripts/check.py"], source, environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('"source_checks": "passed"', result.stdout)
+
+    def test_python_literal_content_remains_screened_with_physical_lines(self):
+        address = "@".join(["first.last", "personal-mail.net"])
+        quoted = "@".join(['"first.last"', "personal-mail.net"])
+        imported = "@" + "AGENTS.md"
+        cases = [
+            ("value = " + repr(address) + "\n", 2),
+            ("value = r" + repr(address) + "\n", 2),
+            ("value = " + repr(quoted) + "\n", 2),
+            ("value = f" + repr("{name} " + address) + "\n", 2),
+            ("# " + address + "\n", 2),
+            ('value = """' + imported + "\n" + address + '\n"""\n', 3),
+            ('value = """Documentation\n' + address, 3),
+        ]
+        for snippet, line in cases:
+            with self.subTest(snippet=snippet), tempfile.TemporaryDirectory(prefix="harness-python-content-") as directory:
+                root = Path(directory)
+                source = self.copy_source(root)
+                (source / "tests/fixture_content.py").write_text("import os\n" + snippet, encoding="utf-8")
+                environment, _ = fixture_environment(root)
+                result = run([sys.executable, "scripts/check.py"], source, environment)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"Email address outside the neutral allowlist: tests/fixture_content.py:{line}", result.stderr)
+                self.assertNotIn(address, result.stdout + result.stderr)
+                self.assertNotIn(quoted, result.stdout + result.stderr)
+                self.assertNotIn('"source_checks": "passed"', result.stdout)
+
     def test_source_gate_reads_python_strings_and_comments_only(self):
         # Matrix multiplication and decorators are operators; strings and comments are screened.
         clean = "@".join(["result = matrix", "vector"]) + "\n\n\n" + "@".join(["", "decorator"]) + "\ndef f():\n    pass\n"

@@ -4,6 +4,7 @@
 
 Development version: 6.5.0. No release tag has been published for this version.
 
+- Distinguish Python string delimiters from literal privacy-screen content, preserving quoted address checks and physical diagnostic lines without reconstructing assembled values.
 - Bound review cycles by acceptance, demonstrated regressions and material risk; require a root-design checkpoint after repeated unresolved cycles, targeted rechecks and justified full reviews while preserving every delivery gate.
 - Add the approved contributor grant-back to the proprietary template for new adoptions only, with an exact-text source assertion. Existing licenses remain unchanged unless their owner decides otherwise.
 - Define portable conversation reports, resolved-objection records, authenticated GitHub noreply evidence and documentation-with-code review scope.
