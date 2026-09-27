@@ -75,7 +75,10 @@ class SourceCheckTests(unittest.TestCase):
                         "*" + "@".join(["", "personal-mail.net"]) + "*",
                         "`" + "@".join(["", "personal-mail.net"]) + "`",
                         "@".join(["person", "example.com2"]), "@".join(["noreply", "anthropic.com-evil"]),
-                        "@".join(["first", "ex\u00e4mple.de"]), "@".join(["noreply", "anthropic.c\u00f6m"])]:
+                        "@".join(["first", "ex\u00e4mple.de"]), "@".join(["noreply", "anthropic.c\u00f6m"]),
+                        "@".join(["user", "123.456.com"]), "@".join(["user", "1.2.3-evil.com"]),
+                        "@".join(["first", "\u0909\u0926\u093e\u0939\u0930\u0923.\u092d\u093e\u0930\u0924"]),
+                        "@".join(["first", "personal-mail\u3002net"]), "@".join(["first", "example.com.personal-mail.net"])]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
@@ -109,6 +112,12 @@ class SourceCheckTests(unittest.TestCase):
             "actions/checkout@v4.2.2",
             "package@1.2.3",
             "package@v1.2.3-beta.1",
+            "package@4.2",
+            "@".join(["fixture", "example.net"]),
+            "@".join(["fixture", "mail.example.org"]),
+            "@".join(["fixture", "host.test"]),
+            "@".join(["fixture", "docs.example"]),
+            "@".join(["fixture", "machine.localhost"]),
             "Write to " + "@".join(["noreply", "anthropic.com"]) + ".",
         ]
         with tempfile.TemporaryDirectory(prefix="harness-neutral-email-") as directory:

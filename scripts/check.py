@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import sys
 import tomllib
+import unicodedata
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,12 +26,15 @@ def require(condition, detail):
         raise ValueError(detail)
 
 
-# The domain is every dotted label after @, letters in any script included, so a
-# neutral prefix such as example.com2 or anthropic.com-evil cannot pass; a final
-# sentence period is not a label. Version pins such as action@v4.2.2 start with
-# two numeric labels; real address domains rarely do, so they are skipped.
-DOMAIN = re.compile(r'@((?:[^\W_]|-)+(?:\.(?:[^\W_]|-)+)+)')
-VERSION = re.compile(r'[vV]?\d+\.\d+(?:\Z|[.-])')
+# The domain is every dotted label after @: letters, combining marks and digits in
+# any script, and hyphens, with IDNA's ideographic and full-width dots as separators.
+# A neutral prefix such as example.com2 therefore never passes as example.com, and a
+# final sentence period is not a label.
+DOTS = ".\u3002\uff0e\uff61"
+IDNA_DOTS = str.maketrans(DOTS[1:], "...")
+# Version pins such as action@v4.2.2 or pkg@1.2.3-beta.1 are semver-shaped, and their
+# last label is never an alphabetic top-level domain.
+VERSION = re.compile(r'v?\d+(?:\.\d+)+(?:-[0-9a-z-]+(?:\.[0-9a-z-]+)*)?\Z')
 # The local part is the token before @, including RFC quoted strings and
 # <placeholder> segments, so punctuation or quoting cannot hide an address;
 # a quoted string never spans whitespace, @ or commas, so `"a", "b@c"` reads as b.
@@ -43,30 +47,63 @@ LOOK_BACK = 256
 # characters too; they wrap the address only when mirrored right after it.
 WRAPPERS = "_*~`'{"
 CLOSING = str.maketrans("{", "}")
-NEUTRAL_DOMAINS = {"example.invalid", "example.com", "example.org", "users.noreply.github.com"}
+# Reserved for documentation and testing (RFC 2606, RFC 6761), subdomains included.
+RESERVED_DOMAINS = ("example.com", "example.net", "example.org", "example", "invalid", "test", "localhost")
+NEUTRAL_DOMAINS = {"users.noreply.github.com"}
 NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "git@github.com"}
+
+
+def label_char(char):
+    return char == "-" or unicodedata.category(char)[0] in "LMN"
+
+
+def domain_end(line, at):
+    """End of the dotted domain after the @ at index at, or None without two labels."""
+    index = end = at + 1
+    labels = 0
+    while True:
+        start = index
+        while index < len(line) and label_char(line[index]):
+            index += 1
+        if index == start:
+            break
+        labels += 1
+        end = index
+        if index + 1 < len(line) and line[index] in DOTS and label_char(line[index + 1]):
+            index += 1
+        else:
+            break
+    return end if labels >= 2 else None
+
+
+def neutral_domain(domain):
+    return domain in NEUTRAL_DOMAINS or any(
+        domain == reserved or domain.endswith("." + reserved) for reserved in RESERVED_DOMAINS)
 
 
 def check_emails(relative, text):
     for number, line in enumerate(text.splitlines(), 1):
-        for match in DOMAIN.finditer(line):
+        for match in re.finditer("@", line):
+            end = domain_end(line, match.start())
+            if end is None:
+                continue
             window = line[max(0, match.start() - LOOK_BACK):match.start()]
             token = LOCAL.search(window).group(0)
             before = window[:len(window) - len(token)]
             local = token.lstrip(WRAPPERS)
             wrapper = token[:len(token) - len(local)]
-            if not line[match.end():].startswith(wrapper[::-1].translate(CLOSING)):
+            domain = line[match.start() + 1:end].translate(IDNA_DOTS).lower()
+            if not line[end:].startswith(wrapper[::-1].translate(CLOSING)):
                 local = token
             elif not local and (not before or before[-1] in " \t([") and (
-                    not wrapper or wrapper == "`" and match.group(1).endswith(".md")):
+                    not wrapper or wrapper == "`" and domain.endswith(".md")):
                 # No local part at all is an @mention or import; a wrapper-only
                 # token is a local part too, except a code span around a Markdown
                 # import such as `@AGENTS.md`.
                 continue
-            domain = match.group(1).lower()
-            if VERSION.match(domain):
+            if VERSION.match(domain) and not domain.rpartition(".")[2].isalpha():
                 continue
-            neutral = domain in NEUTRAL_DOMAINS or f"{local.lower()}@{domain}" in NEUTRAL_ADDRESSES
+            neutral = neutral_domain(domain) or f"{local.lower()}@{domain}" in NEUTRAL_ADDRESSES
             # Report the location only, so the gate never echoes an address.
             require(neutral, f"Email address outside the neutral allowlist: {relative}:{number}")
 
