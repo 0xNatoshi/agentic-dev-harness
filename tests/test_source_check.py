@@ -62,7 +62,9 @@ class SourceCheckTests(unittest.TestCase):
         # Built at runtime so this file itself stays free of the pattern.
         for address in ["@".join(["first.last", "personal-mail.net"]), "@".join(["noreply", "vanity-name.me"]),
                         "_" + "@".join(["first.last", "personal-mail.net"]) + "_",
-                        "@".join(['"first.last"', "personal-mail.net"])]:
+                        "@".join(['"first.last"', "personal-mail.net"]),
+                        "@".join(["first!", "personal-mail.net"]), "@".join(["first=", "personal-mail.net"]),
+                        "`" + "@".join(["first.last", "personal-mail.net"]) + "`"]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
@@ -86,6 +88,9 @@ class SourceCheckTests(unittest.TestCase):
             "@".join(["<id>+<login>", "users.noreply.github.com"]),
             "Claude <" + "@".join(["noreply", "anthropic.com"]) + ">",
             "@".join(["git", "github.com"]) + ":owner/repo.git",
+            "`" + "@".join(["noreply", "anthropic.com"]) + "`",
+            "**" + "@".join(["git", "github.com"]) + "**",
+            "imports `@AGENTS.md` and `@../.codex/AGENTS.md`",
             "actions/checkout@v4.2.2",
             "package@1.2.3",
         ]

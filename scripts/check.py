@@ -27,7 +27,8 @@ def require(condition, detail):
 
 # An alphabetic top-level label keeps version pins such as action@v4.2.2 out.
 # A quoted local part ("first.last"@...) is valid mail syntax too.
-EMAIL = re.compile(r'(?:"[^"\n]+"|[A-Za-z0-9._%+-]+)@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})')
+# RFC 5322 dot-atom characters; angle brackets stay outside so "Name <a@b>" splits.
+EMAIL = re.compile(r'(?:"[^"\n]+"|[A-Za-z0-9.!#$%&\'*+/=?^_`{|}~-]+)@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})')
 NEUTRAL_DOMAINS = {"example.invalid", "example.com", "example.org", "users.noreply.github.com"}
 NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "git@github.com"}
 
@@ -35,7 +36,10 @@ NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "git@github.com"}
 def check_emails(relative, text):
     for number, line in enumerate(text.splitlines(), 1):
         for match in EMAIL.finditer(line):
-            neutral = match.group(1).lower() in NEUTRAL_DOMAINS or match.group(0).lower().lstrip("_") in NEUTRAL_ADDRESSES
+            # Markdown imports such as `@AGENTS.md` have no letter or digit before the @.
+            if not re.search(r"[A-Za-z0-9]", match.group(0).partition("@")[0]):
+                continue
+            neutral = match.group(1).lower() in NEUTRAL_DOMAINS or re.sub(r"^[^a-z0-9]+", "", match.group(0).lower()) in NEUTRAL_ADDRESSES
             # Report the location only, so the gate never echoes an address.
             require(neutral, f"Email address outside the neutral allowlist: {relative}:{number}")
 
