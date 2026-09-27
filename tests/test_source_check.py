@@ -98,7 +98,10 @@ class SourceCheckTests(unittest.TestCase):
                         "@".join(["//git", "github.com"]) + "/owner/repo.git",
                         # Only an all-numeric last label reads as a ref or tag.
                         "@".join(["owner/action", "feature.1a"]), "@".join(["person", "mail.example-host.co1"]),
-                        "@".join(["person", "host.\u0661"])]:
+                        "@".join(["person", "host.\u0661"]),
+                        # A dotted alphabetic ref passes only as the value of a `uses:` key.
+                        "@".join(["owner/action", "feature.one"]),
+                        "@".join(["see uses: owner/action", "feature.one"])]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
@@ -160,11 +163,18 @@ class SourceCheckTests(unittest.TestCase):
             "@".join(["npm install pkg", "beta.1"]),
             "@".join(["pkg", "rc.2.10"]),
         ]
+        # Workflow lines: the whole value of a `uses:` key is an action reference.
+        uses = [
+            "  - uses: " + "@".join(["owner/action", "feature.one"]),
+            "        uses: '" + "@".join(["owner/action", "release.candidate"]) + "'",
+            "    uses: " + "@".join(["owner/repo/.github/workflows/ci.yml", "feature.one"]),
+        ]
         with tempfile.TemporaryDirectory(prefix="harness-neutral-email-") as directory:
             root = Path(directory)
             source = self.copy_source(root)
             profile = source / "profiles/AGENTS.template.md"
-            profile.write_text(profile.read_text(encoding="utf-8") + "\n" + " ".join(addresses) + "\n", encoding="utf-8")
+            profile.write_text(profile.read_text(encoding="utf-8") + "\n" + " ".join(addresses) + "\n" + "\n".join(uses) + "\n",
+                               encoding="utf-8")
             environment, _ = fixture_environment(root)
             result = run([sys.executable, "scripts/check.py"], source, environment)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

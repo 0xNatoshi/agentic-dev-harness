@@ -60,6 +60,8 @@ NEUTRAL_DOMAINS = {"users.noreply.github.com"}
 NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "codex@openai.com", "git@github.com"}
 # A URI scheme and // before the local part mark URL user info.
 URI_SCHEME = re.compile(r'(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\Z')
+# The value of a workflow `uses:` key is an action reference by schema.
+USES_KEY = re.compile(r'\s*(?:-\s+)?uses:\s+\Z')
 
 
 def label_char(char):
@@ -131,6 +133,10 @@ def check_emails(relative, text):
             if "." not in domain and (domain in DIST_TAGS or "/" in local and not local.startswith("/")):
                 # A repository or package reference such as actions/checkout@main or pkg@latest;
                 # URL user info keeps its leading // in the local part and stays screened.
+                continue
+            if "/" in local and not local.startswith("/") and USES_KEY.fullmatch(before):
+                # A dotted ref such as feature.one after a `uses:` key; elsewhere an alphabetic
+                # last label such as .one may be a real top-level domain and stays screened.
                 continue
             if local.startswith("//") and URI_SCHEME.search(before):
                 local = local[2:]  # ssh://git@github.com/owner/repo.git names git@github.com
