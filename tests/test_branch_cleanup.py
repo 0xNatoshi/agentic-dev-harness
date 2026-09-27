@@ -43,6 +43,8 @@ SCENARIOS = (
     "operation_dir_symlink",
     "am_invalid_head",
     "invalid_head_detached_rebase",
+    "am_missing_resume_record",
+    "am_author_incomplete",
     "update_refs_alias",
     "update_refs_symref_cycle",
     "head_name_alias",
@@ -70,6 +72,8 @@ STATUS = {
     "am_invalid_head": 2,
     "invalid_head_detached_rebase": 2,
     "update_refs_symref_cycle": 2,
+    "am_missing_resume_record": 2,
+    "am_author_incomplete": 2,
     "symbolic_branch": 2,
     "free": 0,
     "other_rebase": 0,
@@ -77,6 +81,12 @@ STATUS = {
     "detached_rebase_apply": 0,
     "other_am": 0,
 }
+
+
+# The records git am writes before it stops, with a neutral identity.
+AUTHOR_SCRIPT = (
+    "GIT_AUTHOR_NAME='Fixture'\n" "GIT_AUTHOR_EMAIL='fixture" "@" "example.invalid'\n" "GIT_AUTHOR_DATE='@0 +0000'\n"
+)
 
 
 def documented_command() -> str:
@@ -167,16 +177,20 @@ class BranchCleanupTests(unittest.TestCase):
             "unknown_state", "missing_worktree", "wrong_repository", "incomplete_rebase_apply", "invalid_head_name",
             "am_marker_only", "am_counter_extra_line", "am_counter_range", "head_name_extra_line",
             "head_name_symlink", "operation_dir_symlink", "am_invalid_head", "invalid_head_detached_rebase",
-            "head_name_alias",
+            "head_name_alias", "am_missing_resume_record", "am_author_incomplete",
         ):
             self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
+            if scenario in ("am_missing_resume_record", "am_author_incomplete"):
+                # Counters alone, or an author without a date, cannot be resumed by git am.
+                gitdir = self.gitdir(worktree)
+                self.write_am_state(gitdir, resume_records=scenario == "am_author_incomplete",
+                                    author=AUTHOR_SCRIPT.rpartition("GIT_AUTHOR_DATE")[0])
+                return
             if scenario in ("am_invalid_head", "invalid_head_detached_rebase"):
                 # Valid operation records on a HEAD that names no commit are untrusted.
                 gitdir = self.gitdir(worktree)
                 if scenario == "am_invalid_head":
-                    (gitdir / "rebase-apply").mkdir()
-                    for name, value in (("applying", ""), ("next", "1\n"), ("last", "1\n")):
-                        (gitdir / "rebase-apply" / name).write_text(value)
+                    self.write_am_state(gitdir)
                 else:
                     (gitdir / "rebase-merge").mkdir()
                     (gitdir / "rebase-merge" / "head-name").write_text("detached HEAD\n")
@@ -254,6 +268,15 @@ class BranchCleanupTests(unittest.TestCase):
             self.start_rebase(worktree, state)
             self.assertEqual((self.gitdir(worktree) / state / "head-name").read_text().strip(), f"refs/heads/{branch}")
         self.assertIn("detached", self.git("worktree", "list", "--porcelain").stdout)
+
+    def write_am_state(self, gitdir: Path, resume_records: bool = True, author: str = None) -> None:
+        state = gitdir / "rebase-apply"
+        state.mkdir()
+        for name, value in (("applying", ""), ("next", "1\n"), ("last", "1\n")):
+            (state / name).write_text(value)
+        if resume_records:
+            (state / "final-commit").write_text("fixture\n")
+            (state / "author-script").write_text(AUTHOR_SCRIPT if author is None else author)
 
     def gitdir(self, worktree: Path) -> Path:
         return Path(self.git("rev-parse", "--absolute-git-dir", directory=worktree).stdout.strip())

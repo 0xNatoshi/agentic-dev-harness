@@ -192,6 +192,20 @@ check_operation_dir() {
         printf 'Inconsistent git am state in %s\n' "$gitdir" >&2
         exit 2
       }
+      # git am resumes only with the message and author it recorded, as in its
+      # validate_resume_state(); without them the state is truncated.
+      for record in final-commit author-script; do
+        [ -f "$directory/$record" ] && [ ! -L "$directory/$record" ] && [ -r "$directory/$record" ] || {
+          printf 'Incomplete git am state in %s\n' "$gitdir" >&2
+          exit 2
+        }
+      done
+      for key in NAME EMAIL DATE; do
+        grep -q "^GIT_AUTHOR_$key=" "$directory/author-script" || {
+          printf 'Incomplete git am state in %s\n' "$gitdir" >&2
+          exit 2
+        }
+      done
       check_am_head
       return 0
     fi
