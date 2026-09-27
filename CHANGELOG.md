@@ -6,7 +6,7 @@ Development version: 6.5.0. No release tag has been published for this version.
 
 - Condense the project template to v6.5 with required skill procedures, explicit command targeting, a defined instruction scan set and single template-family ownership; preserve old snapshots and repository-specific content during migration.
 - Bind documented GitHub commands to origin and an explicit PR/run, capture PR URLs, and select a working Python interpreter for portable examples.
-- Add a standalone workflow-command verifier and mutation fixtures for repository binding, all targeted PR/run operands, command-specific options, required values and positional bounds, shell redirections and portable interpreter use including module mode, fallback launchers and interactive starts; use the supported API for default squash titles.
+- Add a standalone workflow-command verifier and mutation fixtures for repository binding (including default-repository repair), explicit targets, command-specific options, required values and minimum/maximum operand counts, executable shorthand rejection, shell redirections and portable interpreter use including module mode, fallback launchers and interactive starts; use the supported API for default squash titles.
 - Extend command verification to the active project template and rendered root instructions, preserving authentic history and the root's configured Python command table.
 - Add the approved contributor grant-back to the proprietary template for new adoptions only, with an exact-text source assertion. Existing licenses remain unchanged unless their owner decides otherwise.
 - Define portable conversation reports, resolved-objection records, authenticated GitHub noreply evidence and documentation-with-code review scope.

@@ -304,6 +304,66 @@ printf '%s' python3
                                 reference.write_text(f"```bash\n{assignment}{separator} {prefix}{command}\n```\n", encoding="utf-8")
                                 self.assertTrue(any(expected in item.message for item in check_repository(root)))
 
+    def test_required_issue_operands_are_not_supplied_by_option_values(self):
+        commands = ("close", "comment", "delete", "develop", "edit", "lock", "reopen", "transfer", "unlock", "view")
+        for subcommand in commands:
+            with self.subTest(command=subcommand), tempfile.TemporaryDirectory(prefix="workflow-issue-minimum-") as directory:
+                command = f'gh issue {subcommand} --repo "$workflow_host/$workflow_repo"'
+                if subcommand == "edit":
+                    command += ' --title "two words"'
+                root = self.root(directory, references={"examples.md": f"```bash\n{command}\n```\n"})
+                target = root / "skills/github-workflow/references/examples.md"
+                minimum = 2 if subcommand == "transfer" else 1
+                for operands in ("", " 25") if minimum == 2 else ("",):
+                    with self.subTest(operands=operands):
+                        target.write_text(f"```bash\n{command}{operands}\n```\n", encoding="utf-8")
+                        self.assertTrue(any(f"needs at least {minimum} positional operands" in item.message for item in check_repository(root)))
+                operands = " 25 owner/destination" if minimum == 2 else " 25"
+                target.write_text(f"```bash\n{command}{operands}\n```\n", encoding="utf-8")
+                self.assertEqual(check_repository(root), [])
+
+    def test_default_repository_repair_is_bound_and_view_is_read_only(self):
+        with tempfile.TemporaryDirectory(prefix="workflow-default-repository-") as directory:
+            root = self.root(directory)
+            target = root / "skills/github-workflow/references/examples.md"
+            invalid = (
+                ("", "explicit repository"),
+                ("evil/repo", "verified origin"),
+                ("origin", "verified origin"),
+                ('"$workflow_repo"', "verified origin"),
+                ('""', "verified origin"),
+                ("-- --view", "verified origin"),
+                ("--view evil/repo", "at most 0"),
+                ('--view "$workflow_host/$workflow_repo"', "at most 0"),
+                ("--unset", "outside the verified-origin repair"),
+                ("-u", "outside the verified-origin repair"),
+                ("--view --unset", "outside the verified-origin repair"),
+            )
+            for tail, expected in invalid:
+                with self.subTest(tail=tail):
+                    target.write_text(f"```bash\ngh repo set-default {tail}\n```\n", encoding="utf-8")
+                    self.assertTrue(any(expected in item.message for item in check_repository(root)))
+            for tail in ('"$workflow_host/$workflow_repo"', '"${workflow_host}/${workflow_repo}"', "--view", "-v"):
+                with self.subTest(tail=tail):
+                    target.write_text(f"```bash\ngh repo set-default {tail}\n```\n", encoding="utf-8")
+                    self.assertEqual(check_repository(root), [])
+
+    def test_command_family_shorthand_is_only_inline_metadata(self):
+        for command in (
+            'gh pr view/edit --repo "$workflow_host/$workflow_repo"',
+            'gh pr view|edit --repo "$workflow_host/$workflow_repo"',
+            'gh issue view/comment --repo "$workflow_host/$workflow_repo"',
+            'gh repo view/edit',
+        ):
+            with tempfile.TemporaryDirectory(prefix="workflow-executable-shorthand-") as directory:
+                root = self.root(directory, references={"examples.md": f"The CLI names `{command}`.\n"})
+                target = root / "skills/github-workflow/references/examples.md"
+                self.assertEqual(check_repository(root), [])
+                for layout in ("```bash\n%s\n```\n", "%s\n"):
+                    with self.subTest(command=command, layout=layout):
+                        target.write_text(layout % command, encoding="utf-8")
+                        self.assertTrue(check_repository(root))
+
     def test_required_option_values_are_reported_for_each_command(self):
         cases = (
             ('pr list --repo "$workflow_host/$workflow_repo" --head', "--head"),

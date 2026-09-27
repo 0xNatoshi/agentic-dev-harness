@@ -59,7 +59,7 @@ Long work: progress/discoveries/resources in `TASKS.md`, excluded via `.git/info
 
 Default: `{{DEFAULT_BRANCH}}`; ordinary changes use PRs, never direct merges/fixes. Sole exception: explicitly requested new repository without history, instructions/license in first commit, publication authorized. Use skill's verified host/name bootstrap before origin exists. Missing default on empty remote permits only authorized first push; full preflight before PR/merge/cleanup.
 
-Bind `origin` before work/merge/cleanup and after checkout/remote changes. Fetch/push URLs, implicit gh selection and explicit identity must agree and be readable. Never change remotes to pass; only use the skill's verified `gh repo set-default` repair.
+At start/merge/cleanup and after checkout/remote changes, verify `origin`: readable/matching fetch/push URLs and implicit/explicit gh identities. Use only the skill's `gh repo set-default "$workflow_host/$workflow_repo"`; never change remotes to pass.
 
 ```bash
 workflow_origin=$(bash <skill-dir>/scripts/merge-preflight.sh origin) || exit 2
