@@ -26,7 +26,8 @@ def require(condition, detail):
 
 
 # An alphabetic top-level label keeps version pins such as action@v4.2.2 out.
-EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})")
+# A quoted local part ("first.last"@...) is valid mail syntax too.
+EMAIL = re.compile(r'(?:"[^"\n]+"|[A-Za-z0-9._%+-]+)@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})')
 NEUTRAL_DOMAINS = {"example.invalid", "example.com", "example.org", "users.noreply.github.com"}
 NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "git@github.com"}
 

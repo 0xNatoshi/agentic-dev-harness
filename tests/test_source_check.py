@@ -61,7 +61,8 @@ class SourceCheckTests(unittest.TestCase):
     def test_source_gate_rejects_personal_email_without_echoing_it(self):
         # Built at runtime so this file itself stays free of the pattern.
         for address in ["@".join(["first.last", "personal-mail.net"]), "@".join(["noreply", "vanity-name.me"]),
-                        "_" + "@".join(["first.last", "personal-mail.net"]) + "_"]:
+                        "_" + "@".join(["first.last", "personal-mail.net"]) + "_",
+                        "@".join(['"first.last"', "personal-mail.net"])]:
             with self.subTest(address=address):
                 self.check_rejected(address)
 
