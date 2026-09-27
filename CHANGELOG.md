@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Define portable conversation reports, resolved-objection records, authenticated GitHub noreply evidence and documentation-with-code review scope.
+- Require one recorded active owner per shared template family across branches, worktrees and runtimes, with comment-based proposals and explicit handoff.
+
 ## 6.5.0 (unreleased)
 
 - Delegate justified technical improvements within the user's outcome and constraints.
