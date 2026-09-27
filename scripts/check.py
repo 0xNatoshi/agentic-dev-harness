@@ -30,12 +30,15 @@ DOMAIN = re.compile(r'@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})')
 # The local part is the token before @, including RFC quoted strings and
 # <placeholder> segments, so punctuation or quoting cannot hide an address;
 # a quoted string never spans whitespace, @ or commas, so `"a", "b@c"` reads as b.
-# Code and Markdown delimiters end it. The domain decides; only exact service
-# addresses are neutral. RFC 5321 caps local parts at 64 octets, so a bounded
-# look-back keeps long lines linear.
-LOCAL = re.compile(r'(?:"(?:[^"\\\s@,]|\\.)*"|<[^<>@\s]*>|[^\s<>()\[\],;:"\'`*~{}@])*\Z')
+# Only characters that cannot appear unquoted in a local part end it. The domain
+# decides; only exact service addresses are neutral. RFC 5321 caps local parts
+# at 64 octets, so a bounded look-back keeps long lines linear.
+LOCAL = re.compile(r'(?:"(?:[^"\\\s@,]|\\.)*"|<[^<>@\s]*>|[^\s<>()\[\],;:"@])*\Z')
 LOOK_BACK = 256
-OPENING = re.compile(r'(?:\A|[ \t(\[])`*\Z')
+# Markdown emphasis, code spans, quotes and braces are valid local-part
+# characters too; they wrap the address only when mirrored right after it.
+WRAPPERS = "_*~`'{"
+CLOSING = str.maketrans("{", "}")
 NEUTRAL_DOMAINS = {"example.invalid", "example.com", "example.org", "users.noreply.github.com"}
 NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "git@github.com"}
 
@@ -46,15 +49,12 @@ def check_emails(relative, text):
             window = line[max(0, match.start() - LOOK_BACK):match.start()]
             token = LOCAL.search(window).group(0)
             before = window[:len(window) - len(token)]
-            # `@AGENTS.md`-style imports and @mentions have no local part; a backtick
-            # is also a valid local-part character, so it only opens a code span
-            # after the start of the line, a space, a tab or an opening bracket.
-            if not token and OPENING.search(before):
-                continue
-            # _emphasis_ counts only when it also closes right after the address.
-            local = token.lstrip("_")
-            if not line[match.end():].startswith(token[:len(token) - len(local)]):
+            local = token.lstrip(WRAPPERS)
+            wrapper = token[:len(token) - len(local)]
+            if not line[match.end():].startswith(wrapper[::-1].translate(CLOSING)):
                 local = token
+            elif not local and (not before or before[-1] in " \t(["):
+                continue  # `@AGENTS.md`-style imports and @mentions have no local part
             domain = match.group(1).lower()
             neutral = domain in NEUTRAL_DOMAINS or f"{local.lower()}@{domain}" in NEUTRAL_ADDRESSES
             # Report the location only, so the gate never echoes an address.
