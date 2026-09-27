@@ -365,6 +365,14 @@ TEXT_CASES = (
     Case("kept conjunction negated lead-in", 2, "- Never so long as\n- merge PRs"),
     Case("kept French preposition negated lead-in", 2, "- Ne pas vers main\n- fusionner les PR"),
     Case("cleared negated branch rule beside merge item", 0, "- Do not touch main or release branches\n- Merges use squash"),
+    Case("kept method rule under a negated lead-in paragraph", 2, "Do not:\n\nUse squash merges."),
+    Case("kept upstream rule under a negated parent item", 2, "- Do not:\n  - merge from upstream"),
+    Case("kept method rule under a negated lead-in item", 2, "Do not:\n- use squash merges"),
+    Case("kept authorize after a cleared method rule", 2,
+         "No fast-forward merges; use merge commits.\n\nA human must authorize each one."),
+    Case("kept authorized after a cleared method rule", 2,
+         "No fast-forward merges; use merge commits.\n\nEach one must be authorized."),
+    Case("kept upstream rule with a restricted subject", 2, "No contributor may merge changes from upstream."),
     Case("kept negated lead-in between table rows", 2, "| Rule |\n|---|\n| Do not do the following |\n| merge PRs |"),
     Case("kept idiom lead-in between table rows", 2, "| Rule |\n|---|\n| Under no circumstances |\n| merge PRs |"),
     Case("cleared French negated rule beside merge method", 0, "- Ne pas ajouter de dépendances\n- Merges use squash"),
@@ -420,8 +428,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 317 or len({case.name for case in ALL_CASES}) != 317:
-    raise RuntimeError("Merge fixture inventory must contain 317 unique cases")
+if len(ALL_CASES) != 323 or len({case.name for case in ALL_CASES}) != 323:
+    raise RuntimeError("Merge fixture inventory must contain 323 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

@@ -121,7 +121,7 @@ EXAMPLE = re.compile(PREFIX + r'\s*<date>(?!\s*\d)')
 DATED = re.compile(PREFIX + r'\s*(\d{4}-\d{2}-\d{2})(?![\w-])')
 MERGE_WORD = r'\b(?:merges?|merging|merger|mergez|fusions?|fusionner|fusionnement|fusionnez)\b'
 PAUSE_WORD = r'\b(?:suspend\w*|paused?|on\s+hold|disabled|forbidden|blocked|en\s+attente|interdit\w*|interdic\w*|bloqu\w*|désactiv\w*|différ\w*)\b'
-APPROVAL_WORD = r'\b(?:approv\w*|agreement|consent|permission|authorization|authorisation|sign[ -]?off|green\s+light|accord|go|confirmation|autorisation)\b'
+APPROVAL_WORD = r'\b(?:approv\w*|agreement|consent\w*|permission|authori[sz]\w*|sign(?:s|ed)?[ -]?off|green\s+light|accord|go|confirmation|autoris\w*)\b'
 # Restrictions that carry pause, approval or wait wording. Unlike a bare negation
 # ('- Do not add dependencies' beside '- Merge requests use squash'), they are
 # also read across the items of one list or the rows of one table.
@@ -230,6 +230,9 @@ UPSTREAM_END = re.compile(
 UPSTREAM_BETWEEN = re.compile(
     r'(?:[\s,]|\b(?:or|and|et|ou|rebase|onto|cherry-pick\w*|pull|fetch|sync|copy|import|wholesale|directly'
     r'|blindly|jamais|changes?|commits?|code|updates?|work|the|a|an|des|les|le|la|du|de|in|into)\b)*')
+UPSTREAM_BEFORE = re.compile(
+    r'(?:[\s,]|\b(?:please|never|ever|do|not|don[’\x27]t|avoid|ne|n[’\x27]|jamais|pas|or|and|et|ou|rebase|onto'
+    r'|cherry-pick\w*|pull|fetch|sync|copy|import)\b)*')
 WIDEN = re.compile(r'\b(?:anywhere|elsewhere|else|other\w*|including|ailleurs|autres?|y\s+compris|notamment)\b')
 SOURCE_WORD = re.compile(r'\b(?:from|depuis)\b')
 LIST_ITEM = re.compile(r'^(\s*)(?:[-*+]|\d{1,9}[.)])(?:\s+|$)')
@@ -512,6 +515,10 @@ def units(lines, hold_found):
 
 
 def upstream_source(before, after):
+    # Only a direct directive ('Never merge, rebase onto or cherry-pick from upstream')
+    # is sync mechanics; 'No contributor may merge from upstream' restricts who merges.
+    if not UPSTREAM_BEFORE.fullmatch(before):
+        return False
     sources = list(UPSTREAM_SOURCE.finditer(after))
     if len(sources) != 1 or len(SOURCE_WORD.findall(after)) > 1 or WIDEN.search(before + after):
         return False
@@ -625,6 +632,10 @@ def free_restriction(context, unit):
     if not FREE.search(text):
         return False
     if HOLD_CONTEXT.search(text) or SCOPE.search(text) or NEVER_EXEMPT.search(text):
+        return True
+    # The exemption reads only the unit, so it cannot tell a negation inherited from
+    # context ('Do not:' above 'Use squash merges.') from an affirmative method rule.
+    if not FREE.search(unit):
         return True
     return 'cleared' if mechanics_only(unit) else True
 
