@@ -16,37 +16,194 @@ import sys
 
 GUIDE = Path("skills/github-workflow")
 SHELL_FENCES = {"", "bash", "sh", "shell", "zsh", "console"}
-PR_SELECTORS = {"view", "checks", "ready", "merge", "edit"}
-RUN_IDS = {"view", "watch", "rerun", "cancel"}
-REPO_POSITIONALS = {"view", "edit"}
-VALUE_FLAGS = {
-    "--repo", "-R", "--json", "--jq", "-q", "--template", "-t",
-    "--title", "--body", "-b", "--body-file", "-F", "--head", "-H",
-    "--base", "-B", "--search", "-S", "--state", "--limit", "-L",
-    "--commit", "--branch", "--match-head-commit", "--job", "-j",
-    "--attempt", "--description", "--hostname", "--method", "--interval",
-    "--name", "--branch-repo", "--label", "--reviewer", "--assignee",
-    "--project", "--milestone", "--author", "--author-email", "--subject",
-    "--add-assignee", "--add-label", "--add-project", "--add-reviewer",
-    "--remove-assignee", "--remove-label", "--remove-project", "--recover",
-    "--default-branch", "--visibility",
-    "--add-topic", "--remove-topic", "--homepage", "--created", "--event",
-    "--status", "--user", "--workflow", "--app", "--template-file",
+PR_SELECTORS = {
+    "checkout", "checks", "close", "comment", "diff", "edit", "lock", "merge",
+    "ready", "reopen", "revert", "review", "unlock", "update-branch", "view",
 }
-BOOLEAN_FLAGS = {
-    "--draft", "--watch", "--required", "--log-failed", "--squash",
-    "--comments", "--enable-squash-merge", "--checkout", "--web",
-    "--failed", "--force", "--delete-branch", "--admin", "--auto",
-    "--disable-auto", "--merge", "--rebase", "--undo", "--log",
-    "--verbose", "--exit-status", "--compact", "--debug", "--fail-fast",
-    "--dry-run", "--editor", "--fill", "--fill-first", "--fill-verbose",
-    "--no-maintainer-edit", "--remove-milestone", "--all", "--help",
-    "--enable-auto-merge", "--enable-discussions", "--enable-issues",
-    "--enable-merge-commit", "--enable-projects", "--enable-rebase-merge",
-    "--enable-secret-scanning", "--enable-secret-scanning-push-protection",
-    "--enable-wiki", "--allow-forking", "--allow-update-branch",
-    "--delete-branch-on-merge", "--accept-visibility-change-consequences",
-    "--<method>",
+RUN_IDS = {"cancel", "delete", "download", "rerun", "view", "watch"}
+REPO_POSITIONALS = {"view", "edit"}
+# Recognized command options from gh 2.86 help. Unknown commands/options fail
+# closed until their documented contract is added. Inherited flags are added
+# by _options; the merge-method placeholder is guidance syntax, not a CLI flag.
+GH_OPTIONS = {
+    'pr create': (
+        '-a --assignee -B --base -b --body -F --body-file -H --head -l --label -m --milestone -p '
+        '--project --recover -r --reviewer -T --template -t --title',
+        '-d --draft --dry-run -e --editor -f --fill --fill-first --fill-verbose '
+        '--no-maintainer-edit -w --web',
+    ),
+    'pr list': (
+        '--app -a --assignee -A --author -B --base -H --head -q --jq --json -l --label -L --limit '
+        '-S --search -s --state -t --template',
+        '-d --draft -w --web',
+    ),
+    'pr status': (
+        '-q --jq --json -t --template',
+        '-c --conflict-status',
+    ),
+    'pr checkout': (
+        '-b --branch',
+        '--detach -f --force --recurse-submodules',
+    ),
+    'pr checks': (
+        '-i --interval -q --jq --json -t --template',
+        '--fail-fast --required --watch -w --web',
+    ),
+    'pr close': (
+        '-c --comment',
+        '-d --delete-branch',
+    ),
+    'pr comment': (
+        '-b --body -F --body-file',
+        '--create-if-none --delete-last --edit-last -e --editor -w --web --yes',
+    ),
+    'pr diff': (
+        '--color',
+        '--name-only --patch -w --web',
+    ),
+    'pr edit': (
+        '--add-assignee --add-label --add-project --add-reviewer -B --base -b --body -F '
+        '--body-file -m --milestone --remove-assignee --remove-label --remove-project '
+        '--remove-reviewer -t --title',
+        '--remove-milestone',
+    ),
+    'pr lock': (
+        '-r --reason',
+        '',
+    ),
+    'pr merge': (
+        '-A --author-email -b --body -F --body-file --match-head-commit -t --subject',
+        '--admin --auto -d --delete-branch --disable-auto -m --merge -r --rebase -s --squash '
+        '--<method>',
+    ),
+    'pr ready': (
+        '',
+        '--undo',
+    ),
+    'pr reopen': (
+        '-c --comment',
+        '',
+    ),
+    'pr revert': (
+        '-b --body -F --body-file -t --title',
+        '-d --draft',
+    ),
+    'pr review': (
+        '-b --body -F --body-file',
+        '-a --approve -c --comment -r --request-changes',
+    ),
+    'pr unlock': (
+        '',
+        '',
+    ),
+    'pr update-branch': (
+        '',
+        '--rebase',
+    ),
+    'pr view': (
+        '-q --jq --json -t --template',
+        '-c --comments -w --web',
+    ),
+    'run cancel': (
+        '',
+        '--force',
+    ),
+    'run delete': (
+        '',
+        '',
+    ),
+    'run download': (
+        '-D --dir -n --name -p --pattern',
+        '',
+    ),
+    'run list': (
+        '-b --branch -c --commit --created -e --event -q --jq --json -L --limit -s --status -t '
+        '--template -u --user -w --workflow',
+        '-a --all',
+    ),
+    'run rerun': (
+        '-j --job',
+        '-d --debug --failed',
+    ),
+    'run view': (
+        '-a --attempt -j --job -q --jq --json -t --template',
+        '--exit-status --log --log-failed -v --verbose -w --web',
+    ),
+    'run watch': (
+        '-i --interval',
+        '--compact --exit-status',
+    ),
+    'issue close': (
+        '-c --comment -r --reason',
+        '',
+    ),
+    'issue comment': (
+        '-b --body -F --body-file',
+        '--create-if-none --delete-last --edit-last -e --editor -w --web --yes',
+    ),
+    'issue create': (
+        '-a --assignee -b --body -F --body-file -l --label -m --milestone -p --project --recover '
+        '-T --template -t --title',
+        '-e --editor -w --web',
+    ),
+    'issue delete': (
+        '',
+        '--yes',
+    ),
+    'issue develop': (
+        '-b --base --branch-repo -n --name',
+        '-c --checkout -l --list',
+    ),
+    'issue edit': (
+        '--add-assignee --add-label --add-project -b --body -F --body-file -m --milestone '
+        '--remove-assignee --remove-label --remove-project -t --title',
+        '--remove-milestone',
+    ),
+    'issue list': (
+        '--app -a --assignee -A --author -q --jq --json -l --label -L --limit --mention -m '
+        '--milestone -S --search -s --state -t --template',
+        '-w --web',
+    ),
+    'issue lock': (
+        '-r --reason',
+        '',
+    ),
+    'issue reopen': (
+        '-c --comment',
+        '',
+    ),
+    'issue status': (
+        '-q --jq --json -t --template',
+        '',
+    ),
+    'issue transfer': (
+        '',
+        '',
+    ),
+    'issue unlock': (
+        '',
+        '',
+    ),
+    'issue view': (
+        '-q --jq --json -t --template',
+        '-c --comments -w --web',
+    ),
+    'repo view': (
+        '-b --branch -q --jq --json -t --template',
+        '-w --web',
+    ),
+    'repo edit': (
+        '--add-topic --default-branch -d --description -h --homepage --remove-topic --visibility',
+        '--accept-visibility-change-consequences --allow-forking --allow-update-branch '
+        '--delete-branch-on-merge --enable-advanced-security --enable-auto-merge '
+        '--enable-discussions --enable-issues --enable-merge-commit --enable-projects '
+        '--enable-rebase-merge --enable-secret-scanning --enable-secret-scanning-push-protection '
+        '--enable-squash-merge --enable-wiki --template',
+    ),
+    'repo set-default': (
+        '',
+        '-u --unset -v --view',
+    ),
 }
 CONTROL = {";", ";;", ";&", ";;&", "&&", "||", "|", "|&", "&", "(", ")"}
 ORIGIN_REPO = re.compile(r"\$(?:workflow_host|\{workflow_host\})/\$(?:workflow_repo|\{workflow_repo\})\Z")
@@ -148,8 +305,13 @@ def _without_redirections(args):
     return operands, incomplete
 
 
-def _options(args, *, extra_boolean_flags=()):
+def _options(args, command, *, extra_boolean_flags=()):
     """Return positional words, valued flags, missing values and unknown flags."""
+    value_options, boolean_options = GH_OPTIONS[command]
+    value_flags = set(value_options.split())
+    boolean_flags = set(boolean_options.split()) | {"--help"} | set(extra_boolean_flags)
+    if not command.startswith("repo "):
+        value_flags.update({"--repo", "-R"})
     positional = []
     valued = {}
     missing = set()
@@ -168,7 +330,7 @@ def _options(args, *, extra_boolean_flags=()):
             index += 1
             continue
         flag, equal, attached = word.partition("=")
-        if flag in VALUE_FLAGS:
+        if flag in value_flags:
             if equal:
                 if attached.strip() and not attached.startswith("-"):
                     valued[flag] = attached
@@ -179,7 +341,7 @@ def _options(args, *, extra_boolean_flags=()):
                 valued[flag] = args[index]
             else:
                 missing.add(flag)
-        elif (flag in BOOLEAN_FLAGS or flag in extra_boolean_flags) and not equal:
+        elif flag in boolean_flags and not equal:
             pass
         elif word.startswith("-"):
             # An unknown flag may consume the next word. Never let that word
@@ -204,9 +366,9 @@ def _direct_python(tail):
             index += 2
         elif (word.startswith("-X") or word.startswith("-W")) and len(word) > 2:
             index += 1
-        elif word in {"-c", "-"} or word.endswith(".py"):
+        elif word in {"-c", "-"} or word.startswith("-m") or word.endswith(".py"):
             return True, False
-        elif word in {"-m", "-V", "-VV", "--version", "-h", "--help"}:
+        elif word in {"-V", "-VV", "--version", "-h", "--help"}:
             return False, False
         elif word.startswith("-"):
             return False, True
@@ -241,9 +403,13 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
         family, subcommand = tail[:2]
         if "/" in subcommand or "|" in subcommand:
             continue
+        command_name = f"{family} {subcommand}"
+        if command_name not in GH_OPTIONS:
+            findings.append(Diagnostic(file, line, f"unsupported gh command {command_name}; cannot verify command operands"))
+            continue
         template_merge = file == "skills/github-workflow/templates/AGENTS.md" and family == "pr" and subcommand == "merge"
         positional, valued, missing, unknown, incomplete = _options(
-            tail[2:], extra_boolean_flags=("--{{MERGE_METHOD}}",) if template_merge else (),
+            tail[2:], command_name, extra_boolean_flags=("--{{MERGE_METHOD}}",) if template_merge else (),
         )
         if incomplete:
             findings.append(Diagnostic(file, line, "incomplete shell redirection in gh command"))
