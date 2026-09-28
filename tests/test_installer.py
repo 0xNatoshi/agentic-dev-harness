@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import warnings
 import zipfile
@@ -99,15 +100,18 @@ class InstallerTests(unittest.TestCase):
         self.addCleanup(lambda: self.assertEqual(os.listdir(self.guard), [], "the installer wrote to the default home"))
 
     # Helpers.
-    def run_installer(self, *arguments, env=None, processes=True):
+    def environment(self, env=None, processes=True):
         environment = {key: value for key, value in os.environ.items()
                        if key not in HOOKS and key not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
         environment.update(HOME=str(self.guard), USERPROFILE=str(self.guard))
         if processes:
             environment["DEV_HARNESS_INSTALL_TEST_PROCESSES"] = str(self.processes)
         environment.update(env or {})
+        return environment
+
+    def run_installer(self, *arguments, env=None, processes=True):
         return subprocess.run([sys.executable, "-B", str(self.installer), *map(str, arguments)], cwd=self.base,
-                              env=environment, capture_output=True, text=True, encoding="utf-8", timeout=120)
+                              env=self.environment(env, processes), capture_output=True, text=True, encoding="utf-8", timeout=120)
 
     def plan(self, runtime="claude", **kwargs):
         output = self.base / "plan.json"
@@ -445,6 +449,137 @@ class InstallerTests(unittest.TestCase):
         self.recover()
         self.assertEqual(snapshot(self.target), before)
 
+    def test_rerun_recover_after_a_failed_duplicate_restoration(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        plan = self.plan("codex")
+        crashed = self.apply(plan, "--retire-duplicate", legacy, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        parked = next((self.home / ".agents" / "dev-harness-install").glob("*/retired/github-workflow"))
+        (parked / "local-notes.md").write_bytes(b"changed while parked\n")
+        failed = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed",
+                                    env={"DEV_HARNESS_INSTALL_TEST_FAULT": "apply:undo-move-0"})
+        self.assert_refused(failed, 3)
+        self.assertEqual(snapshot(target), before)
+        report = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assertEqual(report.returncode, 0, report.stderr)
+        self.assertEqual(snapshot(target), before)
+        self.assertEqual(snapshot(legacy), legacy_before)
+
+    def test_rerun_recover_sets_a_stale_restoration_copy_aside(self):
+        before, parked = self.crash_after_parking()
+        shutil.rmtree(parked)
+        failed = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed",
+                                    env={"DEV_HARNESS_INSTALL_TEST_FAULT": "apply:undo-restore"})
+        self.assert_refused(failed, 3)
+        report = self.recover()
+        self.assertEqual(len(report["stale_restore_copies"]), 1)
+        self.assertTrue(Path(report["stale_restore_copies"][0]).is_dir())
+        self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "pauses the installer with a named pipe")
+    def test_target_changed_during_apply_is_put_back_as_found(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        pipe = self.base / "trace.fifo"
+        os.mkfifo(pipe)
+        process = subprocess.Popen([sys.executable, "-B", str(self.installer), "apply", "--plan", str(plan), "--checksums",
+                                    str(self.checksums), "--maintenance-confirmed"], cwd=self.base,
+                                   env=self.environment({"DEV_HARNESS_INSTALL_TEST_TRACE": str(pipe)}),
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+        reader = None
+        try:
+            # The first trace write, at apply:staged, blocks on the pipe until a reader opens it. Once the
+            # staged tree exists, the drift check and backup are done and no rename has happened yet.
+            for _ in range(600):
+                if list(self.state().glob("*/staged/github-workflow")) or process.poll() is not None:
+                    break
+                time.sleep(0.05)
+            self.assertIsNone(process.poll(), "the installer did not pause before its first rename")
+            (self.target / "SKILL.md").write_bytes(b"edited during apply\n")
+            edited = snapshot(self.target)
+            reader = os.open(str(pipe), os.O_RDONLY | os.O_NONBLOCK)
+            stdout, stderr = process.communicate(timeout=120)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+            if reader is not None:
+                os.close(reader)
+        self.assertEqual(process.returncode, 1, stdout + stderr)
+        self.assertIn("put back as found", json.loads(stderr)["error"])
+        self.assertEqual(snapshot(self.target), edited)
+        self.assertNotEqual(edited, before)
+        self.assertFalse((self.state() / "CURRENT").exists())
+
+    def test_recover_uses_the_recorded_config_root(self):
+        config = self.base / "claude-config"
+        environment = {"HOME": str(self.home), "USERPROFILE": str(self.home), "CLAUDE_CONFIG_DIR": str(config)}
+        before = self.v52_layout(config / "skills" / "github-workflow")
+        output = self.base / "plan.json"
+        result = self.run_installer("plan", "--runtime", "claude", "--checksums", self.checksums, "--output", output, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        crashed = self.apply(output, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        default = self.recover()
+        self.assertEqual(default["result"], "nothing to recover")
+        self.assertFalse((self.home / ".claude").exists())
+        report = self.run_installer("recover", "--plan", output, "--maintenance-confirmed")
+        self.assertEqual(report.returncode, 0, report.stderr)
+        self.assertEqual(json.loads(report.stdout)["result"], "restored")
+        self.assertEqual(snapshot(config / "skills" / "github-workflow"), before)
+
+    def test_test_hooks_block_a_plan_whose_config_root_is_outside_the_temporary_directory(self):
+        plan = self.plan()
+        value = json.loads(plan.read_text(encoding="utf-8"))
+        value["config_root"] = os.path.abspath(os.sep + "nonexistent-harness-config")
+        plan.write_text(json.dumps(value), encoding="utf-8")
+        result = self.apply(plan)
+        self.assert_refused(result, 2)
+        self.assertIn(value["config_root"], json.loads(result.stderr)["details"]["outside"])
+        self.assertFalse(os.path.lexists(value["config_root"]))
+
+    def test_rollback_preparation_failure_is_a_refusal(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        after = snapshot(self.target)
+        shutil.rmtree(receipt["retired"])
+        (Path(receipt["backup"]) / "local-notes.md").write_bytes(b"damaged backup\n")
+        result = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(result, 1)
+        self.assertIn("Neither the retired copy nor the backup", json.loads(result.stderr)["error"])
+        self.assertEqual(snapshot(self.target), after)
+        self.assertFalse((self.state() / "CURRENT").exists())
+
+    def test_interrupted_rollback_with_a_retired_duplicate_recovers(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt_path = Path(json.loads(result.stdout)["receipt"])
+        after = snapshot(target)
+        pristine = self.base / "pristine"
+        shutil.copytree(self.home, pristine, symlinks=True)
+        names = self.checkpoints("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertLess(names.index("rollback:activated"), names.index("rollback:moved-0"))
+        for name in names:
+            with self.subTest(checkpoint=name):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home, symlinks=True)
+                crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": name})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                if names.index(name) < names.index("rollback:moved-0"):
+                    self.assertLessEqual(len(visible_copies(*self.roots)), 1)
+                self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+                if name == "rollback:committed":
+                    self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+                else:
+                    self.assertEqual((snapshot(target), snapshot(legacy)), (after, None))
+
     def test_interrupted_codex_duplicate_retirement_recovers_both_copies(self):
         target = self.home / ".agents" / "skills" / "github-workflow"
         legacy = self.home / ".codex" / "skills" / "github-workflow"
@@ -506,7 +641,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["duplicates"], [str(legacy)])
 
     def test_test_hooks_outside_a_temporary_home_block(self):
-        home = ROOT / "tests" / "no-such-home"
+        home = Path(os.path.abspath(os.sep + "nonexistent-harness-home"))
         result = self.run_installer("plan", "--runtime", "claude", "--home", home, "--checksums", self.checksums,
                                     env={"DEV_HARNESS_INSTALL_TEST_TRACE": str(self.base / "trace.txt")})
         self.assert_refused(result, 2)
@@ -603,10 +738,14 @@ class InstallerTests(unittest.TestCase):
         fake = bin_directory / "ps"
         path = str(bin_directory) + os.pathsep + os.environ.get("PATH", "")
         # The fake ps runs as a child of the installer, so $PPID is the installer's own process ID.
-        own = 'echo "$PPID python3 install.py recover --runtime codex"; '
-        cases = (("active", own + "echo '42 /opt/homebrew/bin/claude'", 2), ("failing", "exit 1", 2),
-                 ("empty", "exit 0", 2), ("without this process", "echo '1 /sbin/init'", 2),
-                 ("idle", own + "echo '1 /sbin/init'; echo '   7   /bin/zsh -l'", 0))
+        # Lines are `PID PPID COMMAND`; 5000 stands for the launcher above the installer.
+        own = 'echo "$PPID 5000 python3 install.py recover --runtime codex"; echo "1 0 /sbin/init"; '
+        cases = (("active", own + "echo '5000 1 /bin/zsh'; echo '42 1 /opt/homebrew/bin/claude'", 2),
+                 ("launched by a consumer", own + "echo '5000 1 /opt/homebrew/bin/claude'", 2),
+                 ("another installer naming codex", own + "echo '5000 1 /bin/zsh'; echo '77 1 python3 install.py recover --runtime codex'", 2),
+                 ("failing", "exit 1", 2), ("empty", "exit 0", 2), ("without this process", "echo '1 0 /sbin/init'", 2),
+                 ("idle behind a wrapper", own + "echo '5000 5001 /bin/sh -c python3 install.py recover --runtime codex'; "
+                  "echo '5001 1 /bin/zsh -l'; echo '   7   1   /usr/sbin/sshd -D'", 0))
         for label, script, code in cases:
             with self.subTest(label):
                 fake.write_text("#!/bin/sh\n" + script + "\n", encoding="utf-8")
@@ -643,10 +782,52 @@ class InstallerTests(unittest.TestCase):
         self.v52_layout()
         copy = self.home / ".claude" / "skills" / "workflow-backup"
         copy.mkdir(parents=True)
-        (copy / "SKILL.md").write_bytes(b"---\nname: github-workflow\n---\n")
-        result = self.apply(self.plan())
-        self.assert_refused(result, 2)
-        self.assertEqual(json.loads(result.stderr)["details"], [str(copy)])
+        for label, data in (("plain", b"---\nname: github-workflow\n---\n"), ("byte order mark", b"\xef\xbb\xbf---\nname: github-workflow\n---\n")):
+            with self.subTest(label):
+                (copy / "SKILL.md").write_bytes(data)
+                result = self.apply(self.plan())
+                self.assert_refused(result, 2)
+                self.assertEqual(json.loads(result.stderr)["details"], [str(copy)])
+
+    def test_stray_skill_file_in_a_skill_root_blocks(self):
+        for runtime, root in (("claude", self.home / ".claude" / "skills"), ("codex", self.home / ".codex" / "skills")):
+            with self.subTest(runtime):
+                (root / "other-skill").mkdir(parents=True)
+                (root / "other-skill" / "SKILL.md").write_bytes(b"---\nname: other-skill\n---\n")
+                (root / "SKILL.md").write_bytes(b"---\nname: github-workflow\n---\n")
+                before = snapshot(root)
+                result = self.run_installer("plan", "--runtime", runtime, "--home", self.home, "--checksums", self.checksums)
+                self.assert_refused(result, 2)
+                self.assertEqual(json.loads(result.stderr)["details"], [str(root)])
+                self.assertEqual(snapshot(root), before)
+
+    def test_linked_codex_root_is_walked_once(self):
+        if not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        before = self.v52_layout(target)
+        (self.home / ".codex").mkdir()
+        os.symlink(target.parent, self.home / ".codex" / "skills", target_is_directory=True)
+        plan = self.plan("codex")
+        self.assertEqual(json.loads(plan.read_text(encoding="utf-8"))["duplicates"], [])
+        result = self.apply(plan)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(visible_copies(target.parent)), 1)
+        rollback = self.run_installer("rollback", "--receipt", json.loads(result.stdout)["receipt"], "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual(snapshot(target), before)
+
+    def test_duplicate_changed_after_planning_is_drift(self):
+        self.v52_layout(self.home / ".agents" / "skills" / "github-workflow")
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        self.v52_layout(legacy)
+        plan = self.plan("codex")
+        (legacy / "local-notes.md").write_bytes(b"changed after planning\n")
+        changed = snapshot(legacy)
+        result = self.apply(plan, "--retire-duplicate", legacy)
+        self.assert_refused(result, 1)
+        self.assertIn("duplicate_inventories", json.loads(result.stderr)["details"])
+        self.assertEqual(snapshot(legacy), changed)
 
     def test_state_directory_inside_git_work_tree_blocks(self):
         (self.home / ".git").mkdir()

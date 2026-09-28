@@ -137,14 +137,17 @@ def contains(parent: str, child: str) -> bool:
         return False
 
 
-def require_test_home(home: Path) -> None:
-    """Honour test hooks only for a disposable home under the temporary directory."""
+def require_test_home(locations: "Locations") -> None:
+    """Honour test hooks only when every location the command can touch is under the temporary directory."""
     hooks = active_test_hooks()
     if not hooks:
         return
     temporary = tempfile.gettempdir()
-    if not contains(temporary, str(home)) or contains(str(home), temporary):
-        raise Blocked("Installer test hooks are set outside a temporary test home; unset them", sorted(hooks))
+    paths = [locations.home, locations.config, locations.skills, locations.state, *locations.roots]
+    outside = [str(path) for path in paths if not contains(temporary, str(path)) or contains(str(path), temporary)]
+    if outside:
+        raise Blocked("Installer test hooks are set outside a temporary test home; unset them",
+                      {"hooks": sorted(hooks), "outside": outside})
 
 
 def checkpoint(name: str) -> None:
@@ -447,7 +450,7 @@ def verify_package(package: Package, checksums: Path) -> dict:
 
 
 def skill_name(data: bytes) -> str | None:
-    lines = data.decode("utf-8", "replace").splitlines()
+    lines = data.decode("utf-8-sig", "replace").splitlines()
     if not lines or lines[0].strip() != "---":
         return None
     for line in lines[1:]:
@@ -541,8 +544,12 @@ def discoverable(roots) -> list:
     Linked directories are reported, not followed, so the plan can block on them.
     """
     found = []
-    for root in roots:
-        if not root.is_dir():
+    existing = [root for root in roots if root.is_dir()]
+    for index, root in enumerate(existing):
+        # A root that is, or lies inside, another root (for example a linked or shared Codex root)
+        # is walked once, so one directory is never counted twice.
+        if any(contains(str(other), str(root)) and (not contains(str(root), str(other)) or position < index)
+               for position, other in enumerate(existing) if position != index):
             continue
         for directory, subdirectories, names in os.walk(str(root)):
             kept = []
@@ -600,11 +607,16 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
     if linked:
         raise Blocked("Linked github-workflow copies are discoverable and their canonical source is not identified. "
                       "Owner: the operator. Trigger: remove the link or move it out of the skill roots, then plan again", linked)
-    nested = [path for path in duplicates
-              if any(Path(other) in Path(path).parents for other in [str(locations.target), *duplicates])]
-    if nested:
-        raise Blocked("A github-workflow copy is nested inside another copy. Owner: the operator. "
-                      "Trigger: move the nested copy out of the skill roots, then plan again", nested)
+    # Only a leaf copy can be retired: never a skill root, nor a folder holding the target, a root or another copy.
+    target, roots = str(locations.target), [str(root) for root in locations.roots]
+    overlapping = []
+    for path in duplicates:
+        copies = [item for item in duplicates if item != path]
+        if any(contains(path, other) for other in [target, *roots, *copies]) or any(contains(other, path) for other in [target, *copies]):
+            overlapping.append(path)
+    if overlapping:
+        raise Blocked("A github-workflow SKILL.md overlaps a skill root, the target or another copy. Owner: the operator. "
+                      "Trigger: move the stray SKILL.md or nested copy out of the skill roots, then plan again", overlapping)
     plan = {
         "plan_format": 1,
         "installer_version": INSTALLER_VERSION,
@@ -615,13 +627,15 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
         "before": before,
         "classification": classification,
         "duplicates": duplicates,
+        "duplicate_inventories": {path: inventory(Path(path)) for path in duplicates},
         "legacy_commands": [str(path) for path in locations.legacy if exists(path)],
         "interrupted": str(locations.state / "CURRENT") if exists(locations.state / "CURRENT") else None,
     }
     return plan, package
 
 
-DRIFT_KEYS = ("installer_version", "runtime", "home", "config_root", "target", "skill_roots", "state_root", "package", "before", "classification", "duplicates")
+DRIFT_KEYS = ("installer_version", "runtime", "home", "config_root", "target", "skill_roots", "state_root", "package", "before", "classification", "duplicates",
+              "duplicate_inventories")
 
 
 def drift(plan: dict, fresh: dict) -> list:
@@ -643,6 +657,32 @@ def is_consumer(command_line: str) -> bool:
     return False
 
 
+def own_lines_removed(lines) -> list:
+    """Drop this installer's line and the launchers above it (`py -3 install.py ...`, `sh -c ...`).
+
+    Each line is `PID PPID COMMAND`. Only ancestors whose command line names this script are dropped,
+    so a consumer that launched the installer still counts. The listing must include this process:
+    an empty or truncated listing must not read as "no consumer".
+    """
+    table, unparsed = {}, []
+    for line in lines:
+        fields = line.strip().split(None, 2)
+        if len(fields) >= 2 and fields[0].isdigit() and fields[1].isdigit():
+            table[int(fields[0])] = (int(fields[1]), fields[2] if len(fields) > 2 else "")
+        elif line.strip():
+            unparsed.append(line.strip())
+    own = os.getpid()
+    if own not in table:
+        raise Blocked("Consumer state is unverifiable: the process listing does not include this installer")
+    script = os.path.basename(os.path.abspath(__file__)).lower()
+    dropped, pid = {own}, table[own][0]
+    while pid in table and pid not in dropped:
+        if script in table[pid][1].lower():
+            dropped.add(pid)
+        pid = table[pid][0]
+    return [command for pid, (_, command) in table.items() if pid not in dropped] + unparsed
+
+
 def maintenance_boundary(confirmed: bool) -> dict:
     if not confirmed:
         raise Blocked("Stop every Claude and Codex session, then rerun with --maintenance-confirmed")
@@ -657,11 +697,11 @@ def maintenance_boundary(confirmed: bool) -> dict:
     else:
         if os.name == "nt":
             shell = shutil.which("powershell") or shutil.which("pwsh")
-            script = "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.CommandLine }"
+            script = "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $_.CommandLine }"
             command = [shell, "-NoProfile", "-NonInteractive", "-Command", script] if shell else None
         else:
             ps = shutil.which("ps")
-            command = [ps, "-A", "-o", "pid=,args="] if ps else None
+            command = [ps, "-A", "-ww", "-o", "pid=,ppid=,args="] if ps else None
         if not command:
             raise Blocked("Consumer state is unverifiable: no process listing command found")
         probe = " ".join(command)
@@ -671,18 +711,7 @@ def maintenance_boundary(confirmed: bool) -> dict:
             raise Blocked(f"Consumer state is unverifiable: {error}")
         if result.returncode != 0:
             raise Blocked(f"Consumer state is unverifiable: the process listing exited {result.returncode}")
-        processes = {}
-        for line in result.stdout.splitlines():
-            fields = line.strip().split(None, 1)
-            if fields and fields[0].isdigit():
-                processes.setdefault(int(fields[0]), []).append(fields[1] if len(fields) > 1 else "")
-            elif line.strip():
-                processes.setdefault(-1, []).append(line.strip())
-        # An empty or truncated listing must not read as "no consumer": it has to include this process.
-        if os.getpid() not in processes:
-            raise Blocked("Consumer state is unverifiable: the process listing does not include this installer")
-        # This process names its runtime on its own command line (for example `recover --runtime codex`).
-        listed = [line for pid, lines in processes.items() if pid != os.getpid() for line in lines]
+        listed = own_lines_removed(result.stdout.splitlines())
     active = [line for line in listed if is_consumer(line)]
     if active:
         raise Blocked("Active Claude or Codex processes use skills; stop them and rerun", active)
@@ -742,59 +771,82 @@ class Operation:
     def run(self) -> None:
         op = self.record["operation"]
         self.save("prepared")
-        for index, move in enumerate(self.record["moves"]):
-            self.save(f"moving-{index}")
-            Path(move["to"]).parent.mkdir(parents=True, exist_ok=True)
-            rename(Path(move["from"]), Path(move["to"]), f"{op}:move-{index}")
-            self.save(f"moved-{index}")
+        # Apply retires duplicates first; rollback restores them last. Either way the count of
+        # discoverable copies exceeds one only where the before-state already had more.
+        if not self.record.get("moves_last"):
+            self.run_moves()
         if self.record["origin"] is not None:
             self.save("parking")
-            Path(self.record["parked"]).parent.mkdir(parents=True, exist_ok=True)
-            rename(self.target, Path(self.record["parked"]), f"{op}:park")
+            parked = Path(self.record["parked"])
+            parked.parent.mkdir(parents=True, exist_ok=True)
+            rename(self.target, parked, f"{op}:park")
             self.save("parked")
-            if differences(self.record["origin"], inventory(Path(self.record["parked"]))):
-                raise Refused("The parked copy does not match the verified origin inventory")
+            actual = inventory(parked)
+            if differences(self.record["origin"], actual):
+                # The rename just moved the tree as it was, so that tree is the state to put back.
+                self.record["planned_origin"] = self.record["origin"]
+                self.record["origin"] = actual
+                self.record["origin_backup"] = None
+                self.save("parked-drift")
+                raise Refused("The target changed after it was verified; it is put back as found, not as planned. Plan again")
         if self.record["incoming"] is not None:
             self.save("activating")
             self.target.parent.mkdir(parents=True, exist_ok=True)
             rename(Path(self.record["incoming_path"]), self.target, f"{op}:activate")
             self.save("activated")
+        if self.record.get("moves_last"):
+            self.run_moves()
         problems = differences(self.record["incoming"], inventory(self.target))
         for move in self.record["moves"]:
             problems += differences(move["inventory"], inventory(Path(move["to"])))
         if problems:
             raise Refused("The activated state does not match its verified inventory", problems)
 
-    def undo(self) -> None:
-        """Return to the origin state, verified; Incomplete when that cannot be established."""
-        op = self.record["operation"]
-        target, parked = self.target, Path(self.record["parked"])
-        incoming_path = Path(self.record["incoming_path"]) if self.record["incoming_path"] else None
-        self.save("undoing")
-        if exists(target) and exists(parked):
-            if differences(self.record["incoming"], inventory(target)) or incoming_path is None or exists(incoming_path):
-                raise Incomplete("The target matches neither the origin nor the incoming inventory", {"target": str(target)})
-            rename(target, incoming_path, f"{op}:undo-activate")
-        elif exists(target) and self.record["origin"] is None:
-            if differences(self.record["incoming"], inventory(target)) or incoming_path is None or exists(incoming_path):
-                raise Incomplete("The target was absent before and now holds unverified content", {"target": str(target)})
-            rename(target, incoming_path, f"{op}:undo-activate")
-        if not exists(target) and exists(parked):
-            if differences(self.record["origin"], inventory(parked)):
-                # Keep the drifted copy where it is and restore from the verified backup instead.
-                self.record["parked_drift"] = str(parked)
-            else:
-                rename(parked, target, f"{op}:undo-park")
-        if not exists(target) and self.record["origin"] is not None:
-            self.restore_from_backup()
+    def run_moves(self) -> None:
+        for index, move in enumerate(self.record["moves"]):
+            self.save(f"moving-{index}")
+            Path(move["to"]).parent.mkdir(parents=True, exist_ok=True)
+            rename(Path(move["from"]), Path(move["to"]), self.record["operation"] + f":move-{index}")
+            self.save(f"moved-{index}")
+
+    def undo_moves(self) -> None:
         for index, move in reversed(list(enumerate(self.record["moves"]))):
             source, destination = Path(move["from"]), Path(move["to"])
             if exists(destination) and not exists(source):
                 if differences(move["inventory"], inventory(destination)):
                     raise Incomplete("A moved copy no longer matches its inventory", {"path": str(destination)})
-                rename(destination, source, f"{op}:undo-move-{index}")
+                rename(destination, source, self.record["operation"] + f":undo-move-{index}")
             elif exists(destination) or not exists(source):
                 raise Incomplete("A moved copy cannot be located unambiguously", {"from": str(source), "to": str(destination)})
+
+    def undo(self) -> None:
+        """Return to the origin state, verified; Incomplete when that cannot be established.
+
+        Every step first checks whether it is already done, so an interrupted undo can be rerun.
+        """
+        op = self.record["operation"]
+        target, parked = self.target, Path(self.record["parked"])
+        origin = self.record["origin"]
+        incoming_path = Path(self.record["incoming_path"]) if self.record["incoming_path"] else None
+        self.save("undoing")
+        if self.record.get("moves_last"):
+            self.undo_moves()
+        current = inventory(target)
+        if current is not None and (origin is None or differences(origin, current)):
+            # The target holds something other than the origin: only the verified incoming tree may move.
+            if differences(self.record["incoming"], current) or incoming_path is None or exists(incoming_path):
+                raise Incomplete("The target matches neither the origin nor the incoming inventory", {"target": str(target)})
+            rename(target, incoming_path, f"{op}:undo-activate")
+        if origin is not None and not exists(target):
+            if exists(parked) and not differences(origin, inventory(parked)):
+                rename(parked, target, f"{op}:undo-park")
+            else:
+                if exists(parked):
+                    # Keep the differing copy where it is; restore the verified backup instead.
+                    self.record["parked_drift"] = str(parked)
+                self.restore_from_backup()
+        if not self.record.get("moves_last"):
+            self.undo_moves()
         problems = differences(self.record["origin"], inventory(target))
         for move in self.record["moves"]:
             problems += differences(move["inventory"], inventory(Path(move["from"])))
@@ -867,7 +919,8 @@ def attempt(operation: Operation, state: Path) -> None:
     except (Failure, OSError) as error:
         operation.record["undo_error"] = str(error)
         write_json(operation.path, operation.record)
-        raise Incomplete(f"{failure}; restoration incomplete: {error}. Recovery data kept in {operation.path.parent}; run `recover`",
+        raise Incomplete(f"{failure}; restoration incomplete: {error}. Recovery data kept in {operation.path.parent}; "
+                         "run `recover` with the same --plan or --receipt",
                          getattr(error, "details", None))
     finish(state)
     raise Refused(f"{failure}; the original state was restored and verified", failure.details)
@@ -879,7 +932,7 @@ def command_verify(options) -> dict:
 
 
 def command_plan(options) -> dict:
-    require_test_home(Locations(options.runtime, options.home).home)
+    require_test_home(Locations(options.runtime, options.home))
     plan, _ = make_plan(options.runtime, options.home, None, Path(options.package), Path(options.checksums))
     if options.output:
         write_json(Path(options.output), plan)
@@ -891,7 +944,7 @@ def command_apply(options) -> dict:
     if plan.get("plan_format") != 1:
         raise Refused("Unsupported plan format")
     locations = Locations(plan["runtime"], plan["home"], plan.get("config_root"))
-    require_test_home(locations.home)
+    require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check()
     with Lock(locations.state):
@@ -966,7 +1019,7 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
     })
     attempt(operation, locations.state)
     discovered = discoverable(locations.roots)
-    if discovered != [str(locations.target)]:
+    if len(discovered) != 1 or not same_path(discovered[0], str(locations.target)):
         operation.record["discovered"] = discovered
         try:
             operation.undo()
@@ -1068,7 +1121,7 @@ def command_rollback(options) -> dict:
         raise Refused(f"The receipt differs from the canonical receipt {receipt_path}; roll back with that one")
     if receipt.get("state") != "installed":
         raise Refused(f"The receipt state is {receipt.get('state')!r}; only an installed receipt can be rolled back")
-    require_test_home(locations.home)
+    require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check()
     with Lock(locations.state):
@@ -1123,6 +1176,7 @@ def command_rollback(options) -> dict:
             "incoming_path": str(incoming_path) if incoming_path else None,
             "parked": str(work / "parked" / SKILL),
             "moves": moves,
+            "moves_last": True,
         })
         attempt(operation, locations.state)
         operation.record["rollback_evidence"] = {"maintenance_boundary": boundary, "test_hooks": active_test_hooks()}
@@ -1147,10 +1201,19 @@ def mark_rolled_back(record: dict, tolerant: bool = False) -> bool:
 
 
 def command_recover(options) -> dict:
-    locations = Locations(options.runtime, options.home)
-    require_test_home(locations.home)
+    if options.plan or options.receipt:
+        # The recorded config root, so recovery finds the state whatever the environment now says.
+        recorded = read_json(Path(options.plan or options.receipt))
+        locations = Locations(recorded["runtime"], recorded["home"], recorded.get("config_root"))
+    elif options.runtime:
+        locations = Locations(options.runtime, options.home)
+    else:
+        raise Refused("recover needs --plan, --receipt or --runtime")
+    require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check()
+    if not exists(locations.state):
+        return {"result": "nothing to recover", "state_root": str(locations.state)}
     with Lock(locations.state):
         current = locations.state / "CURRENT"
         if not exists(current):
@@ -1169,7 +1232,13 @@ def command_recover(options) -> dict:
             finish(locations.state)
             return result
         operation.record["recovery_boundary"] = boundary
-        operation.undo()
+        try:
+            operation.undo()
+        except (Failure, OSError) as error:
+            operation.record["undo_error"] = str(error)
+            write_json(operation.path, operation.record)
+            raise Incomplete(f"Restoration incomplete: {error}. Recovery data kept in {operation.path.parent}; "
+                             "fix the cause and run `recover` again", getattr(error, "details", None))
         result = {"result": "restored", "operation": record["operation"], "journal": str(journal), "target": record["target"]}
         for key in ("parked_drift", "stale_restore_copies"):
             if key in operation.record:
@@ -1205,7 +1274,10 @@ def parser() -> argparse.ArgumentParser:
     rollback.add_argument("--receipt", required=True)
     rollback.add_argument("--maintenance-confirmed", action="store_true")
     recover = commands.add_parser("recover", help="restore the state before an interrupted transaction")
-    recover.add_argument("--runtime", choices=("claude", "codex"), required=True)
+    source = recover.add_mutually_exclusive_group(required=True)
+    source.add_argument("--plan", help="the plan an interrupted apply used")
+    source.add_argument("--receipt", help="the receipt an interrupted rollback used")
+    source.add_argument("--runtime", choices=("claude", "codex"), help="default locations, or --home and the environment")
     recover.add_argument("--home")
     recover.add_argument("--maintenance-confirmed", action="store_true")
     return top
