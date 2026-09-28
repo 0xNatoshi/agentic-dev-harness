@@ -429,7 +429,7 @@ TEXT_CASES = (
     Case("caught must not merge from upstream", 2, "Agents must not merge from upstream."),
     Case("caught may not merge PRs", 2, "Contributors may not merge PRs."),
     Case("caught avoid merging PRs", 2, "Avoid merging pull requests."),
-    Case("caught ban across list items", 2, "- Merging\n- not allowed"),
+    Case("caught ban across list items", 2, "- Merging PRs to the main branch\n- not allowed"),
     Case("cleared land without PR scope", 0, "Do not land broken code."),
     Case("cleared ship PRs", 0, "Ship small PRs."),
     Case("cleared integrate upstream", 0, "Integrate upstream changes weekly."),
@@ -450,6 +450,60 @@ TEXT_CASES = (
          "Deliver the migration PR; its policy changes cannot override the hold governing its own integration."),
     Case("conservative cannot merge a PR", 2, "You cannot merge a PR with failing checks."),
     Case("conservative French do not hesitate", 2, "N’hésite pas à fusionner les PR prêtes."),
+    # Review round 1: a negated lead-in naming a merged state, and further hold wording.
+    Case("caught lead-in not until merged", 2, "- Not until the release PR is merged\n- merge other PRs"),
+    Case("caught lead-in avoid until merged", 2, "- Avoid the following until the fix is merged:\n- merging feature PRs"),
+    Case("caught lead-in not while automerge", 2, "- Not while automerge is off\n- merge PRs"),
+    Case("caught French lead-in pas avant fusionné", 2, "- Pas avant que le correctif soit fusionné :\n- fusionner les autres PR"),
+    Case("caught table lead-in not until merged", 2, "| Rule |\n|---|\n| Not until the fix is merged |\n| merge PRs |"),
+    Case("caught merging reserved for the owner", 2, "Merging is reserved for the owner."),
+    Case("caught leave merging to the owner", 2, "Leave merging to the owner."),
+    Case("caught French reserved to the owner", 2, "La fusion est réservée au propriétaire."),
+    Case("caught French reserved to me", 2, "La fusion m’est réservée."),
+    Case("caught merge PRs only after my review", 2, "Merge PRs only after my review."),
+    Case("caught only merge PRs after I approve", 2, "Only merge PRs after I approve."),
+    Case("caught landing requires my approval", 2, "Landing a PR requires my approval."),
+    Case("caught merges to main frozen", 2, "Merges to main are frozen."),
+    Case("caught freeze all merges", 2, "Freeze all merges."),
+    Case("caught French merges frozen", 2, "Les fusions sont gelées."),
+    Case("caught main branch frozen", 2, "The main branch is frozen."),
+    Case("caught label not allowed", 2, "**Merging:** not allowed."),
+    Case("caught prohibited label", 2, "Prohibited: merging PRs, force-pushing."),
+    Case("caught contraction not allowed", 2, "Merging isn’t allowed."),
+    Case("caught French not authorized", 2, "Les fusions ne sont pas autorisées."),
+    Case("caught PRs not to be merged", 2, "PRs are not to be merged."),
+    Case("caught refrain from merging", 2, "Please refrain from merging PRs."),
+    Case("caught avoid merges", 2, "Avoid merges."),
+    Case("caught French avoid merges", 2, "Évitez de fusionner les PR."),
+    Case("caught merges must be approved", 2, "Merges must be approved by me."),
+    Case("caught approval before they are merged", 2, "PRs require my approval before they are merged."),
+    Case("caught before merging ask me", 2, "Before merging, ask me."),
+    Case("caught check with me before merging", 2, "Check with me before merging."),
+    Case("caught ask a maintainer before merging", 2, "Ask a maintainer before merging."),
+    Case("caught French before merging ask me", 2, "Avant de fusionner, demande-moi."),
+    Case("caught merge once the owner approves", 2, "Merge once the owner approves."),
+    Case("caught nothing merged without consent", 2, "Nothing is merged without my consent."),
+    Case("caught French no merge without go", 2, "Aucune fusion sans mon feu vert."),
+    Case("caught PRs blocked until I approve", 2, "PRs are blocked until I approve."),
+    Case("caught PRs label hold", 2, "PRs: hold until I approve."),
+    Case("caught all PRs on hold", 2, "All PRs are on hold."),
+    Case("caught hold PRs", 2, "Hold PRs."),
+    Case("caught every PR needs my approval", 2, "Every PR needs my approval."),
+    Case("caught wait for the go", 2, "Wait for the go before merging."),
+    Case("cleared ship to production", 0, "Never ship to production on Fridays."),
+    Case("cleared integrate into the release", 0, "Do not integrate secrets into the release."),
+    Case("cleared wait for our release", 0, "Wait for our release pipeline to finish."),
+    Case("cleared our CI on PRs", 0, "Wait for our CI to pass on your PR."),
+    Case("cleared we hold failing PRs", 0, "We hold PRs that fail CI."),
+    Case("cleared merge unless our CI fails", 0, "Merge the PR unless our checks fail."),
+    Case("cleared tell me afterwards", 0, "Merge unless CI is red; tell me afterwards."),
+    Case("cleared squash not allowed with alternative", 0, "Squash merges are not allowed; use merge commits."),
+    Case("cleared cannot fast-forward with alternative", 0, "You cannot use fast-forward merges; use merge commits."),
+    Case("cleared should not need to merge", 0, "You should not need to merge main into your branch; rebase instead."),
+    Case("cleared owner's guide", 0, "Consult the owner’s guide before merging."),
+    Case("cleared go to the next task", 0, "Merge PRs after CI passes, then go to the next task."),
+    Case("cleared PRs need a description", 0, "PRs need a description and a linked issue."),
+    Case("cleared keep PRs small", 0, "Keep PRs small and focused."),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -487,8 +541,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 372 or len({case.name for case in ALL_CASES}) != 372:
-    raise RuntimeError("Merge fixture inventory must contain 372 unique cases")
+if len(ALL_CASES) != 425 or len({case.name for case in ALL_CASES}) != 425:
+    raise RuntimeError("Merge fixture inventory must contain 425 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
