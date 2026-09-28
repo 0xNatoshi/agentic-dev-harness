@@ -14,6 +14,18 @@ Extract outside project repositories. Ask the agent in each targeted application
 
 The [workflow skill](skills/github-workflow/SKILL.md) includes scripts, references, license templates and authentic project-template history. Runtime guards require Git, gh, Bash/Git Bash and Python 3.8+; no external jq is required. Conversation follows personal preferences; maintained files use English. Legacy suspension strings remain exact compatibility data.
 
+### Update check — read-only, before any backup or edit
+
+Ask the agent in each targeted application to run this first. It answers "is this computer already current, and what must change?" and modifies nothing. Record one outcome per checkpoint: **current** (matches the package), **personalized** (matches, plus deliberate local additions), **outdated** (a package rule is absent, older or altered) or **blocked** (unreadable, or not safely ownable). Report the outcome per checkpoint.
+
+1. **Package** — the archive verifies against `SHA256SUMS.txt` and every entry in `MANIFEST.json`; record the version. A mismatch is `blocked`, and no later checkpoint is trustworthy.
+2. **The instruction file the application loads** — Claude Desktop: `CLAUDE.md` plus the adjacent `AGENTS.md` it imports; Codex: the active `AGENTS.override.md`, or `AGENTS.md` when the override is empty; Hermes: the development section of the private `SOUL.md`.
+3. **`github-workflow` skill** — resolve the path actually loaded and compare it file by file. A link or junction is **not** replaced: compare its canonical directory instead. One canonical directory can serve several applications at once and is then checked once for all of them.
+4. **Runtime extras** — Codex `[agents]` keys, role TOMLs and `config.toml`; Claude imports and `/github-workflow`; Hermes settings and SOUL sections outside the development section.
+5. **Loading** — a new session in each targeted application. File presence does not prove loading.
+
+When every checkpoint is `current`, that application already matches the package: report it and change nothing there. [INSTALL-CLAUDE.md](INSTALL-CLAUDE.md) and [INSTALL-CODEX.md](INSTALL-CODEX.md) state the per-checkpoint evidence, destinations and rollback for their application.
+
 ## Version and recovery
 
 The package is v6.5.0; the project template is v6.4. Package policy includes proactive technical judgment, incidental issue capture, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill. Authentic template snapshots are retained, including instructions to preserve destination-only v5.1/v5.2 history. The common policy is neutral; merge personal preferences during installation instead of overwriting them.

@@ -19,6 +19,25 @@ Check Desktop version or `codex --version`, active config.toml, custom-role supp
 
 The preflight requires Git, gh, Git Bash/Bash with awk/grep/mktemp and **Python 3.8+ standard library**. Verify a real working python3, py -3 or python, in that detection order. If absent, installation remains unqualified until Python is installed from the [official Windows distribution](https://www.python.org/downloads/windows/) and checked again. No external jq is needed.
 
+## Update check — read-only, before any backup or edit
+
+Run this first. It answers "is this computer already current, and what must change?" and modifies nothing. Record one outcome per checkpoint, using these four words:
+
+- **current** — matches the package.
+- **personalized** — matches, plus deliberate local additions or preferences.
+- **outdated** — a package rule is absent, older or altered.
+- **blocked** — unreadable, or not safely ownable.
+
+Report the outcome per checkpoint; do not collapse them into one verdict.
+
+1. **Package** — verify the extracted ZIP against `SHA256SUMS.txt` and every entry in `MANIFEST.json`, and record the package version. A mismatch is `blocked`, and no later checkpoint is trustworthy.
+2. **Active instruction file** — establish which file Codex loads: a nonempty `$codexHome\AGENTS.override.md` takes precedence over `$codexHome\AGENTS.md`. Compare the loaded one with `configurations/codex/AGENTS.md`; compare the masked one only to keep the pair consistent. Merge into the loaded file, never into a neighbor copy.
+3. **`github-workflow` skill** — resolve `$skillsHome\github-workflow`. A real directory is compared file by file with `skills/github-workflow/`. A link or junction is **not** replaced: resolve its canonical directory, record the link target and its owner, and compare there. One canonical directory can serve several applications at once and is then checked once for all of them. Also resolve `$codexHome\skills\github-workflow` as a possible older separate copy. Evidence is the file count, every SHA-256 and the three license templates.
+4. **Roles and configuration** — compare the `[agents]` keys in the active `config.toml` with `configurations/codex/agents-config.toml`, and the five role TOMLs with `configurations/codex/agents/`. Preserve other tables, providers, permissions and deliberate disablement. An unavailable model or effort is `personalized`, not `outdated`.
+5. **Loading** — in a new read-only Codex session, confirm the loaded instruction source, the skill and the roles actually exposed. File presence or TOML syntax does not prove loading.
+
+When every checkpoint is `current`, the installation already matches the package: report that, change nothing and skip the remaining sections. Otherwise the `personalized` and `outdated` checkpoints are the exact edit list for those sections, and the backup below covers exactly those targets.
+
 ## Back up and compare versions
 
 Before editing, create a new private `%LOCALAPPDATA%\dev-harness\backups\v6.5.0-codex-<timestamp>` directory and record its absolute path:
