@@ -526,6 +526,43 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(rollback.returncode, 0, rollback.stderr)
         self.assertEqual(snapshot(self.target), before)
 
+    def test_rollback_restores_a_lost_or_changed_retired_duplicate_from_its_backup(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        for label in ("lost", "changed"):
+            with self.subTest(label):
+                for path in (self.home / ".agents", self.home / ".codex"):
+                    shutil.rmtree(path, ignore_errors=True)
+                before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+                result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                receipt_path = Path(json.loads(result.stdout)["receipt"])
+                retired = Path(json.loads(receipt_path.read_text(encoding="utf-8"))["duplicates"][0]["retired_to"])
+                if label == "lost":
+                    shutil.rmtree(retired)
+                else:
+                    (retired / "local-notes.md").write_bytes(b"changed while retired\n")
+                rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assertEqual(rollback.returncode, 0, rollback.stderr)
+                self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+                if label == "changed":
+                    self.assertTrue((retired / "local-notes.md").is_file())
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_a_changed_root_mode_is_drift(self):
+        self.v52_layout()
+        plan = self.plan()
+        self.target.chmod(0o700)
+        self.assert_refused(self.apply(plan), 1)
+        self.assertEqual(stat.S_IMODE(os.stat(self.target).st_mode), 0o700)
+        self.target.chmod(0o755)
+        receipt_path = self.installed()
+        self.target.chmod(0o700)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(rollback, 1)
+        self.assertIn(".", [item["path"] for item in json.loads(rollback.stderr)["details"]])
+        self.assertEqual(stat.S_IMODE(os.stat(self.target).st_mode), 0o700)
+
     def test_rerun_recover_sets_a_stale_restoration_copy_aside(self):
         before, parked = self.crash_after_parking()
         shutil.rmtree(parked)

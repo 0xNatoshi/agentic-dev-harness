@@ -238,6 +238,8 @@ def exists(path: Path) -> bool:
 def inventory(root: Path) -> dict | None:
     """Relative POSIX path -> type, mode and, for files, SHA-256 and size. None when absent.
 
+    The root itself is the `.` entry, so its mode takes part in every drift and restoration check.
+
     A link, junction or special file anywhere in the tree blocks: its target is outside what an
     exact rollback can own.
     """
@@ -247,7 +249,7 @@ def inventory(root: Path) -> dict | None:
         raise Blocked(f"{root} is a link or junction; its canonical source is not identified", {"path": str(root)})
     if not root.is_dir():
         raise Blocked(f"{root} is not a directory", {"path": str(root)})
-    entries = {}
+    entries = {".": {"type": "dir", "mode": stat.S_IMODE(os.lstat(str(root)).st_mode)}}
     pending = [(root, "")]
     while pending:
         directory, prefix = pending.pop()
@@ -1074,7 +1076,8 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         "dropped_paths": sorted(name for name, kind in classification.items() if kind == "regenerable cache"),
         "preserved_paths": sorted(name for name, kind in classification.items() if kind in PRESERVED),
         "replaced_paths": sorted(name for name, kind in classification.items() if kind == "package"),
-        "duplicates": [{"path": move["from"], "retired_to": move["to"], "backup": move["backup"]} for move in moves],
+        "duplicates": [{"path": move["from"], "retired_to": move["to"], "backup": move["backup"], "inventory": move["inventory"]}
+                       for move in moves],
         "legacy_commands": plan["legacy_commands"],
         "instruction_files": file_hashes(locations.instructions),
         "maintenance_boundary": boundary,
@@ -1106,14 +1109,11 @@ def stage(staged: Path, package_files: dict, target: Path, before: dict, classif
             shutil.copy2(str(target / Path(*PurePosixPath(name).parts)), str(path))
         elif kind == "directory":
             path.mkdir(parents=True, exist_ok=True)
-    # Kept directories keep their mode, deepest first, after every write into them. The root is not in
-    # the inventory, so its mode comes from the live target.
-    for name in sorted(before, key=lambda name: name.count("/"), reverse=True):
+    # Kept directories, the root (`.`) included, keep their mode: deepest first, after every write into them.
+    for name in sorted(before, key=lambda name: (name != ".", name.count("/")), reverse=True):
         path = staged / Path(*PurePosixPath(name).parts)
         if before[name]["type"] == "dir" and path.is_dir():
             path.chmod(before[name]["mode"])
-    if before:
-        staged.chmod(stat.S_IMODE(os.stat(str(target)).st_mode))
 
 
 def staging_problems(staged: dict, package_files: dict, before: dict, classification: dict) -> list:
@@ -1121,7 +1121,7 @@ def staging_problems(staged: dict, package_files: dict, before: dict, classifica
     files = {name: {"sha256": digest(data), "bytes": len(data)} for name, data in package_files.items()}
     files.update({name: {"sha256": before[name]["sha256"], "bytes": before[name]["bytes"]}
                   for name, kind in classification.items() if kind in PRESERVED})
-    directories = {name for name, kind in classification.items() if kind == "directory"}
+    directories = {name for name, kind in classification.items() if kind == "directory"} | {"."}
     for name in files:
         directories.update(parent.as_posix() for parent in PurePosixPath(name).parents if parent != PurePosixPath("."))
     problems = []
@@ -1191,12 +1191,20 @@ def command_rollback(options) -> dict:
                     if differences(receipt["before"], inventory(incoming_path)):
                         raise Refused("Neither the retired copy nor the backup matches the before-inventory")
             moves = []
-            for duplicate in receipt["duplicates"]:
+            for index, duplicate in enumerate(receipt["duplicates"]):
                 source, original = Path(duplicate["retired_to"]), Path(duplicate["path"])
-                duplicate_inventory = inventory(Path(duplicate["backup"]))
-                if exists(original) or differences(duplicate_inventory, inventory(source)):
-                    raise Refused(f"The retired duplicate {original} cannot be restored exactly")
-                moves.append({"from": str(source), "to": str(original), "inventory": duplicate_inventory})
+                expected = duplicate["inventory"]
+                if exists(original):
+                    raise Refused(f"The retired duplicate {original} cannot be restored: its path is occupied")
+                if differences(expected, inventory(source)):
+                    # The retired copy is lost or changed: restore the verified backup and leave that copy
+                    # where it is, outside every skill root.
+                    source = work / "restore-duplicates" / str(index) / original.name
+                    copy_tree(Path(duplicate["backup"]), source)
+                    fsync_tree(source)
+                    if differences(expected, inventory(source)):
+                        raise Refused(f"Neither the retired copy nor the backup of {original} matches its inventory")
+                moves.append({"from": str(source), "to": str(original), "inventory": expected})
         except OSError as error:
             finish(locations.state)
             raise Refused(f"Preparing the rollback failed before any rename: {error}; the target is unchanged")
