@@ -497,6 +497,21 @@ class Locations:
         self.target = self.skills / SKILL
         self.state = self.skills.parent / "dev-harness-install"
 
+    def require_movable(self) -> None:
+        """Block before any rename when the target or its skill root lacks owner write permission.
+
+        POSIX refuses to move such a directory to another parent, or to rename inside such a root, so
+        apply and rollback would stop at their first rename. Windows is not checked: a directory's
+        read-only attribute does not prevent renames there, and Explorer sets it on customized folders.
+        """
+        if os.name == "nt":
+            return
+        for path in (self.skills, self.target):
+            if exists(path) and not os.lstat(str(path)).st_mode & stat.S_IWUSR:
+                mode = stat.S_IMODE(os.lstat(str(path)).st_mode)
+                raise Blocked(f"{path} has no owner write permission (mode {mode:04o}), so it cannot be renamed; "
+                              f"add owner write permission to {path}, then plan again", {"path": str(path), "mode": f"{mode:04o}"})
+
     def describe(self) -> dict:
         return {
             "runtime": self.runtime,
@@ -595,6 +610,7 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
     """Return the plan and the verified package it describes."""
     locations = Locations(runtime, home, config)
     locations.check()
+    locations.require_movable()
     package = load_package(package_source)
     verification = verify_package(package, checksums)
     package_files = package.skill_files()
@@ -1165,9 +1181,14 @@ def command_rollback(options) -> dict:
     with Lock(locations.state):
         if exists(locations.state / "CURRENT"):
             raise Blocked(f"An interrupted transaction is recorded in {locations.state / 'CURRENT'}; run `recover` first")
+        locations.require_movable()
         changed = differences(receipt["after"], inventory(locations.target))
         if changed:
-            raise Refused("The active tree no longer matches the receipt's after-inventory; rollback refused", changed)
+            message = "The active tree no longer matches the receipt's after-inventory; rollback refused"
+            root = next((item for item in changed if item["path"] == "."), None)
+            if root and isinstance(root["expected"], dict) and isinstance(root["actual"], dict) and root["expected"]["type"] == root["actual"]["type"]:
+                message += f"; restore mode {root['expected']['mode']:04o} on {locations.target} (now {root['actual']['mode']:04o})"
+            raise Refused(message, changed)
         work = transaction / ("rollback-" + uuid.uuid4().hex[:8])
         journal = work / "journal.json"
         work.mkdir(parents=True)
