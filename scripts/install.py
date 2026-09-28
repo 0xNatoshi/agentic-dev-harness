@@ -1099,11 +1099,14 @@ def stage(staged: Path, package_files: dict, target: Path, before: dict, classif
             shutil.copy2(str(target / Path(*PurePosixPath(name).parts)), str(path))
         elif kind == "directory":
             path.mkdir(parents=True, exist_ok=True)
-    # Kept directories keep their mode, deepest first, after every write into them.
+    # Kept directories keep their mode, deepest first, after every write into them. The root is not in
+    # the inventory, so its mode comes from the live target.
     for name in sorted(before, key=lambda name: name.count("/"), reverse=True):
         path = staged / Path(*PurePosixPath(name).parts)
         if before[name]["type"] == "dir" and path.is_dir():
             path.chmod(before[name]["mode"])
+    if before:
+        staged.chmod(stat.S_IMODE(os.stat(str(target)).st_mode))
 
 
 def staging_problems(staged: dict, package_files: dict, before: dict, classification: dict) -> list:
