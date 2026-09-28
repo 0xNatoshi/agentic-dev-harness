@@ -131,8 +131,8 @@ FREEZE_STEM = r'\b(?:frozen|freeze|gel(?:é|ée|és|ées)?)\b'
 # 'A frozen lockfile' and 'Freeze the lockfile' are package-manager settings, but
 # 'Freeze dependency merges' and 'freeze versions and merges' still freeze merges.
 FREEZE_WORD = (FREEZE_STEM + r'(?![\s-]+(?:(?:the|your|our|a|all|any)\s+)?(?:lock[\s-]*files?|dependenc\w*|deps|versions?|pins?)\b'
-               r'(?!(?:[\s-]+(?!(?:before|after|until|unless|once|when|while|then|prior|during|avant|après)\b)[\w’\x27-]+){0,3}?'
-               r'[\s-]+(?:merg|fusion)))')
+               r'(?!(?:[\s,&/+-]+(?!(?:before|after|until|unless|once|when|while|then|prior|during|avant|après)\b)[\w’\x27-]+){0,3}?'
+               r'[\s,&/+-]+(?:merg|fusion)))')
 FIRST_PERSON = r'\bi\b(?!\.e\b)|\bj(?=[’\x27])|\b(?:me|my|mine|we|us|our|je|moi|mon|ma|mes|nous|notre|nos)\b'
 # 'review' and 'ok' only when said by someone: 'my review', 'until I say ok'. A bare 'go' or
 # 'go-ahead' is a signal, as on the release before; 'then go to the next task' is a verb.
@@ -239,7 +239,7 @@ RUN_WORDS = {
     'w': re.compile(r'\b(?:wait\w*|attend\w*)\b'),
     'h': re.compile(r'\b(?:stop|hold|wait|attend\w*)\b'),
     'u': re.compile(r'\b(?:until|unless|jusqu\w*|que)\b'),
-    'x': re.compile(APPROVAL_OR_FIRST + r'|\b(?:off|light|vert)\b'),
+    'x': re.compile(APPROVAL_OR_FIRST + r'|\b(?:off|light|vert|go)\b'),
     'n': re.compile(BAN_WORD + r'|\b(?:allowed|permitted|autoris\w*|permis\w*)\b'),
     'z': re.compile(FREEZE_STEM),
     'r': re.compile(r'\b(?:required|needed|mandatory|requise?s?|obligatoires?|nécessaires?)\b'),

@@ -546,6 +546,9 @@ TEXT_CASES = (
     Case("caught freeze version bumps and merges", 2, "Freeze version bumps and merges."),
     Case("caught freeze the version-2 merges", 2, "Freeze the version-2 merges."),
     Case("caught main not develop is frozen", 2, "Main not develop is frozen."),
+    Case("caught owner's go split across items", 2, "- Merging stays closed until the owner’s\n- go to proceed."),
+    Case("caught freeze dependencies lockfiles and merges", 2, "Freeze dependencies, lockfiles and merges."),
+    Case("caught freeze dependencies slash merges", 2, "Freeze dependencies/merges."),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -583,8 +586,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 463 or len({case.name for case in ALL_CASES}) != 463:
-    raise RuntimeError("Merge fixture inventory must contain 463 unique cases")
+if len(ALL_CASES) != 466 or len({case.name for case in ALL_CASES}) != 466:
+    raise RuntimeError("Merge fixture inventory must contain 466 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
