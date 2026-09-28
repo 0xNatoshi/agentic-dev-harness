@@ -4,6 +4,7 @@
 
 Development version: 6.5.0. No release tag has been published for this version.
 
+- Make the local test gate independent of symlink privileges and the locale encoding: fixtures use a python3 shim, explicit UTF-8 without newline translation, and one Bash resolved from `HARNESS_BASH` or `PATH` that refuses the WSL launcher.
 - Use one bounded shell-boundary analysis for documented command comments, continuations and here-documents; reject unsupported active quote/expansion forms explicitly and preserve executable command diagnostics.
 - Track configured automatic review triggers through revision-specific completion, including delayed ready-triggered feedback, and avoid duplicate manual review requests.
 - Distinguish Python string delimiters from literal privacy-screen content, preserving quoted address checks and physical diagnostic lines without reconstructing assembled values.

@@ -7,7 +7,7 @@ import sys
 from tempfile import TemporaryDirectory
 import unittest
 
-from tests._fixture_support import fixture_environment, run
+from tests._fixture_support import bash as resolved_bash, fixture_environment, run, tool_shim
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,8 +66,7 @@ class LicenseCheckTests(unittest.TestCase):
     def check(self, expected: int, message: str, environment: dict[str, str] | None = None,
               directory: Path | None = None) -> None:
         # An absolute bash keeps the command runnable under a PATH without Python.
-        bash = shutil.which("bash", path=self.environment["PATH"])
-        self.assertIsNotNone(bash)
+        bash = str(Path(resolved_bash()).resolve())
         result = run([bash, "-c", documented_command()], directory or self.repo, environment or self.environment)
         self.assertEqual(result.returncode, expected, f"stdout={result.stdout!r}, stderr={result.stderr!r}")
         self.assertIn(message, result.stdout + result.stderr)
@@ -112,7 +111,7 @@ class LicenseCheckTests(unittest.TestCase):
         tools.mkdir()
         git = shutil.which("git", path=self.environment["PATH"])
         self.assertIsNotNone(git)
-        (tools / "git").symlink_to(git)
+        tool_shim(tools, "git", git)
         self.check(2, "Python 3.8+ not found; exact license comparison not run.",
                    self.environment | {"PATH": str(tools)})
 
@@ -122,9 +121,9 @@ class LicenseCheckTests(unittest.TestCase):
         tools.mkdir()
         for name, target in (("git", shutil.which("git", path=self.environment["PATH"])), ("python", sys.executable)):
             self.assertIsNotNone(target)
-            (tools / name).symlink_to(target)
+            tool_shim(tools, name, target)
         # A Windows Store alias exits 9009 instead of running Python.
-        (tools / "python3").write_text("#!/bin/sh\nexit 9009\n")
+        (tools / "python3").write_text("#!/bin/sh\nexit 9009\n", encoding="utf-8", newline="")
         (tools / "python3").chmod(0o755)
         self.check(0, "Exact license text verified: staged LICENSE", self.environment | {"PATH": str(tools)})
 
