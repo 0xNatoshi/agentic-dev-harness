@@ -621,6 +621,12 @@ class InstallerTests(unittest.TestCase):
         default = self.recover()
         self.assertEqual(default["result"], "nothing to recover")
         self.assertFalse((self.home / ".claude").exists())
+        # "Nothing to recover" must not read as all clear: it names what was checked and the recovery route.
+        self.assertEqual(default["config_root"], str(self.home / ".claude"))
+        self.assertEqual(default["state_root"], str(self.home / ".claude" / "dev-harness-install"))
+        self.assertIn("--plan", default["hint"])
+        self.assertIn("--receipt", default["hint"])
+        self.assertIn("CLAUDE_CONFIG_DIR", default["hint"])
         report = self.run_installer("recover", "--plan", output, "--maintenance-confirmed")
         self.assertEqual(report.returncode, 0, report.stderr)
         self.assertEqual(json.loads(report.stdout)["result"], "restored")

@@ -1258,12 +1258,20 @@ def command_recover(options) -> dict:
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check()
+    nothing = {"result": "nothing to recover", "config_root": str(locations.config), "state_root": str(locations.state)}
+    if not (options.plan or options.receipt):
+        # --runtime resolves the config root from this invocation only; a transaction planned under
+        # another root keeps its CURRENT pointer there, so "nothing" here is not "all clear".
+        variable = "CLAUDE_CONFIG_DIR" if locations.runtime == "claude" else "CODEX_HOME"
+        nothing["hint"] = (f"Only {locations.state} was checked. A transaction started with another config root "
+                           f"(--home or {variable}) is recovered with `recover --plan <plan>` or "
+                           "`recover --receipt <receipt>`, which reuse the recorded config root.")
     if not exists(locations.state):
-        return {"result": "nothing to recover", "state_root": str(locations.state)}
+        return nothing
     with Lock(locations.state):
         current = locations.state / "CURRENT"
         if not exists(current):
-            return {"result": "nothing to recover", "state_root": str(locations.state)}
+            return nothing
         journal = locations.state / current.read_text(encoding="utf-8").strip()
         if not exists(journal):
             # The journal is written durably before the first rename, so nothing was renamed.
