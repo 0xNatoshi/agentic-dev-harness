@@ -64,3 +64,9 @@ Record any other obsolete candidate by exact path in the receipt. No wildcard de
 - Check package/copy hashes or intentional merge diffs, TOML syntax, five relative role references, instruction imports and three license templates. In a new read-only Codex session confirm loaded sources, skill and actually exposed roles. File presence alone does not prove loading. State an unavailable/unstarted runtime explicitly.
 - Conversation headings follow the actually loaded personal preference. Put verified progress and the next action together. Record executed checks, runtime version, exposed roles and exact backup path.
 - Compare each target with its installed hash before rollback. Restore a backup/reverse a diff only without losing later edits; otherwise merge. Remove a newly created file only if unchanged and unused. Recheck instruction/skill/TOML loading. Restoring an entire config.toml blindly is not a rollback plan.
+
+## Recover an interrupted installer transaction
+
+After stopping every Claude and Codex session, run recovery from a separate terminal in the verified extracted package. For an interrupted `install.py apply`, prefer `py -3 .\install.py recover --plan "<saved-plan.json>" --maintenance-confirmed`. For an interrupted `install.py rollback`, use `py -3 .\install.py recover --receipt "<saved-receipt.json>" --maintenance-confirmed`. Keep the saved plan, receipt and transaction data. The installer checks for active consumers and blocks when their state cannot be established.
+
+The plan or receipt reuses the recorded configuration root even when `CODEX_HOME` or `--home` has changed. `recover --runtime codex` resolves the current locations; its `nothing to recover` result covers only the state directory reported by that invocation. Recovery restores the before-state of an interrupted installer transaction. Profile and role edits made manually still use the verified backups above.
