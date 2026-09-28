@@ -1,9 +1,66 @@
 """Isolated subprocess environment for disposable Git repositories."""
 
+import functools
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
+
+
+def write_fixture(path: Path, text: str) -> None:
+    """Write fixture text byte for byte: UTF-8, no newline translation."""
+    path.write_text(text, encoding="utf-8", newline="")
+
+
+def is_wsl_launcher(path: str) -> bool:
+    """True for the System32 or WindowsApps bash(.exe) that starts WSL."""
+    launcher = PureWindowsPath(path)
+    return (launcher.stem.lower() == "bash" and launcher.suffix.lower() in ("", ".exe")
+            and launcher.parent.name.lower() in ("system32", "windowsapps"))
+
+
+def resolve_bash(environ: dict[str, str] | None = None, which=shutil.which) -> str:
+    """HARNESS_BASH if set and non-empty, else bash on PATH, as an absolute path; the WSL launcher is rejected."""
+    environ = os.environ if environ is None else environ
+    bash = environ.get("HARNESS_BASH") or "bash"
+    if PureWindowsPath(bash).name == bash:  # a bare name, on either path syntax
+        bash = which(bash)
+    if not bash:
+        raise RuntimeError("bash not found: install Git Bash or set HARNESS_BASH to its bash.exe")
+    # Absolute, because a relative program path is resolved against each fixture's cwd.
+    bash = os.path.abspath(bash)
+    if is_wsl_launcher(bash):
+        raise RuntimeError(f"{bash} starts WSL, not Git Bash: set HARNESS_BASH to Git Bash's bash.exe")
+    return bash
+
+
+@functools.cache
+def bash() -> str:
+    # Resolved once, so every fixture runs the same Bash; on Windows, CreateProcess
+    # searches System32 before an overridden PATH.
+    return resolve_bash()
+
+
+@functools.cache
+def symlinks_supported() -> bool:
+    """Windows needs Developer Mode or elevation to create symlinks."""
+    with tempfile.TemporaryDirectory() as directory:
+        try:
+            (Path(directory) / "link").symlink_to(directory, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            return False
+    return True
+
+
+def tool_shim(directory: Path, name: str, target: str) -> Path:
+    """An executable sh script forwarding to target, instead of a symlink."""
+    shim = directory / name
+    write_fixture(shim, f'#!/bin/sh\nexec {shlex.quote(Path(target).as_posix())} "$@"\n')
+    shim.chmod(0o755)
+    return shim
 
 
 def fixture_environment(root: Path) -> tuple[dict[str, str], Path]:
@@ -11,7 +68,7 @@ def fixture_environment(root: Path) -> tuple[dict[str, str], Path]:
     fixture_config.mkdir()
     tools = root / "bin"
     tools.mkdir()
-    (tools / "python3").symlink_to(sys.executable)
+    tool_shim(tools, "python3", sys.executable)
     environment = {
         "PATH": str(tools) + os.pathsep + os.environ.get("PATH", os.defpath),
         "XDG_CONFIG_HOME": str(fixture_config),
@@ -31,6 +88,10 @@ def fixture_environment(root: Path) -> tuple[dict[str, str], Path]:
 def run(
     args: list[str], cwd: Path, environment: dict[str, str]
 ) -> subprocess.CompletedProcess[str]:
+    # A bare "bash" goes through the single resolved Bash.
+    if args and args[0] == "bash":
+        args = [bash(), *args[1:]]
     return subprocess.run(
-        args, cwd=cwd, env=environment, capture_output=True, text=True, timeout=20
+        args, cwd=cwd, env=environment, capture_output=True, text=True,
+        encoding="utf-8", errors="backslashreplace", timeout=20
     )

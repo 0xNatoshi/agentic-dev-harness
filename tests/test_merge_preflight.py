@@ -10,7 +10,7 @@ import time
 import unicodedata
 import unittest
 
-from tests._fixture_support import fixture_environment, run
+from tests._fixture_support import fixture_environment, run, write_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +23,7 @@ from pathlib import Path
 import sys
 
 args = sys.argv[1:]
-with Path(os.environ['FIXTURE_LOG']).open('a') as log:
+with Path(os.environ['FIXTURE_LOG']).open('a', encoding='utf-8') as log:
     log.write(json.dumps(args) + '\\n')
 if args[:2] == ['repo', 'view']:
     explicit = len(args) > 2 and args[2] != '--json'
@@ -453,14 +453,14 @@ class MergePreflightTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.environment, tools = fixture_environment(self.root)
         fake_gh = tools / "gh"
-        fake_gh.write_text(FAKE_GH)
+        write_fixture(fake_gh, FAKE_GH)
         fake_gh.chmod(0o700)
         self.log = self.root / "gh.log"
         self.environment["FIXTURE_LOG"] = str(self.log)
         self.repo = self.root / "repo"
         self.repo.mkdir()
         self.instructions = self.repo / "AGENTS.md"
-        self.instructions.write_text("Project instructions.\n")
+        write_fixture(self.instructions, "Project instructions.\n")
         self.git("init", "-q", "-b", "main")
         self.git("remote", "add", "origin", "https://github.example/fixture/repo.git")
         self.git("add", "AGENTS.md")
@@ -474,26 +474,26 @@ class MergePreflightTests(unittest.TestCase):
 
     def check_case(self, case: Case) -> None:
         if case.source is not None:
-            self.instructions.write_text((ROOT / case.source).read_text(encoding="utf-8"))
+            write_fixture(self.instructions, (ROOT / case.source).read_bytes().decode("utf-8"))
         elif case.text is not None:
-            self.instructions.write_text(case.text)
+            write_fixture(self.instructions, case.text)
         if case.setup == "push_mismatch":
             self.git("remote", "set-url", "--push", "origin", "https://github.example/other/repo.git")
         elif case.setup == "published_wait":
-            self.instructions.write_text("Autonomous merge suspended — asked on 2026-09-27\n")
+            write_fixture(self.instructions, "Autonomous merge suspended — asked on 2026-09-27\n")
             self.git("add", "AGENTS.md")
             self.git("commit", "-qm", "published wait")
             self.git("update-ref", "refs/remotes/origin/main", "HEAD")
-            self.instructions.write_text("Local clear.\n")
+            write_fixture(self.instructions, "Local clear.\n")
         elif case.setup == "missing_published_ref":
             self.git("update-ref", "-d", "refs/remotes/origin/main")
-        self.log.write_text("")
+        write_fixture(self.log, "")
         environment = self.environment | dict(case.environment)
         arguments = [str(self.instructions)] if case.mode == "suspension" else ["fixture", "repo"]
         if case.mode == "reviews":
             arguments.append("1")
         result = run(["bash", str(PREFLIGHT), case.mode, *arguments], self.repo, environment)
-        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        calls = [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
         api_calls = sum(call[0] == "api" for call in calls)
         self.assertEqual(
             (result.returncode, api_calls), (case.expected, case.api_calls),

@@ -7,7 +7,7 @@ import shutil
 from tempfile import TemporaryDirectory
 import unittest
 
-from tests._fixture_support import fixture_environment, run
+from tests._fixture_support import fixture_environment, run, symlinks_supported
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,7 +108,7 @@ class BranchCleanupTests(unittest.TestCase):
         self.repo = self.root / "repo"
         self.repo.mkdir()
         self.git("init", "-q", "-b", "main")
-        (self.repo / "file").write_text("base\n")
+        (self.repo / "file").write_text("base\n", encoding="utf-8", newline="")
         self.git("add", "file")
         self.git("commit", "-qm", "base")
         self.base = self.git("rev-parse", "HEAD").stdout.strip()
@@ -146,21 +146,21 @@ class BranchCleanupTests(unittest.TestCase):
             # target sits inside the rebased range, so Git will rewrite it at the end.
             detach = ["--detach"] if scenario.startswith("detached") else []
             self.git("worktree", "add", "-q", *detach, str(worktree), "target" if detach else branch)
-            (worktree / "extra").write_text("extra\n")
+            (worktree / "extra").write_text("extra\n", encoding="utf-8", newline="")
             self.git("add", "extra", directory=worktree)
             self.git("commit", "-qm", "extra", directory=worktree)
             self.git("branch", "-f", "target", "HEAD", directory=worktree)
             self.conflicting_commits(worktree)
             result = self.git("rebase", "--update-refs", self.default, directory=worktree, check=False)
             self.assertNotEqual(result.returncode, 0, "Fixture rebase unexpectedly succeeded")
-            self.assertIn("refs/heads/target", (self.gitdir(worktree) / "rebase-merge" / "update-refs").read_text())
+            self.assertIn("refs/heads/target", (self.gitdir(worktree) / "rebase-merge" / "update-refs").read_text(encoding="utf-8"))
             return
         if scenario.startswith(("detached_rebase", "update_refs_")):
             self.git("worktree", "add", "-q", "--detach", str(worktree), branch)
             self.conflicting_commits(worktree)
             backend = "rebase-apply" if scenario == "detached_rebase_apply" else "rebase-merge"
             self.start_rebase(worktree, backend)
-            self.assertEqual((self.gitdir(worktree) / backend / "head-name").read_text().strip(), "detached HEAD")
+            self.assertEqual((self.gitdir(worktree) / backend / "head-name").read_text(encoding="utf-8").strip(), "detached HEAD")
             # A lost or damaged update record must not read as "target is not listed".
             oid = self.base
             records = {
@@ -175,7 +175,7 @@ class BranchCleanupTests(unittest.TestCase):
                 "update_refs_symref_cycle": f"refs/heads/loop-a\n{oid}\n{oid}\n",
             }
             if scenario in records:
-                (self.gitdir(worktree) / backend / "update-refs").write_text(records[scenario])
+                (self.gitdir(worktree) / backend / "update-refs").write_text(records[scenario], encoding="utf-8", newline="")
             return
         if scenario in (
             "unknown_state", "missing_worktree", "wrong_repository", "incomplete_rebase_apply", "invalid_head_name",
@@ -197,18 +197,18 @@ class BranchCleanupTests(unittest.TestCase):
                     self.write_am_state(gitdir)
                 else:
                     (gitdir / "rebase-merge").mkdir()
-                    (gitdir / "rebase-merge" / "head-name").write_text("detached HEAD\n")
-                (gitdir / "HEAD").write_text("0" * 40 + "\n")
+                    (gitdir / "rebase-merge" / "head-name").write_text("detached HEAD\n", encoding="utf-8", newline="")
+                (gitdir / "HEAD").write_text("0" * 40 + "\n", encoding="utf-8", newline="")
                 return
             if scenario == "head_name_alias":
                 (self.gitdir(worktree) / "rebase-merge").mkdir()
-                (self.gitdir(worktree) / "rebase-merge" / "head-name").write_text("refs/heads/alias\n")
+                (self.gitdir(worktree) / "rebase-merge" / "head-name").write_text("refs/heads/alias\n", encoding="utf-8", newline="")
                 return
             if scenario == "operation_dir_symlink":
                 # The linked directory holds Git's exact literal, but its source is untrusted.
                 target = self.root / "detached-state"
                 target.mkdir()
-                (target / "head-name").write_text("detached HEAD\n")
+                (target / "head-name").write_text("detached HEAD\n", encoding="utf-8", newline="")
                 (self.gitdir(worktree) / "rebase-merge").symlink_to(target, target_is_directory=True)
                 return
             am = ("am_marker_only", "am_counter_extra_line", "am_counter_range")
@@ -218,24 +218,24 @@ class BranchCleanupTests(unittest.TestCase):
                 (self.gitdir(worktree) / state).mkdir()
                 if scenario == "am_marker_only":
                     # A bare applying marker without am's patch counters is truncated state.
-                    (self.gitdir(worktree) / state / "applying").write_text("")
+                    (self.gitdir(worktree) / state / "applying").write_text("", encoding="utf-8", newline="")
                 if scenario in ("am_counter_extra_line", "am_counter_range"):
                     # Git writes one number per counter with 1 <= next <= last.
                     counters = {"am_counter_extra_line": ("1\njunk\n", "1\n"), "am_counter_range": ("2\n", "1\n")}
-                    (self.gitdir(worktree) / state / "applying").write_text("")
-                    (self.gitdir(worktree) / state / "next").write_text(counters[scenario][0])
-                    (self.gitdir(worktree) / state / "last").write_text(counters[scenario][1])
+                    (self.gitdir(worktree) / state / "applying").write_text("", encoding="utf-8", newline="")
+                    (self.gitdir(worktree) / state / "next").write_text(counters[scenario][0], encoding="utf-8", newline="")
+                    (self.gitdir(worktree) / state / "last").write_text(counters[scenario][1], encoding="utf-8", newline="")
                 if scenario == "head_name_extra_line":
                     # Command substitution would strip the extra line and accept the literal.
-                    (self.gitdir(worktree) / state / "head-name").write_text("detached HEAD\n\n")
+                    (self.gitdir(worktree) / state / "head-name").write_text("detached HEAD\n\n", encoding="utf-8", newline="")
                 if scenario == "head_name_symlink":
                     # The link target holds Git's exact literal, but its source is untrusted.
                     literal = self.root / "detached-literal"
-                    literal.write_text("detached HEAD\n")
+                    literal.write_text("detached HEAD\n", encoding="utf-8", newline="")
                     (self.gitdir(worktree) / state / "head-name").symlink_to(literal)
                 if scenario == "invalid_head_name":
                     # Only Git's exact literal is accepted; a near miss stays untrusted.
-                    (self.gitdir(worktree) / state / "head-name").write_text("detached HEAD \n")
+                    (self.gitdir(worktree) / state / "head-name").write_text("detached HEAD \n", encoding="utf-8", newline="")
             else:
                 worktree.rename(self.root / "moved worktree")
                 if scenario == "missing_worktree":
@@ -259,36 +259,36 @@ class BranchCleanupTests(unittest.TestCase):
             return
         if scenario == "bisect":
             for number in range(1, 6):
-                (worktree / "file").write_text(f"{number}\n")
+                (worktree / "file").write_text(f"{number}\n", encoding="utf-8", newline="")
                 self.git("commit", "-qam", f"change {number}", directory=worktree)
             self.git("bisect", "start", directory=worktree)
             self.git("bisect", "bad", "HEAD", directory=worktree)
             self.git("bisect", "good", self.base, directory=worktree)
             gitdir = Path(self.git("rev-parse", "--absolute-git-dir", directory=worktree).stdout.strip())
-            self.assertEqual((gitdir / "BISECT_START").read_text().strip(), branch)
+            self.assertEqual((gitdir / "BISECT_START").read_text(encoding="utf-8").strip(), branch)
         else:
             self.conflicting_commits(worktree)
             state = "rebase-apply" if scenario == "rebase_apply" else "rebase-merge"
             self.start_rebase(worktree, state)
-            self.assertEqual((self.gitdir(worktree) / state / "head-name").read_text().strip(), f"refs/heads/{branch}")
+            self.assertEqual((self.gitdir(worktree) / state / "head-name").read_text(encoding="utf-8").strip(), f"refs/heads/{branch}")
         self.assertIn("detached", self.git("worktree", "list", "--porcelain").stdout)
 
     def write_am_state(self, gitdir: Path, resume_records: bool = True, author: str = None) -> None:
         state = gitdir / "rebase-apply"
         state.mkdir()
         for name, value in (("applying", ""), ("next", "1\n"), ("last", "1\n")):
-            (state / name).write_text(value)
+            (state / name).write_text(value, encoding="utf-8", newline="")
         if resume_records:
-            (state / "final-commit").write_text("fixture\n")
-            (state / "author-script").write_text(AUTHOR_SCRIPT if author is None else author)
+            (state / "final-commit").write_text("fixture\n", encoding="utf-8", newline="")
+            (state / "author-script").write_text(AUTHOR_SCRIPT if author is None else author, encoding="utf-8", newline="")
 
     def gitdir(self, worktree: Path) -> Path:
         return Path(self.git("rev-parse", "--absolute-git-dir", directory=worktree).stdout.strip())
 
     def conflicting_commits(self, worktree: Path) -> None:
-        (worktree / "file").write_text("branch\n")
+        (worktree / "file").write_text("branch\n", encoding="utf-8", newline="")
         self.git("commit", "-qam", "branch change", directory=worktree)
-        (self.repo / "file").write_text("default\n")
+        (self.repo / "file").write_text("default\n", encoding="utf-8", newline="")
         self.git("commit", "-qam", "default change")
 
     def start_rebase(self, worktree: Path, backend: str) -> None:
@@ -314,8 +314,7 @@ class BranchCleanupTests(unittest.TestCase):
             wrapper.write_text(
                 "#!/bin/sh\n"
                 'if [ "$1" = worktree ] && [ "$2" = list ]; then exit 77; fi\n'
-                f"exec {shlex.quote(real_git)} \"$@\"\n"
-            )
+                f"exec {shlex.quote(Path(real_git).as_posix())} \"$@\"\n", encoding="utf-8", newline="")
             wrapper.chmod(0o700)
         result = run(["bash", "-c", documented_command()], self.repo, environment)
         current = self.git("rev-parse", "--verify", "refs/heads/target", check=False)
@@ -328,8 +327,13 @@ class BranchCleanupTests(unittest.TestCase):
         )
 
 
+SYMLINK_SCENARIOS = {"head_name_symlink", "operation_dir_symlink"}
+
+
 def make_test(scenario: str):
     def test(self: BranchCleanupTests) -> None:
+        if scenario in SYMLINK_SCENARIOS and not symlinks_supported():
+            self.skipTest("creating symlinks needs Developer Mode or elevation on Windows")
         self.check_scenario(scenario)
 
     return test
