@@ -25,13 +25,16 @@ def is_wsl_launcher(path: str) -> bool:
 def resolve_bash(environ: dict[str, str] | None = None, which=shutil.which) -> str:
     """HARNESS_BASH if set and non-empty, else bash on PATH, as an absolute path; the WSL launcher is rejected."""
     environ = os.environ if environ is None else environ
-    bash = environ.get("HARNESS_BASH") or which("bash")
+    bash = environ.get("HARNESS_BASH") or "bash"
+    if PureWindowsPath(bash).name == bash:  # a bare name, on either path syntax
+        bash = which(bash)
     if not bash:
         raise RuntimeError("bash not found: install Git Bash or set HARNESS_BASH to its bash.exe")
+    # Absolute, because a relative program path is resolved against each fixture's cwd.
+    bash = os.path.abspath(bash)
     if is_wsl_launcher(bash):
         raise RuntimeError(f"{bash} starts WSL, not Git Bash: set HARNESS_BASH to Git Bash's bash.exe")
-    # Absolute, because a relative program path is resolved against each fixture's cwd.
-    return os.path.abspath(bash)
+    return bash
 
 
 @functools.cache

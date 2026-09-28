@@ -42,6 +42,10 @@ class BashResolutionTests(unittest.TestCase):
         self.assertEqual(support.resolve_bash({"HARNESS_BASH": ""}, lambda name: "/usr/bin/bash"),
                          os.path.abspath("/usr/bin/bash"))
 
+    def test_bare_name_override_is_looked_up_on_path(self) -> None:
+        self.assertEqual(support.resolve_bash({"HARNESS_BASH": "bash.exe"}, {"bash.exe": "/opt/git/bin/bash.exe"}.get),
+                         os.path.abspath("/opt/git/bin/bash.exe"))
+
     def test_relative_override_is_made_absolute(self) -> None:
         # Fixtures run in other directories, where a relative program path would not resolve.
         self.assertEqual(support.resolve_bash({"HARNESS_BASH": "tools/bash"}, lambda name: None),
@@ -62,6 +66,12 @@ class BashResolutionTests(unittest.TestCase):
                 support.resolve_bash({}, lambda name: launcher)
             with self.subTest(override=launcher), self.assertRaisesRegex(RuntimeError, "WSL"):
                 support.resolve_bash({"HARNESS_BASH": launcher}, lambda name: "/usr/bin/bash")
+
+    def test_relative_override_into_system32_is_rejected(self) -> None:
+        # Checked on the absolute path: "bash.exe" run from C:\Windows\System32 is the launcher.
+        with mock.patch("os.path.abspath", return_value=r"C:\Windows\System32\bash.exe"), \
+                self.assertRaisesRegex(RuntimeError, "WSL"):
+            support.resolve_bash({"HARNESS_BASH": r".\bash.exe"}, lambda name: None)
 
     def test_git_bash_below_a_system32_folder_is_accepted(self) -> None:
         for bash in (r"D:\tools\System32\PortableGit\usr\bin\bash.exe", r"C:\Windows\System32\bash-helper.exe"):
