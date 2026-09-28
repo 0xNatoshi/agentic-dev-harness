@@ -50,6 +50,9 @@
   "profiles/hermes-development.md": [
     "adaptations/hermes-development.md"
   ],
+  "scripts/install.py": [
+    "install.py"
+  ],
   "skills/github-workflow/SKILL.md": [
     "skills/github-workflow/SKILL.md"
   ],
