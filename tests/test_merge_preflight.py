@@ -504,6 +504,24 @@ TEXT_CASES = (
     Case("cleared go to the next task", 0, "Merge PRs after CI passes, then go to the next task."),
     Case("cleared PRs need a description", 0, "PRs need a description and a linked issue."),
     Case("cleared keep PRs small", 0, "Keep PRs small and focused."),
+    # Review round 2: a bare 'go' stays an approval signal, as on the release before.
+    Case("caught merges only after go-ahead", 2, "Merges only after go-ahead."),
+    Case("caught merge after go", 2, "Merge after go."),
+    Case("caught merges wait for go", 2, "Merges wait for go."),
+    Case("caught before merging wait for go", 2, "Before merging, wait for go."),
+    Case("caught explicit go before merging", 2, "Get explicit go before merging."),
+    Case("caught possessive go", 2, "Merging requires the maintainer’s go."),
+    Case("caught go-ahead required", 2, "Go-ahead required before merging."),
+    Case("caught fusion after go", 2, "Fusion uniquement après go."),
+    Case("caught go across list items", 2, "- Merge only after\n- explicit go"),
+    Case("caught go after cleared method rule", 2, "Never use rebase merges; use squash merges.\n\nNeed explicit go."),
+    Case("caught label until approval", 2, "Merging: until I say go."),
+    Case("caught label not until approval", 2, "Merge PRs: not until I approve."),
+    Case("cleared merge and go home", 0, "Merge the PR and go home."),
+    Case("cleared nothing merged without CI", 0, "Nothing is merged without CI passing."),
+    Case("cleared nothing lands before CI", 0, "Nothing lands on main before CI passes."),
+    Case("cleared frozen lockfile", 0, "Merge PRs with a frozen lockfile."),
+    Case("cleared frozen lockfiles before merging", 0, "Use frozen lockfiles in CI before merging."),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -541,8 +559,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 425 or len({case.name for case in ALL_CASES}) != 425:
-    raise RuntimeError("Merge fixture inventory must contain 425 unique cases")
+if len(ALL_CASES) != 442 or len({case.name for case in ALL_CASES}) != 442:
+    raise RuntimeError("Merge fixture inventory must contain 442 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

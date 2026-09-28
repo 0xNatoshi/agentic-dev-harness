@@ -127,14 +127,14 @@ PAUSE_WORD = r'\b(?:suspend\w*|paused?|on\s+hold|disabled|forbidden|blocked|en\s
 # pushes are not allowed; merge through PRs' it restricts something else.
 BAN_WORD = (r'(?:\b(?:prohibit\w*|disallow\w*|banned|défendu\w*)\b|(?:\bnot|n[’\x27]t)\s+(?:allowed|permitted|authori[sz]ed)\b'
             r'|\b(?:ne\s+|n[’\x27])(?:\w+\s+){0,2}?pas\s+(?:autoris\w*|permis\w*))')
-FREEZE_WORD = r'\b(?:frozen|freeze|gel(?:é|ée|és|ées)?)\b'
+# 'A frozen lockfile' is a package-manager setting.
+FREEZE_WORD = r'\b(?:frozen|freeze|gel(?:é|ée|és|ées)?)\b(?![\s-]+lock)'
 FIRST_PERSON = r'\bi\b(?!\.e\b)|\bj(?=[’\x27])|\b(?:me|my|mine|we|us|our|je|moi|mon|ma|mes|nous|notre|nos)\b'
-# 'review', 'ok' and 'go' said by someone: 'my review', 'mon feu vert', 'until I say go'.
+# 'review' and 'ok' only when said by someone: 'my review', 'until I say ok'. A bare 'go' or
+# 'go-ahead' is a signal, as on the release before; 'then go to the next task' is a verb.
 APPROVAL_WORD = (r'\b(?:approv\w*|agreement|consent\w*|permission|authori[sz]\w*|sign(?:s|ed)?[ -]?off|green\s+light'
                  r'|feu\s+vert|accord|confirmation|autoris\w*|approbation'
-                 # 'go' only as a given signal: 'until I say go', 'wait for the go', 'mon go'; not 'then go to'.
-                 r'|(?:(?:say|says|said|give|gives|gave|dis|dit|donne\w*)\s+(?:the\s+|a\s+|le\s+|un\s+|mon\s+)?'
-                 r'|(?:the|a|my|our|your|mon|ton|notre|votre|le|un)\s+)go'
+                 r'|go(?![\s-]+(?:to|home|back|through|over|on|live|into|ahead\s+and)\b)'
                  r'|(?:my|our|mon|ma|mes|notre|nos)\s+(?:own\s+)?(?:reviews?|ok(?:ay)?|relecture|revue)'
                  r'|(?:i|we)\s+(?:say|give)\s+(?:so|ok(?:ay)?))\b')
 # Someone who decides: 'until I say go', 'until you hear from me', 'until we approve'.
@@ -186,6 +186,8 @@ HOLD_BRANCHES = (
     (r'\b(?:stop|hold|wait|attend\w*)\b[^.!?]{0,90}' + MERGE_WORD, 'mh'),
     # 'without' is left to the negated forms: 'merged without another ritual go' grants autonomy.
     (MERGE_WORD + r'[^.!?;:]{0,90}\b(?:until|unless|jusqu\w*|tant\s+que)\b[^.!?;:]{0,90}' + APPROVAL_OR_FIRST, 'mux'),
+    # A label and its condition: 'Merging: until I say go.'
+    (MERGE_WORD + r'[^.!?;:]{0,40}:[\s*_`]*(?:not\s+)?(?:until|unless|jusqu\w*|tant\s+que)\b[^.!?;:]{0,90}' + APPROVAL_OR_FIRST, 'mux'),
     (MERGE_WORD + r'[^.!?;:]{0,60}' + BAN_WORD + r'|' + BAN_WORD + r'[^.!?;:,]{0,60}' + MERGE_WORD, 'mn'),
     # A label and its rule: '**Merging:** not allowed', 'Prohibited: merging PRs'.
     (MERGE_WORD + r'[^.!?;:]{0,40}:[\s*_`]*' + BAN_WORD + r'|' + BAN_WORD + r'[\s*_`]*:[^.!?;]{0,60}' + MERGE_WORD, 'mn'),
@@ -196,9 +198,9 @@ HOLD_BRANCHES = (
     # 'Merge once the owner approves', 'PRs get merged when I say so'.
     (MERGE_WORD + r'[^.!?]{0,60}\b(?:once|when|after)\s+' + DECIDER_OR_I + r'\s+(?:\w+\s+)?' + DECIDER_ACT
      + r'|\b(?:once|when|after)\s+' + DECIDER_OR_I + r'\s+(?:\w+\s+)?' + DECIDER_ACT + r'[^.!?]{0,60}' + MERGE_WORD, 'md'),
-    # 'Nothing is merged without my consent', 'Aucune fusion sans mon feu vert'.
+    # 'Nothing is merged without my consent', 'Aucune fusion sans mon feu vert'; not 'without CI passing'.
     (r'\b(?:nothing|nobody|no\s+one|aucune?|rien|personne)\b[^.!?;:]{0,40}(?:' + MERGE_WORD + r'|' + INTEGRATION_WORD.pattern + r')'
-     + r'[^.!?;:]{0,60}\b(?:without|sans|until|unless|jusqu\w*|before|avant)\b', 'mg'),
+     + r'[^.!?;:]{0,60}\b(?:without|sans|until|unless|jusqu\w*|before|avant)\b[^.!?;:]{0,60}(?:' + APPROVAL_OR_FIRST + r'|\b' + DECIDER + r')', 'mg'),
     # 'Approval required for merges'; 'Approval is not required to merge' grants autonomy.
     (APPROVAL_WORD + r'\s+(?:(?:is|are|est|sont)\s+)?(?:required|needed|mandatory|requise?s?|obligatoires?|nécessaires?)\b'
      r'[^.!?]{0,90}' + MERGE_WORD, 'arm'),
