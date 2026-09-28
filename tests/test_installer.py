@@ -540,6 +540,15 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(value["config_root"], json.loads(result.stderr)["details"]["outside"])
         self.assertFalse(os.path.lexists(value["config_root"]))
 
+    def test_trace_hook_outside_the_temporary_directory_blocks(self):
+        before = self.v52_layout()
+        trace = os.path.abspath(os.sep + "nonexistent-harness-trace")
+        result = self.apply(self.plan(), env={"DEV_HARNESS_INSTALL_TEST_TRACE": trace})
+        self.assert_refused(result, 2)
+        self.assertIn(trace, json.loads(result.stderr)["details"]["outside"])
+        self.assertFalse(os.path.lexists(trace))
+        self.assertEqual(snapshot(self.target), before)
+
     def test_rollback_preparation_failure_is_a_refusal(self):
         self.v52_layout()
         receipt_path = self.installed()
@@ -742,6 +751,9 @@ class InstallerTests(unittest.TestCase):
         own = 'echo "$PPID 5000 python3 install.py recover --runtime codex"; echo "1 0 /sbin/init"; '
         cases = (("active", own + "echo '5000 1 /bin/zsh'; echo '42 1 /opt/homebrew/bin/claude'", 2),
                  ("launched by a consumer", own + "echo '5000 1 /opt/homebrew/bin/claude'", 2),
+                 ("launched by a consumer prompt naming the script", own + "echo '5000 1 /opt/homebrew/bin/claude -p run install.py apply'", 2),
+                 ("launched by codex exec", own + "echo '5000 1 codex exec python3 install.py apply'", 2),
+                 ("launched by a node consumer", own + "echo '5000 1 node /opt/lib/claude-code/cli.js -p install.py'", 2),
                  ("another installer naming codex", own + "echo '5000 1 /bin/zsh'; echo '77 1 python3 install.py recover --runtime codex'", 2),
                  ("failing", "exit 1", 2), ("empty", "exit 0", 2), ("without this process", "echo '1 0 /sbin/init'", 2),
                  ("idle behind a wrapper", own + "echo '5000 5001 /bin/sh -c python3 install.py recover --runtime codex'; "

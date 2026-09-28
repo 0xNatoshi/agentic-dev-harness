@@ -144,6 +144,8 @@ def require_test_home(locations: "Locations") -> None:
         return
     temporary = tempfile.gettempdir()
     paths = [locations.home, locations.config, locations.skills, locations.state, *locations.roots]
+    if hooks.get(TEST_TRACE):
+        paths.append(os.path.abspath(hooks[TEST_TRACE]))
     outside = [str(path) for path in paths if not contains(temporary, str(path)) or contains(str(path), temporary)]
     if outside:
         raise Blocked("Installer test hooks are set outside a temporary test home; unset them",
@@ -660,9 +662,11 @@ def is_consumer(command_line: str) -> bool:
 def own_lines_removed(lines) -> list:
     """Drop this installer's line and the launchers above it (`py -3 install.py ...`, `sh -c ...`).
 
-    Each line is `PID PPID COMMAND`. Only ancestors whose command line names this script are dropped,
-    so a consumer that launched the installer still counts. The listing must include this process:
-    an empty or truncated listing must not read as "no consumer".
+    Each line is `PID PPID COMMAND`. An ancestor is dropped only when its command line names this script
+    and the words before that name do not name a consumer. The arguments after it can name the runtime
+    (`--runtime codex`), while `claude -p "run install.py"` or `node .../claude-code/cli.js` is a live
+    consumer and still counts. The listing must include this process: an empty or truncated listing
+    must not read as "no consumer".
     """
     table, unparsed = {}, []
     for line in lines:
@@ -677,7 +681,9 @@ def own_lines_removed(lines) -> list:
     script = os.path.basename(os.path.abspath(__file__)).lower()
     dropped, pid = {own}, table[own][0]
     while pid in table and pid not in dropped:
-        if script in table[pid][1].lower():
+        words = table[pid][1].split()
+        named = [index for index, word in enumerate(words) if script in word.lower()]
+        if named and not is_consumer(" ".join(words[: named[0]])):
             dropped.add(pid)
         pid = table[pid][0]
     return [command for pid, (_, command) in table.items() if pid not in dropped] + unparsed
