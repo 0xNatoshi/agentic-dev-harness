@@ -522,6 +522,21 @@ TEXT_CASES = (
     Case("cleared nothing lands before CI", 0, "Nothing lands on main before CI passes."),
     Case("cleared frozen lockfile", 0, "Merge PRs with a frozen lockfile."),
     Case("cleared frozen lockfiles before merging", 0, "Use frozen lockfiles in CI before merging."),
+    # Codex review on bee23ba: possessive roles, lifted states and lockfile freezes.
+    Case("caught reserved for the repository's owner", 2, "Merging is reserved for the repository’s owner."),
+    Case("cleared PRs not on hold", 0, "PRs are not on hold."),
+    Case("cleared main branch not frozen", 0, "The main branch is not frozen."),
+    Case("cleared PRs plus en attente", 0, "Les PR ne sont plus en attente."),
+    Case("cleared freeze the lockfile", 0, "Freeze the lockfile before merging."),
+    Case("cleared freeze dependencies", 0, "Freeze dependencies before merging."),
+    # Delta recheck on bee23ba: 'go' as a noun before on/through/ahead, named deciders, freeze locks.
+    Case("caught go on Slack", 2, "Get the go on Slack before merging."),
+    Case("caught go-ahead and green CI", 2, "Merge only after the go-ahead and a green CI."),
+    Case("caught go through Slack", 2, "Merging requires my go through Slack."),
+    Case("caught nothing merged without a named person", 2, "Nothing gets merged without Alice."),
+    Case("caught aucune fusion sans validation", 2, "Aucune fusion sans validation humaine."),
+    Case("caught merge freeze lockdown", 2, "Merge freeze lockdown in effect."),
+    Case("caught freeze locks merges", 2, "A freeze locks all merges until further notice."),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -559,8 +574,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 442 or len({case.name for case in ALL_CASES}) != 442:
-    raise RuntimeError("Merge fixture inventory must contain 442 unique cases")
+if len(ALL_CASES) != 455 or len({case.name for case in ALL_CASES}) != 455:
+    raise RuntimeError("Merge fixture inventory must contain 455 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

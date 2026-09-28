@@ -127,14 +127,16 @@ PAUSE_WORD = r'\b(?:suspend\w*|paused?|on\s+hold|disabled|forbidden|blocked|en\s
 # pushes are not allowed; merge through PRs' it restricts something else.
 BAN_WORD = (r'(?:\b(?:prohibit\w*|disallow\w*|banned|défendu\w*)\b|(?:\bnot|n[’\x27]t)\s+(?:allowed|permitted|authori[sz]ed)\b'
             r'|\b(?:ne\s+|n[’\x27])(?:\w+\s+){0,2}?pas\s+(?:autoris\w*|permis\w*))')
-# 'A frozen lockfile' is a package-manager setting.
-FREEZE_WORD = r'\b(?:frozen|freeze|gel(?:é|ée|és|ées)?)\b(?![\s-]+lock)'
+# 'A frozen lockfile' and 'Freeze the lockfile' are package-manager settings.
+FREEZE_WORD = (r'\b(?:frozen|freeze|gel(?:é|ée|és|ées)?)\b'
+               r'(?![\s-]+(?:(?:the|your|our|a|all|any)\s+)?(?:lock[\s-]*files?|dependenc\w*|deps|versions?|pins?)\b)')
 FIRST_PERSON = r'\bi\b(?!\.e\b)|\bj(?=[’\x27])|\b(?:me|my|mine|we|us|our|je|moi|mon|ma|mes|nous|notre|nos)\b'
 # 'review' and 'ok' only when said by someone: 'my review', 'until I say ok'. A bare 'go' or
 # 'go-ahead' is a signal, as on the release before; 'then go to the next task' is a verb.
 APPROVAL_WORD = (r'\b(?:approv\w*|agreement|consent\w*|permission|authori[sz]\w*|sign(?:s|ed)?[ -]?off|green\s+light'
                  r'|feu\s+vert|accord|confirmation|autoris\w*|approbation'
-                 r'|go(?![\s-]+(?:to|home|back|through|over|on|live|into|ahead\s+and)\b)'
+                 # Only 'go to', 'go home' and 'go back' are always the verb: 'the go on Slack' is a noun.
+                 r'|go(?![\s-]+(?:to|home|back)\b)'
                  r'|(?:my|our|mon|ma|mes|notre|nos)\s+(?:own\s+)?(?:reviews?|ok(?:ay)?|relecture|revue)'
                  r'|(?:i|we)\s+(?:say|give)\s+(?:so|ok(?:ay)?))\b')
 # Someone who decides: 'until I say go', 'until you hear from me', 'until we approve'.
@@ -148,7 +150,7 @@ INTEGRATION_WORD = re.compile(r'\b(?:integrat\w*|lands?|landed|landing|ships?|sh
 # 'PRs are shipped', 'Hold all PRs'. A PR named in an earlier clause does not make 'its own
 # integration' a merge, nor 'no approval needed when they hold' a hold on it.
 # Who decides a reserved merge: the speaker, or a named human role.
-DECIDER = (r'(?:me|us|moi|nous|(?:the\s+|a\s+)?(?:repo(?:sitory)?\s+|project\s+)?(?:owners?|maintainers?|admins?|humans?)'
+DECIDER = (r'(?:me|us|moi|nous|(?:the\s+|a\s+)?(?:(?:repo(?:sitory)?|project)(?:[’\x27]s)?\s+)?(?:owners?|maintainers?|admins?|humans?)'
            r'|(?:le\s+|la\s+|les\s+|un\s+|l[’\x27])?(?:propriétaires?|mainteneu(?:r|rs|se|ses)|humains?))\b(?![’\x27]s\b)')
 # Who approves or is asked: 'Merge once the owner approves', 'Ping me before merging'.
 DECIDER_OR_I = r'(?:i|we|' + DECIDER + r')'
@@ -163,13 +165,15 @@ HOLD_VERB = re.compile(r'\b(?:hold\w*|paus\w*|freez\w*|frozen|wait\w*|suspend\w*
 # A held pull request or frozen branch needs no merge word or approver: 'All PRs are on hold.',
 # 'Hold PRs.', 'Every PR needs my approval.', 'The main branch is frozen.'
 PR_NOUN = r'\b(?:prs?|mrs?|pull[\s-]+requests?|merge[\s-]+requests?|demandes?\s+de\s+fusion)\b'
+# 'PRs are not on hold' and 'The main branch is not frozen' lift the state instead.
+NOT_HELD = r'(?!(?:not|no|never|pas|plus|jamais)\b)'
 PR_HELD = re.compile(
-    PR_NOUN + r'(?:\s+\w+){0,2}?\s+(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:\w+\s+)?'
+    PR_NOUN + r'(?:\s+\w+){0,2}?\s+(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:' + NOT_HELD + r'\w+\s+)?'
     r'(?:on\s+hold|paused|suspended|frozen|en\s+attente|suspendue?s?|gelée?s?)\b'
     r'|^\W*(?:hold|pause|freeze|suspend)\s+(?:all\s+|every\s+|the\s+|any\s+)?(?:open\s+|pending\s+)?' + PR_NOUN
     + r'|\bkeep\s+(?:all\s+|the\s+)?(?:open\s+)?' + PR_NOUN + r'\s+on\s+hold\b'
     + r'|' + PR_NOUN + r'[^.!?;:]{0,30}\b(?:needs?|requires?|nécessitent|nécessite)\b[^.!?;:]{0,40}' + APPROVAL_WORD
-    + r'|\b(?:branch\w*|branche\w*|main|master|trunk)\b(?:\s+\w+){0,2}?\s+(?:(?:is|are|est|sont)\s+)?(?:frozen|gel(?:é|ée|és|ées))\b')
+    + r'|\b(?:branch\w*|branche\w*|main|master|trunk)\b(?:\s+' + NOT_HELD + r'\w+){0,2}?\s+(?:(?:is|are|est|sont)\s+)?(?:frozen|gel(?:é|ée|és|ées))\b')
 # Restrictions that carry pause, approval or wait wording. Unlike a bare negation
 # ('- Do not add dependencies' beside '- Merge requests use squash'), they are
 # also read across the items of one list or the rows of one table.
@@ -194,13 +198,16 @@ HOLD_BRANCHES = (
     (MERGE_WORD + r'[^.!?;]{0,40}' + FREEZE_WORD + r'|' + FREEZE_WORD + r'[^.!?;]{0,30}' + MERGE_WORD, 'mz'),
     # 'PRs must be approved before merging', 'Merges must be approved by me'.
     (r'\b(?:must|shall|needs?\s+to|ha(?:s|ve)\s+to)\s+be\s+(?:approved|authori[sz]ed|signed\s+off)\b[^.!?]{0,60}' + MERGE_WORD
-     + r'|' + MERGE_WORD + r'[^.!?]{0,60}\b(?:must|shall|needs?\s+to|ha(?:s|ve)\s+to)\s+be\s+(?:approved|authori[sz]ed|signed\s+off)\b', 'ma'),
+     + r'|' + MERGE_WORD + r'[^.!?]{0,60}\b(?:must|shall|needs?\s+to|ha(?:s|ve)\s+to)\s+be\s+(?:approved|authori[sz]ed|signed\s+off)\b', 'mae'),
     # 'Merge once the owner approves', 'PRs get merged when I say so'.
     (MERGE_WORD + r'[^.!?]{0,60}\b(?:once|when|after)\s+' + DECIDER_OR_I + r'\s+(?:\w+\s+)?' + DECIDER_ACT
      + r'|\b(?:once|when|after)\s+' + DECIDER_OR_I + r'\s+(?:\w+\s+)?' + DECIDER_ACT + r'[^.!?]{0,60}' + MERGE_WORD, 'md'),
-    # 'Nothing is merged without my consent', 'Aucune fusion sans mon feu vert'; not 'without CI passing'.
+    # 'Nothing is merged without my consent', 'Aucune fusion sans mon feu vert'; not 'without CI passing'
+    # unless an approver follows ('without CI and my approval').
     (r'\b(?:nothing|nobody|no\s+one|aucune?|rien|personne)\b[^.!?;:]{0,40}(?:' + MERGE_WORD + r'|' + INTEGRATION_WORD.pattern + r')'
-     + r'[^.!?;:]{0,60}\b(?:without|sans|until|unless|jusqu\w*|before|avant)\b[^.!?;:]{0,60}(?:' + APPROVAL_OR_FIRST + r'|\b' + DECIDER + r')', 'mg'),
+     + r'[^.!?;:]{0,60}\b(?:without|sans|until|unless|jusqu\w*|before|avant)\b'
+     + r'(?:(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:green\s+)?(?:ci|checks?|tests?|builds?|lint\w*|status\s+checks?)\b)'
+     + r'|[^.!?;:]{0,60}(?:' + APPROVAL_OR_FIRST + r'|\b' + DECIDER + r'))', 'mg'),
     # 'Approval required for merges'; 'Approval is not required to merge' grants autonomy.
     (APPROVAL_WORD + r'\s+(?:(?:is|are|est|sont)\s+)?(?:required|needed|mandatory|requise?s?|obligatoires?|nécessaires?)\b'
      r'[^.!?]{0,90}' + MERGE_WORD, 'arm'),
@@ -231,7 +238,9 @@ RUN_WORDS = {
     'k': re.compile(r'\b(?:ask|consult\w*|check|confirm|ping|demande\w*)\b'),
     't': re.compile(r'\b' + DECIDER),
     'd': re.compile(r'\b' + DECIDER_ACT),
-    'g': re.compile(r'\b(?:nothing|nobody|no\s+one|aucune?|rien|personne)\b')}
+    'g': re.compile(r'\b(?:nothing|nobody|no\s+one|aucune?|rien|personne)\b'),
+    # A bare 'go' is an approval word, so 'must be approved' needs its own class.
+    'e': re.compile(r'\b(?:approved|authori[sz]ed|signed)\b')}
 RUN_BRANCHES = tuple((re.compile(pattern), words) for pattern, words in HOLD_BRANCHES)
 # A HOLD_BRANCHES match has no sentence punctuation and, for ordinary word
 # lengths, starts fewer than RUN_WINDOW characters before its last item, so a
