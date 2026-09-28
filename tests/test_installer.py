@@ -467,6 +467,45 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(snapshot(target), before)
         self.assertEqual(snapshot(legacy), legacy_before)
 
+    def test_recover_restores_a_lost_or_changed_retired_duplicate_from_its_backup(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        for label in ("lost", "changed"):
+            with self.subTest(label):
+                for path in (self.home / ".agents", self.home / ".codex"):
+                    shutil.rmtree(path, ignore_errors=True)
+                before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+                plan = self.plan("codex")
+                crashed = self.apply(plan, "--retire-duplicate", legacy, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:moved-0"})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                retired = next((self.home / ".agents" / "dev-harness-install").glob("*/duplicates/0/github-workflow"))
+                if label == "lost":
+                    shutil.rmtree(retired)
+                else:
+                    (retired / "local-notes.md").write_bytes(b"changed while retired\n")
+                for attempt in range(2):
+                    report = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+                    self.assertEqual(report.returncode, 0, report.stderr)
+                self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+                if label == "changed":
+                    self.assertTrue((retired / "local-notes.md").is_file())
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_kept_directories_keep_their_mode(self):
+        self.v52_layout()
+        private = self.target / "private-notes"
+        (private / "drafts").mkdir(parents=True)
+        (private / "drafts" / "idea.md").write_bytes(b"private\n")
+        (private / "drafts").chmod(0o750)
+        private.chmod(0o700)
+        before = snapshot(self.target)
+        receipt_path = self.installed()
+        self.assertEqual(stat.S_IMODE(os.stat(private).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(private / "drafts").st_mode), 0o750)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual(snapshot(self.target), before)
+
     def test_rerun_recover_sets_a_stale_restoration_copy_aside(self):
         before, parked = self.crash_after_parking()
         shutil.rmtree(parked)

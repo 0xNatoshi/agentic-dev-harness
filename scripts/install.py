@@ -816,14 +816,27 @@ class Operation:
             self.save(f"moved-{index}")
 
     def undo_moves(self) -> None:
+        op = self.record["operation"]
         for index, move in reversed(list(enumerate(self.record["moves"]))):
             source, destination = Path(move["from"]), Path(move["to"])
-            if exists(destination) and not exists(source):
-                if differences(move["inventory"], inventory(destination)):
-                    raise Incomplete("A moved copy no longer matches its inventory", {"path": str(destination)})
-                rename(destination, source, self.record["operation"] + f":undo-move-{index}")
-            elif exists(destination) or not exists(source):
-                raise Incomplete("A moved copy cannot be located unambiguously", {"from": str(source), "to": str(destination)})
+            if exists(source):
+                if differences(move["inventory"], inventory(source)) or (
+                        exists(destination) and str(destination) not in self.record.get("moved_drift", [])):
+                    raise Incomplete("A moved copy cannot be located unambiguously", {"from": str(source), "to": str(destination)})
+                continue
+            if exists(destination) and not differences(move["inventory"], inventory(destination)):
+                rename(destination, source, f"{op}:undo-move-{index}")
+                continue
+            # The moved copy is lost or changed. Apply kept a verified backup of each retired duplicate.
+            backup = move.get("backup")
+            if not backup or differences(move["inventory"], inventory(Path(backup))):
+                raise Incomplete("A moved copy is missing or changed and no verified backup exists",
+                                 {"from": str(source), "to": str(destination)})
+            if exists(destination):
+                # Keep the differing copy where it is, as for the target.
+                self.record.setdefault("moved_drift", []).append(str(destination))
+            self.restore_verified(Path(backup), move["inventory"], destination.parent.parent / f"restore-{index}" / source.name,
+                                  source, f"{op}:undo-move-restore-{index}")
 
     def undo(self) -> None:
         """Return to the origin state, verified; Incomplete when that cannot be established.
@@ -864,17 +877,21 @@ class Operation:
         backup = self.record.get("origin_backup")
         if not backup or differences(self.record["origin"], inventory(Path(backup))):
             raise Incomplete("The origin copy is missing and no verified backup exists", {"target": str(self.target)})
-        copy = Path(self.record["parked"]).parent / "restore" / SKILL
+        self.restore_verified(Path(backup), self.record["origin"], Path(self.record["parked"]).parent / "restore" / SKILL,
+                              self.target, self.record["operation"] + ":undo-restore")
+
+    def restore_verified(self, backup: Path, expected: dict, copy: Path, destination: Path, label: str) -> None:
+        """Copy a verified backup beside the transaction, check it, then rename it into place."""
         if exists(copy):
             # A copy left by an interrupted restoration; kept aside, never deleted.
             stale = copy.parent.parent / ("restore-stale-" + uuid.uuid4().hex[:8])
             os.rename(str(copy.parent), str(stale))
             self.record.setdefault("stale_restore_copies", []).append(str(stale))
-        copy_tree(Path(backup), copy)
+        copy_tree(backup, copy)
         fsync_tree(copy)
-        if differences(self.record["origin"], inventory(copy)):
-            raise Incomplete("The restoration copy does not match the origin inventory", {"path": str(copy)})
-        rename(copy, self.target, self.record["operation"] + ":undo-restore")
+        if differences(expected, inventory(copy)):
+            raise Incomplete("The restoration copy does not match its inventory", {"path": str(copy)})
+        rename(copy, destination, label)
 
 
 def copy_tree(source: Path, destination: Path) -> None:
@@ -1082,6 +1099,11 @@ def stage(staged: Path, package_files: dict, target: Path, before: dict, classif
             shutil.copy2(str(target / Path(*PurePosixPath(name).parts)), str(path))
         elif kind == "directory":
             path.mkdir(parents=True, exist_ok=True)
+    # Kept directories keep their mode, deepest first, after every write into them.
+    for name in sorted(before, key=lambda name: name.count("/"), reverse=True):
+        path = staged / Path(*PurePosixPath(name).parts)
+        if before[name]["type"] == "dir" and path.is_dir():
+            path.chmod(before[name]["mode"])
 
 
 def staging_problems(staged: dict, package_files: dict, before: dict, classification: dict) -> list:
@@ -1102,8 +1124,8 @@ def staging_problems(staged: dict, package_files: dict, before: dict, classifica
             elif name in before and classification.get(name) in PRESERVED and entry["mode"] != before[name]["mode"]:
                 problems.append({"path": name, "expected": before[name], "actual": entry})
         elif name in directories:
-            if entry["type"] != "dir":
-                problems.append({"path": name, "expected": "dir", "actual": entry})
+            if entry["type"] != "dir" or (before.get(name, {}).get("type") == "dir" and entry["mode"] != before[name]["mode"]):
+                problems.append({"path": name, "expected": before.get(name, "dir"), "actual": entry})
         else:
             problems.append({"path": name, "expected": None, "actual": entry})
     problems += [{"path": name, "expected": "dir", "actual": None} for name in sorted(directories - set(staged))]
@@ -1246,7 +1268,7 @@ def command_recover(options) -> dict:
             raise Incomplete(f"Restoration incomplete: {error}. Recovery data kept in {operation.path.parent}; "
                              "fix the cause and run `recover` again", getattr(error, "details", None))
         result = {"result": "restored", "operation": record["operation"], "journal": str(journal), "target": record["target"]}
-        for key in ("parked_drift", "stale_restore_copies"):
+        for key in ("parked_drift", "moved_drift", "stale_restore_copies"):
             if key in operation.record:
                 result[key] = operation.record[key]
         receipt = journal.parent / "receipt.json"
