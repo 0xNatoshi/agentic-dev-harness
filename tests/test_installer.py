@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 import zipfile
 
 from tests._fixture_support import symlinks_supported
@@ -92,11 +93,16 @@ class InstallerTests(unittest.TestCase):
         self.home.mkdir()
         self.processes = self.base / "processes.txt"
         self.processes.write_text("/usr/sbin/sshd -D\n/bin/zsh -l\n", encoding="utf-8")
+        # HOME and USERPROFILE point here unless a test sets them: nothing may be written to it.
+        self.guard = self.base / "guard"
+        self.guard.mkdir()
+        self.addCleanup(lambda: self.assertEqual(os.listdir(self.guard), [], "the installer wrote to the default home"))
 
     # Helpers.
     def run_installer(self, *arguments, env=None, processes=True):
         environment = {key: value for key, value in os.environ.items()
                        if key not in HOOKS and key not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
+        environment.update(HOME=str(self.guard), USERPROFILE=str(self.guard))
         if processes:
             environment["DEV_HARNESS_INSTALL_TEST_PROCESSES"] = str(self.processes)
         environment.update(env or {})
@@ -180,6 +186,51 @@ class InstallerTests(unittest.TestCase):
         archive = self.base / "tampered.zip"
         archive.write_bytes(self.archive.read_bytes() + b"\x00")
         self.assert_refused(self.run_installer("verify-package", archive, "--checksums", self.checksums), 1)
+
+    def test_verify_package_rejects_same_size_edit_and_bad_manifest_paths(self):
+        copy = self.base / "package"
+        shutil.copytree(self.package, copy)
+        name = "skills/github-workflow/" + next(item for item in self.skill_files if item != "SKILL.md")
+        data = bytearray((copy / name).read_bytes())
+        data[0] ^= 1
+        (copy / name).write_bytes(bytes(data))
+        result = self.run_installer("verify-package", copy, "--checksums", self.checksums)
+        self.assert_refused(result, 1)
+        self.assertIn(f"hash or size mismatch: {name}", json.loads(result.stderr)["details"])
+        shutil.copy2(self.package / name, copy / name)
+        manifest = json.loads((copy / "MANIFEST.json").read_text(encoding="utf-8"))
+        entry = manifest["files"]["skills/github-workflow/SKILL.md"]
+        for added, problem in (("skills/github-workflow/Skill.md", "colliding path: skills/github-workflow/Skill.md"),
+                               ("skills/../escape.md", "Unsafe package path: skills/../escape.md")):
+            with self.subTest(added):
+                changed = dict(manifest, files=dict(manifest["files"], **{added: entry}))
+                (copy / "MANIFEST.json").write_text(json.dumps(changed), encoding="utf-8")
+                result = self.run_installer("verify-package", copy, "--checksums", self.checksums)
+                self.assert_refused(result, 1)
+                self.assertIn(problem, json.loads(result.stderr)["details"])
+
+    def test_verify_package_rejects_crafted_archives(self):
+        prefix = self.package.name
+        manifest = (self.package / "MANIFEST.json").read_bytes()
+        link = zipfile.ZipInfo(prefix + "/link")
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        cases = {
+            "traversal": ([(prefix + "/MANIFEST.json", manifest), (prefix + "/../escape.md", b"x")], "Unsafe package path"),
+            "symlink entry": ([(prefix + "/MANIFEST.json", manifest), (link, b"/etc/passwd")], "not a regular file"),
+            "duplicate member": ([(prefix + "/MANIFEST.json", manifest), (prefix + "/MANIFEST.json", manifest)], "repeats a member name"),
+            "two top-level directories": ([(prefix + "/MANIFEST.json", manifest), ("other/file.md", b"x")], "exactly one top-level"),
+        }
+        for label, (members, problem) in cases.items():
+            with self.subTest(label):
+                archive = self.base / (label.replace(" ", "-") + ".zip")
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    with zipfile.ZipFile(archive, "w") as bundle:
+                        for member, data in members:
+                            bundle.writestr(member, data)
+                result = self.run_installer("verify-package", archive, "--checksums", self.checksums)
+                self.assert_refused(result, 1)
+                self.assertIn(problem, json.loads(result.stderr)["error"])
 
     # Planning.
     def test_plan_is_read_only_and_classifies_v52(self):
@@ -325,6 +376,7 @@ class InstallerTests(unittest.TestCase):
                 crashed = self.apply(plan, env={"DEV_HARNESS_INSTALL_TEST_CRASH": name})
                 self.assertEqual(crashed.returncode, 70, crashed.stderr)
                 self.assertLessEqual(len(visible_copies(*self.roots)), 1)
+                self.assertLessEqual(set(os.listdir(self.roots[0])), {"github-workflow"})
                 self.assertTrue((self.state() / "CURRENT").exists())
                 recover = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
                 self.assertEqual(recover.returncode, 0, recover.stderr)
@@ -352,6 +404,7 @@ class InstallerTests(unittest.TestCase):
                                              env={"DEV_HARNESS_INSTALL_TEST_CRASH": name})
                 self.assertEqual(crashed.returncode, 70, crashed.stderr)
                 self.assertLessEqual(len(visible_copies(*self.roots)), 1)
+                self.assertLessEqual(set(os.listdir(self.roots[0])), {"github-workflow"})
                 recover = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
                 self.assertEqual(recover.returncode, 0, recover.stderr)
                 state = json.loads(receipt_path.read_text(encoding="utf-8"))["state"]
@@ -362,6 +415,106 @@ class InstallerTests(unittest.TestCase):
                     self.assertEqual(snapshot(self.target), after)
                     self.assertEqual(state, "installed")
                 self.assertEqual(len(visible_copies(*self.roots)), 1)
+
+    def crash_after_parking(self):
+        before = self.v52_layout()
+        crashed = self.apply(self.plan(), env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        self.assertIsNone(snapshot(self.target))
+        parked = next(self.state().glob("*/retired/github-workflow"))
+        return before, parked
+
+    def recover(self, runtime="claude"):
+        result = self.run_installer("recover", "--runtime", runtime, "--home", self.home, "--maintenance-confirmed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_recover_restores_from_backup_when_parked_copy_drifted(self):
+        before, parked = self.crash_after_parking()
+        (parked / "local-notes.md").write_bytes(b"changed while parked\n")
+        drifted = snapshot(parked)
+        report = self.recover()
+        self.assertEqual(report["parked_drift"], str(parked))
+        self.assertEqual(snapshot(self.target), before)
+        self.assertEqual(snapshot(parked), drifted)
+        self.assertEqual(len(visible_copies(*self.roots)), 1)
+
+    def test_recover_restores_from_backup_when_parked_copy_is_lost(self):
+        before, parked = self.crash_after_parking()
+        shutil.rmtree(parked)
+        self.recover()
+        self.assertEqual(snapshot(self.target), before)
+
+    def test_interrupted_codex_duplicate_retirement_recovers_both_copies(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        plan = self.plan("codex")
+        pristine = self.base / "pristine"
+        shutil.copytree(self.home, pristine, symlinks=True)
+        names = self.checkpoints("apply", "--plan", plan, "--checksums", self.checksums, "--maintenance-confirmed",
+                                 "--retire-duplicate", legacy)
+        self.assertIn("apply:moved-0", names)
+        for name in names:
+            if name == "apply:committed":
+                continue
+            with self.subTest(checkpoint=name):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home, symlinks=True)
+                crashed = self.apply(plan, "--retire-duplicate", legacy, env={"DEV_HARNESS_INSTALL_TEST_CRASH": name})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                self.assertLessEqual(len(visible_copies(*self.roots)), 2)
+                self.recover("codex")
+                self.assertEqual(snapshot(target), before)
+                self.assertEqual(snapshot(legacy), legacy_before)
+
+    def test_rollback_refuses_a_receipt_copy_that_differs(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        copy = self.base / "receipt-copy.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        copy.write_text(json.dumps(dict(receipt, after={})), encoding="utf-8")
+        self.assert_refused(self.run_installer("rollback", "--receipt", copy, "--maintenance-confirmed"), 1)
+        copy.write_text(json.dumps(receipt), encoding="utf-8")
+        result = self.run_installer("rollback", "--receipt", copy, "--maintenance-confirmed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "rolled back")
+
+    def test_config_directories_from_the_environment_are_recorded_and_reused(self):
+        config = self.base / "claude-config"
+        environment = {"HOME": str(self.home), "USERPROFILE": str(self.home), "CLAUDE_CONFIG_DIR": str(config)}
+        output = self.base / "plan.json"
+        result = self.run_installer("plan", "--runtime", "claude", "--checksums", self.checksums, "--output", output, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["config_root"], str(config))
+        # Apply and rollback run without the variable: the recorded root decides.
+        result = self.apply(output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(visible_copies(config / "skills"), [config / "skills" / "github-workflow" / "SKILL.md"])
+        self.assertFalse((self.home / ".claude").exists())
+        receipt_path = Path(json.loads(result.stdout)["receipt"])
+        self.assertTrue(receipt_path.is_relative_to(config / "dev-harness-install"))
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertIsNone(snapshot(config / "skills" / "github-workflow"))
+        codex_home = self.base / "codex-home"
+        legacy = codex_home / "skills" / "github-workflow"
+        self.v52_layout(legacy)
+        result = self.run_installer("plan", "--runtime", "codex", "--checksums", self.checksums, "--output", output,
+                                    env=dict(environment, CODEX_HOME=str(codex_home)))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["duplicates"], [str(legacy)])
+
+    def test_test_hooks_outside_a_temporary_home_block(self):
+        home = ROOT / "tests" / "no-such-home"
+        result = self.run_installer("plan", "--runtime", "claude", "--home", home, "--checksums", self.checksums,
+                                    env={"DEV_HARNESS_INSTALL_TEST_TRACE": str(self.base / "trace.txt")})
+        self.assert_refused(result, 2)
+        self.assertIn("test hooks", json.loads(result.stderr)["error"])
+        self.assertFalse(os.path.lexists(home))
+        result = self.run_installer("recover", "--runtime", "claude", "--home", home, "--maintenance-confirmed")
+        self.assert_refused(result, 2)
+        self.assertFalse(os.path.lexists(home))
 
     # Blocking conditions.
     def test_link_target_blocks_without_change(self):
@@ -376,6 +529,38 @@ class InstallerTests(unittest.TestCase):
         self.assert_refused(result, 2)
         self.assertEqual(snapshot(self.home), home)
         self.assertEqual(snapshot(real), before)
+
+    def test_linked_duplicate_blocks(self):
+        if not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        real = self.base / "elsewhere" / "copy"
+        real.mkdir(parents=True)
+        (real / "SKILL.md").write_bytes(b"---\nname: github-workflow\n---\n")
+        link = self.home / ".claude" / "skills" / "linked-copy"
+        link.parent.mkdir(parents=True)
+        os.symlink(real, link, target_is_directory=True)
+        result = self.run_installer("plan", "--runtime", "claude", "--home", self.home, "--checksums", self.checksums)
+        self.assert_refused(result, 2)
+        self.assertEqual(json.loads(result.stderr)["details"], [str(link)])
+
+    def test_nested_duplicate_blocks(self):
+        self.v52_layout()
+        nested = self.target / "examples" / "github-workflow"
+        nested.mkdir(parents=True)
+        (nested / "SKILL.md").write_bytes(b"---\nname: github-workflow\n---\n")
+        result = self.run_installer("plan", "--runtime", "claude", "--home", self.home, "--checksums", self.checksums)
+        self.assert_refused(result, 2)
+        self.assertEqual(json.loads(result.stderr)["details"], [str(nested)])
+
+    def test_target_under_another_spelling_blocks(self):
+        alias = self.home / ".claude" / "skills" / "GitHub-Workflow"
+        before = self.v52_layout(alias)
+        if not self.target.exists():
+            self.skipTest("case-sensitive file system: the spelling is a separate directory")
+        result = self.run_installer("plan", "--runtime", "claude", "--home", self.home, "--checksums", self.checksums)
+        self.assert_refused(result, 2)
+        self.assertIn("another spelling", json.loads(result.stderr)["error"])
+        self.assertEqual(snapshot(alias), before)
 
     def test_link_inside_target_blocks(self):
         if not symlinks_supported():
@@ -392,6 +577,9 @@ class InstallerTests(unittest.TestCase):
             "active claude": "/usr/local/bin/claude --resume\n",
             "active codex via node": "node /opt/lib/node_modules/codex-cli/bin/codex.js\n",
             "active windows codex": '"C:\\Tools\\codex.exe" exec\n',
+            "claude code via node": "node /opt/lib/node_modules/anthropic-ai/claude-code/cli.js --print\n",
+            "quoted windows node": '"C:\\Program Files\\nodejs\\node.exe"  "C:\\npm\\node_modules\\anthropic-ai\\claude-code\\cli.js"\n',
+            "desktop app": "/Applications/Claude.app/Contents/MacOS/Claude\n",
         }
         for label, listing in cases.items():
             with self.subTest(label):
@@ -414,7 +602,12 @@ class InstallerTests(unittest.TestCase):
         bin_directory.mkdir()
         fake = bin_directory / "ps"
         path = str(bin_directory) + os.pathsep + os.environ.get("PATH", "")
-        for label, script, code in (("active", "echo '/opt/homebrew/bin/claude'", 2), ("failing", "exit 1", 2), ("idle", "echo '/bin/zsh'", 0)):
+        # The fake ps runs as a child of the installer, so $PPID is the installer's own process ID.
+        own = 'echo "$PPID python3 install.py recover --runtime codex"; '
+        cases = (("active", own + "echo '42 /opt/homebrew/bin/claude'", 2), ("failing", "exit 1", 2),
+                 ("empty", "exit 0", 2), ("without this process", "echo '1 /sbin/init'", 2),
+                 ("idle", own + "echo '1 /sbin/init'; echo '   7   /bin/zsh -l'", 0))
+        for label, script, code in cases:
             with self.subTest(label):
                 fake.write_text("#!/bin/sh\n" + script + "\n", encoding="utf-8")
                 fake.chmod(0o755)

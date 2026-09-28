@@ -18,10 +18,12 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 import uuid
 import zipfile
+import zlib
 
 INSTALLER_VERSION = "1.0.0"
 SKILL = "github-workflow"
@@ -40,7 +42,8 @@ RETIREMENT_LIST = {
 }
 PRESERVED = ("authentic history", "customization")
 HISTORY = re.compile(r"templates/history/AGENTS-v[0-9][^/]*\.md")
-CONSUMERS = {"claude", "codex"}
+# Command-line path components that identify a skill-consuming runtime process.
+CONSUMERS = {"claude", "claude-code", "codex"}
 BOUNDARY_LIMITS = (
     "The process probe sees only this machine's process list. Sessions in containers, virtual "
     "machines, WSL, remote hosts or the web are not visible, and the probe cannot prevent a session "
@@ -51,6 +54,11 @@ TEST_CRASH = "DEV_HARNESS_INSTALL_TEST_CRASH"
 TEST_TRACE = "DEV_HARNESS_INSTALL_TEST_TRACE"
 TEST_PROCESSES = "DEV_HARNESS_INSTALL_TEST_PROCESSES"
 REPARSE_POINT = 0x400
+# IO_REPARSE_TAG_SYMLINK and IO_REPARSE_TAG_MOUNT_POINT (junctions). Other reparse points, such as
+# cloud placeholders, hold their own content.
+LINK_REPARSE_TAGS = {0xA000000C, 0xA0000003}
+MEMBER_LIMIT = 64 * 1024 * 1024
+ARCHIVE_LIMIT = 256 * 1024 * 1024
 
 
 class Failure(Exception):
@@ -118,6 +126,25 @@ def colliding(names) -> list:
 # Test hooks. They only inject failures or replace the process list; the receipt records them.
 def active_test_hooks() -> dict:
     return {name: os.environ[name] for name in (TEST_FAULT, TEST_CRASH, TEST_TRACE, TEST_PROCESSES) if os.environ.get(name)}
+
+
+def contains(parent: str, child: str) -> bool:
+    """Whether the normalized, resolved child path is the parent or inside it."""
+    parent, child = (os.path.normcase(os.path.realpath(path)) for path in (parent, child))
+    try:
+        return os.path.commonpath([parent, child]) == parent
+    except ValueError:
+        return False
+
+
+def require_test_home(home: Path) -> None:
+    """Honour test hooks only for a disposable home under the temporary directory."""
+    hooks = active_test_hooks()
+    if not hooks:
+        return
+    temporary = tempfile.gettempdir()
+    if not contains(temporary, str(home)) or contains(str(home), temporary):
+        raise Blocked("Installer test hooks are set outside a temporary test home; unset them", sorted(hooks))
 
 
 def checkpoint(name: str) -> None:
@@ -188,7 +215,13 @@ def is_link(path: Path) -> bool:
         status = os.lstat(str(path))
     except FileNotFoundError:
         return False
-    return stat.S_ISLNK(status.st_mode) or bool(getattr(status, "st_file_attributes", 0) & REPARSE_POINT)
+    if stat.S_ISLNK(status.st_mode):
+        return True
+    if getattr(status, "st_file_attributes", 0) & REPARSE_POINT:
+        # Without a readable tag, the reparse point is treated as a link.
+        tag = getattr(status, "st_reparse_tag", None)
+        return tag is None or tag in LINK_REPARSE_TAGS
+    return False
 
 
 def exists(path: Path) -> bool:
@@ -303,7 +336,10 @@ def inventory_unchecked(source: Path) -> dict:
 
 
 def load_archive(source: Path) -> Package:
+    if source.stat().st_size > ARCHIVE_LIMIT:
+        raise Refused(f"The archive exceeds {ARCHIVE_LIMIT} bytes")
     archive = source.read_bytes()
+    total = 0
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
             members = bundle.infolist()
@@ -326,11 +362,17 @@ def load_archive(source: Path) -> Package:
                     package_path(name)
                 except ValueError as error:
                     raise Refused(str(error))
-                files[name] = bundle.read(member)
-            if bundle.testzip() is not None:
-                raise Refused("Archive CRC check failed")
-    except zipfile.BadZipFile as error:
-        raise Refused(f"Not a ZIP archive: {error}")
+                # Bounded reads: the declared size of a member is not trusted.
+                with bundle.open(member) as stream:
+                    data = stream.read(MEMBER_LIMIT + 1)
+                total += len(data)
+                if len(data) > MEMBER_LIMIT or total > ARCHIVE_LIMIT:
+                    raise Refused(f"The archive expands beyond the size limits at {member.filename}")
+                files[name] = data
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, zlib.error, EOFError) as error:
+        raise Refused(f"Not a valid ZIP archive: {error}")
+    except (RuntimeError, NotImplementedError) as error:
+        raise Refused(f"Unsupported ZIP archive (encrypted or unknown compression): {error}")
     if "MANIFEST.json" not in files:
         raise Refused("No MANIFEST.json in the archive")
     manifest = files.pop("MANIFEST.json")
@@ -362,17 +404,19 @@ def read_checksums(path: Path) -> dict:
 def verify_package(package: Package, checksums: Path) -> dict:
     problems = []
     listed = package.manifest["files"]
-    for name in sorted(set(listed) - set(package.files)):
-        problems.append(f"missing: {name}")
-    for name in sorted(set(package.files) - set(listed)):
-        problems.append(f"extra: {name}")
-    for name in sorted(set(listed) & set(package.files)):
-        expected, data = listed[name], package.files[name]
+    unsafe = set()
+    for name in sorted(listed):
         try:
             package_path(name)
         except ValueError as error:
             problems.append(str(error))
-            continue
+            unsafe.add(name)
+    for name in sorted(set(listed) - set(package.files) - unsafe):
+        problems.append(f"missing: {name}")
+    for name in sorted(set(package.files) - set(listed)):
+        problems.append(f"extra: {name}")
+    for name in sorted((set(listed) & set(package.files)) - unsafe):
+        expected, data = listed[name], package.files[name]
         if not isinstance(expected, dict) or expected.get("sha256") != digest(data) or expected.get("bytes") != len(data):
             problems.append(f"hash or size mismatch: {name}")
     for name in colliding(list(listed) + ["MANIFEST.json"]):
@@ -417,34 +461,38 @@ def skill_name(data: bytes) -> str | None:
 
 # Runtime locations.
 class Locations:
-    def __init__(self, runtime: str, home: str | None, state: str | None = None) -> None:
+    """Where a runtime discovers skills. The resolved config root is recorded in plans and receipts,
+    so later commands address the same directories whatever the environment then says."""
+
+    def __init__(self, runtime: str, home: str | None, config: str | None = None) -> None:
         explicit = home is not None
         user_home = Path(os.path.abspath(home)) if explicit else Path.home()
         self.runtime = runtime
         self.home = user_home
         if runtime == "claude":
-            configured = None if explicit else os.environ.get("CLAUDE_CONFIG_DIR")
-            config = Path(os.path.abspath(configured)) if configured else user_home / ".claude"
-            self.skills = config / "skills"
+            configured = config or (None if explicit else os.environ.get("CLAUDE_CONFIG_DIR"))
+            self.config = Path(os.path.abspath(configured)) if configured else user_home / ".claude"
+            self.skills = self.config / "skills"
             self.roots = [self.skills]
-            self.instructions = [config / "CLAUDE.md", config / "AGENTS.md"]
-            self.legacy = [config / "commands" / (SKILL + ".md")]
+            self.instructions = [self.config / "CLAUDE.md", self.config / "AGENTS.md"]
+            self.legacy = [self.config / "commands" / (SKILL + ".md")]
         elif runtime == "codex":
-            configured = None if explicit else os.environ.get("CODEX_HOME")
-            codex = Path(os.path.abspath(configured)) if configured else user_home / ".codex"
+            configured = config or (None if explicit else os.environ.get("CODEX_HOME"))
+            self.config = Path(os.path.abspath(configured)) if configured else user_home / ".codex"
             self.skills = user_home / ".agents" / "skills"
-            self.roots = [self.skills, codex / "skills"]
-            self.instructions = [codex / "AGENTS.md", codex / "AGENTS.override.md"]
+            self.roots = [self.skills, self.config / "skills"]
+            self.instructions = [self.config / "AGENTS.md", self.config / "AGENTS.override.md"]
             self.legacy = []
         else:
             raise Refused(f"Unknown runtime: {runtime}")
         self.target = self.skills / SKILL
-        self.state = Path(os.path.abspath(state)) if state else self.skills.parent / "dev-harness-install"
+        self.state = self.skills.parent / "dev-harness-install"
 
     def describe(self) -> dict:
         return {
             "runtime": self.runtime,
             "home": str(self.home),
+            "config_root": str(self.config),
             "target": str(self.target),
             "skill_roots": [str(root) for root in self.roots],
             "state_root": str(self.state),
@@ -455,36 +503,59 @@ class Locations:
         for path in (self.skills.parent, self.skills, self.target):
             if is_link(path):
                 raise Blocked(f"{path} is a link or junction; its canonical source is not identified", {"path": str(path)})
+        if exists(self.target) and SKILL not in os.listdir(str(self.skills)):
+            # A case-insensitive volume resolves another spelling to the target.
+            raise Blocked(f"{self.target} exists under another spelling; rename it to {SKILL} exactly, then plan again")
         for root in self.roots:
-            if self.state == root or root in self.state.parents:
+            if contains(str(root), str(self.state)):
                 raise Blocked(f"The state directory {self.state} is inside the skill root {root}")
         if is_link(self.state):
             raise Blocked(f"The state directory {self.state} is a link")
         for path in [self.state, *self.state.parents]:
             if exists(path / ".git"):
-                raise Blocked(f"The state directory {self.state} is inside the Git work tree {path}; pass --state-dir outside it")
+                raise Blocked(f"The state directory {self.state} is inside the Git work tree {path}; "
+                              "the installer never writes installation state into a repository")
         anchor = next((path for path in [self.state, *self.state.parents] if path.exists()), None)
         volume = next((path for path in [self.target, *self.target.parents] if path.exists()), None)
         if anchor is None or volume is None or os.stat(str(anchor)).st_dev != os.stat(str(volume)).st_dev:
             raise Blocked(f"The state directory {self.state} is not on the target's volume")
 
 
+def same_path(first: str, second: str) -> bool:
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return os.path.normcase(os.path.abspath(first)) == os.path.normcase(os.path.abspath(second))
+
+
+def declares_skill(directory: Path) -> bool:
+    try:
+        return skill_name((directory / "SKILL.md").read_bytes()) == SKILL
+    except OSError:
+        return False
+
+
 def discoverable(roots) -> list:
-    """Every directory under the skill roots whose SKILL.md is a github-workflow skill."""
+    """Every directory under the skill roots that a runtime could load as github-workflow.
+
+    Linked directories are reported, not followed, so the plan can block on them.
+    """
     found = []
     for root in roots:
         if not root.is_dir():
             continue
         for directory, subdirectories, names in os.walk(str(root)):
-            subdirectories[:] = sorted(name for name in subdirectories if not is_link(Path(directory) / name))
-            if "SKILL.md" in names:
-                path = Path(directory)
-                try:
-                    name = skill_name((path / "SKILL.md").read_bytes())
-                except OSError:
-                    name = None
-                if path.name == SKILL or name == SKILL:
+            kept = []
+            for name in sorted(subdirectories):
+                path = Path(directory) / name
+                if not is_link(path):
+                    kept.append(name)
+                elif name == SKILL or declares_skill(path):
                     found.append(str(path))
+            subdirectories[:] = kept
+            path = Path(directory)
+            if "SKILL.md" in names and (path.name == SKILL or declares_skill(path)):
+                found.append(str(path))
     return sorted(found)
 
 
@@ -507,8 +578,9 @@ def classify(name: str, entry: dict, package_files: dict) -> str:
     return "customization"
 
 
-def make_plan(runtime: str, home: str | None, state: str | None, package_source: Path, checksums: Path) -> dict:
-    locations = Locations(runtime, home, state)
+def make_plan(runtime: str, home: str | None, config: str | None, package_source: Path, checksums: Path):
+    """Return the plan and the verified package it describes."""
+    locations = Locations(runtime, home, config)
     locations.check()
     package = load_package(package_source)
     verification = verify_package(package, checksums)
@@ -523,8 +595,17 @@ def make_plan(runtime: str, home: str | None, state: str | None, package_source:
     conflicts += [name for name in preserved if destination_key(name) in package_directories]
     if conflicts:
         raise Blocked("Preserved files collide with package paths", conflicts)
-    duplicates = [path for path in discoverable(locations.roots) if path != str(locations.target)]
-    return {
+    duplicates = [path for path in discoverable(locations.roots) if not same_path(path, str(locations.target))]
+    linked = [path for path in duplicates if is_link(Path(path))]
+    if linked:
+        raise Blocked("Linked github-workflow copies are discoverable and their canonical source is not identified. "
+                      "Owner: the operator. Trigger: remove the link or move it out of the skill roots, then plan again", linked)
+    nested = [path for path in duplicates
+              if any(Path(other) in Path(path).parents for other in [str(locations.target), *duplicates])]
+    if nested:
+        raise Blocked("A github-workflow copy is nested inside another copy. Owner: the operator. "
+                      "Trigger: move the nested copy out of the skill roots, then plan again", nested)
+    plan = {
         "plan_format": 1,
         "installer_version": INSTALLER_VERSION,
         **locations.describe(),
@@ -537,9 +618,10 @@ def make_plan(runtime: str, home: str | None, state: str | None, package_source:
         "legacy_commands": [str(path) for path in locations.legacy if exists(path)],
         "interrupted": str(locations.state / "CURRENT") if exists(locations.state / "CURRENT") else None,
     }
+    return plan, package
 
 
-DRIFT_KEYS = ("installer_version", "runtime", "home", "target", "skill_roots", "state_root", "package", "before", "classification", "duplicates")
+DRIFT_KEYS = ("installer_version", "runtime", "home", "config_root", "target", "skill_roots", "state_root", "package", "before", "classification", "duplicates")
 
 
 def drift(plan: dict, fresh: dict) -> list:
@@ -548,17 +630,16 @@ def drift(plan: dict, fresh: dict) -> list:
 
 # Maintenance boundary.
 def is_consumer(command_line: str) -> bool:
-    try:
-        tokens = shlex.split(command_line, posix=os.name != "nt")
-    except ValueError:
-        tokens = command_line.split()
-    for token in tokens[:2]:
-        name = re.split(r"[\\/]", token.strip('"'))[-1].lower()
-        for suffix in (".exe", ".cmd", ".js", ".mjs"):
-            if name.endswith(suffix):
-                name = name[: -len(suffix)]
-        if name in CONSUMERS:
-            return True
+    """Conservative: any path component of any argument naming a consumer counts, so wrappers such as
+    `node .../claude-code/cli.js` or a quoted Windows path are caught. False positives only block."""
+    for token in command_line.split():
+        for component in re.split(r"[\\/]", token.strip("\"'")):
+            name = component.lower()
+            for suffix in (".exe", ".cmd", ".js", ".mjs"):
+                if name.endswith(suffix):
+                    name = name[: -len(suffix)]
+            if name in CONSUMERS:
+                return True
     return False
 
 
@@ -572,13 +653,15 @@ def maintenance_boundary(confirmed: bool) -> dict:
             lines = Path(stub).read_text(encoding="utf-8").splitlines()
         except OSError as error:
             raise Blocked(f"Consumer state is unverifiable: {error}")
+        listed = [line.strip() for line in lines if line.strip()]
     else:
         if os.name == "nt":
             shell = shutil.which("powershell") or shutil.which("pwsh")
-            command = [shell, "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | ForEach-Object { $_.CommandLine }"] if shell else None
+            script = "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.CommandLine }"
+            command = [shell, "-NoProfile", "-NonInteractive", "-Command", script] if shell else None
         else:
             ps = shutil.which("ps")
-            command = [ps, "-A", "-o", "args="] if ps else None
+            command = [ps, "-A", "-o", "pid=,args="] if ps else None
         if not command:
             raise Blocked("Consumer state is unverifiable: no process listing command found")
         probe = " ".join(command)
@@ -588,8 +671,19 @@ def maintenance_boundary(confirmed: bool) -> dict:
             raise Blocked(f"Consumer state is unverifiable: {error}")
         if result.returncode != 0:
             raise Blocked(f"Consumer state is unverifiable: the process listing exited {result.returncode}")
-        lines = result.stdout.splitlines()
-    active = [line.strip() for line in lines if line.strip() and is_consumer(line)]
+        processes = {}
+        for line in result.stdout.splitlines():
+            fields = line.strip().split(None, 1)
+            if fields and fields[0].isdigit():
+                processes.setdefault(int(fields[0]), []).append(fields[1] if len(fields) > 1 else "")
+            elif line.strip():
+                processes.setdefault(-1, []).append(line.strip())
+        # An empty or truncated listing must not read as "no consumer": it has to include this process.
+        if os.getpid() not in processes:
+            raise Blocked("Consumer state is unverifiable: the process listing does not include this installer")
+        # This process names its runtime on its own command line (for example `recover --runtime codex`).
+        listed = [line for pid, lines in processes.items() if pid != os.getpid() for line in lines]
+    active = [line for line in listed if is_consumer(line)]
     if active:
         raise Blocked("Active Claude or Codex processes use skills; stop them and rerun", active)
     return {"confirmed_by_operator": True, "probe": probe, "active_consumers": [], "limitations": BOUNDARY_LIMITS}
@@ -617,6 +711,13 @@ class Lock:
         return self
 
     def __exit__(self, *_: object) -> None:
+        if os.name == "nt":
+            import msvcrt
+            self.stream.seek(0)
+            try:
+                msvcrt.locking(self.stream.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
         self.stream.close()
 
 
@@ -680,8 +781,10 @@ class Operation:
             rename(target, incoming_path, f"{op}:undo-activate")
         if not exists(target) and exists(parked):
             if differences(self.record["origin"], inventory(parked)):
-                raise Incomplete("The parked copy no longer matches the origin inventory", {"parked": str(parked)})
-            rename(parked, target, f"{op}:undo-park")
+                # Keep the drifted copy where it is and restore from the verified backup instead.
+                self.record["parked_drift"] = str(parked)
+            else:
+                rename(parked, target, f"{op}:undo-park")
         if not exists(target) and self.record["origin"] is not None:
             self.restore_from_backup()
         for index, move in reversed(list(enumerate(self.record["moves"]))):
@@ -705,8 +808,12 @@ class Operation:
             raise Incomplete("The origin copy is missing and no verified backup exists", {"target": str(self.target)})
         copy = Path(self.record["parked"]).parent / "restore" / SKILL
         if exists(copy):
-            raise Incomplete("A previous restoration copy is in the way", {"path": str(copy)})
+            # A copy left by an interrupted restoration; kept aside, never deleted.
+            stale = copy.parent.parent / ("restore-stale-" + uuid.uuid4().hex[:8])
+            os.rename(str(copy.parent), str(stale))
+            self.record.setdefault("stale_restore_copies", []).append(str(stale))
         copy_tree(Path(backup), copy)
+        fsync_tree(copy)
         if differences(self.record["origin"], inventory(copy)):
             raise Incomplete("The restoration copy does not match the origin inventory", {"path": str(copy)})
         rename(copy, self.target, self.record["operation"] + ":undo-restore")
@@ -716,6 +823,21 @@ def copy_tree(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(str(source), str(destination), symlinks=True, copy_function=shutil.copy2)
     shutil.copystat(str(source), str(destination))
+
+
+def fsync_tree(root: Path) -> None:
+    """Flush a copied tree before a rename makes it the recovery source or the active tree."""
+    for directory, _, names in os.walk(str(root)):
+        for name in names:
+            with open(os.path.join(directory, name), "rb") as stream:
+                try:
+                    os.fsync(stream.fileno())
+                except OSError:
+                    # Windows refuses to flush a read-only handle; there the copy is not flushed.
+                    if os.name != "nt":
+                        raise
+        sync_directory(Path(directory))
+    sync_directory(root.parent)
 
 
 def begin(state: Path, journal: Path) -> None:
@@ -757,7 +879,8 @@ def command_verify(options) -> dict:
 
 
 def command_plan(options) -> dict:
-    plan = make_plan(options.runtime, options.home, options.state_dir, Path(options.package), Path(options.checksums))
+    require_test_home(Locations(options.runtime, options.home).home)
+    plan, _ = make_plan(options.runtime, options.home, None, Path(options.package), Path(options.checksums))
     if options.output:
         write_json(Path(options.output), plan)
     return plan
@@ -767,28 +890,31 @@ def command_apply(options) -> dict:
     plan = read_json(Path(options.plan))
     if plan.get("plan_format") != 1:
         raise Refused("Unsupported plan format")
+    locations = Locations(plan["runtime"], plan["home"], plan.get("config_root"))
+    require_test_home(locations.home)
     boundary = maintenance_boundary(options.maintenance_confirmed)
-    locations = Locations(plan["runtime"], plan["home"], plan["state_root"])
     locations.check()
     with Lock(locations.state):
-        fresh = make_plan(plan["runtime"], plan["home"], plan["state_root"], Path(plan["package"]["source"]), Path(options.checksums))
+        fresh, package = make_plan(plan["runtime"], plan["home"], plan.get("config_root"), Path(plan["package"]["source"]),
+                                   Path(options.checksums))
         changed = drift(plan, fresh)
         if changed:
             raise Refused("The package, target or duplicates changed since the plan; plan again", changed)
         if fresh["interrupted"]:
             raise Blocked(f"An interrupted transaction is recorded in {fresh['interrupted']}; run `recover` first")
         requested = [os.path.abspath(path) for path in options.retire_duplicate]
-        unowned = [path for path in fresh["duplicates"] if path not in requested]
+        unowned = [path for path in fresh["duplicates"] if not any(same_path(path, other) for other in requested)]
         if unowned:
-            raise Blocked("Other github-workflow copies are discoverable; retain them or name each with --retire-duplicate", unowned)
-        unknown = [path for path in requested if path not in fresh["duplicates"]]
+            raise Blocked("Other github-workflow copies are discoverable. Owner: the operator. Trigger: move each out of "
+                          "the skill roots, or rerun apply with --retire-duplicate PATH to retire it under this receipt", unowned)
+        unknown = [path for path in requested if not any(same_path(path, other) for other in fresh["duplicates"])]
         if unknown:
             raise Refused("--retire-duplicate names a path that is not a planned duplicate", unknown)
-        return install(fresh, locations, boundary)
+        return install(fresh, package, locations, boundary)
 
 
-def install(plan: dict, locations: Locations, boundary: dict) -> dict:
-    package = load_package(Path(plan["package"]["source"]))
+def install(plan: dict, package: Package, locations: Locations, boundary: dict) -> dict:
+    # The package bytes verified by the fresh plan, not a second read of the source.
     package_files = package.skill_files()
     before = plan["before"]
     transaction = locations.state / (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8])
@@ -799,6 +925,7 @@ def install(plan: dict, locations: Locations, boundary: dict) -> dict:
         backup = transaction / "backup" / SKILL
         if before is not None:
             copy_tree(locations.target, backup)
+            fsync_tree(backup)
             if differences(before, inventory(backup)):
                 raise Refused("The backup copy does not match the target inventory")
         moves = []
@@ -807,12 +934,14 @@ def install(plan: dict, locations: Locations, boundary: dict) -> dict:
             duplicate_inventory = inventory(path)
             duplicate_backup = transaction / "backup" / f"duplicate-{index}" / path.name
             copy_tree(path, duplicate_backup)
+            fsync_tree(duplicate_backup)
             if differences(duplicate_inventory, inventory(duplicate_backup)):
                 raise Refused(f"The backup copy of {path} does not match its inventory")
             moves.append({"from": str(path), "to": str(transaction / "duplicates" / str(index) / path.name),
                           "inventory": duplicate_inventory, "backup": str(duplicate_backup)})
         staged = transaction / "staged" / SKILL
         stage(staged, package_files, locations.target, before or {}, plan["classification"])
+        fsync_tree(staged)
         after = inventory(staged)
         problems = staging_problems(after, package_files, before or {}, plan["classification"])
         if problems:
@@ -923,16 +1052,24 @@ def staging_problems(staged: dict, package_files: dict, before: dict, classifica
 
 
 def command_rollback(options) -> dict:
-    receipt_path = Path(os.path.abspath(options.receipt))
-    receipt = read_json(receipt_path)
+    given = Path(os.path.abspath(options.receipt))
+    receipt = read_json(given)
     if receipt.get("receipt_format") != 1:
         raise Refused("Unsupported receipt format")
+    locations = Locations(receipt["runtime"], receipt["home"], receipt.get("config_root"))
+    if str(locations.target) != receipt["target"] or str(locations.state) != receipt["state_root"]:
+        raise Refused("The receipt target does not match its runtime locations")
+    # Only the receipt inside its transaction is authoritative; a copy elsewhere must be identical.
+    transaction = Path(receipt["transaction"])
+    receipt_path = transaction / "receipt.json"
+    if transaction.parent != locations.state:
+        raise Refused("The receipt's transaction is not in the runtime's installer state directory")
+    if not same_path(str(given), str(receipt_path)) and canonical(read_json(receipt_path)) != canonical(receipt):
+        raise Refused(f"The receipt differs from the canonical receipt {receipt_path}; roll back with that one")
     if receipt.get("state") != "installed":
         raise Refused(f"The receipt state is {receipt.get('state')!r}; only an installed receipt can be rolled back")
+    require_test_home(locations.home)
     boundary = maintenance_boundary(options.maintenance_confirmed)
-    locations = Locations(receipt["runtime"], receipt["home"], receipt["state_root"])
-    if str(locations.target) != receipt["target"]:
-        raise Refused("The receipt target does not match its runtime locations")
     locations.check()
     with Lock(locations.state):
         if exists(locations.state / "CURRENT"):
@@ -940,12 +1077,17 @@ def command_rollback(options) -> dict:
         changed = differences(receipt["after"], inventory(locations.target))
         if changed:
             raise Refused("The active tree no longer matches the receipt's after-inventory; rollback refused", changed)
-        transaction = Path(receipt["transaction"])
         work = transaction / ("rollback-" + uuid.uuid4().hex[:8])
         journal = work / "journal.json"
         work.mkdir(parents=True)
         begin(locations.state, journal)
         try:
+            # A verified copy of the installed tree, so an interrupted rollback can restore it.
+            origin_backup = work / "origin-backup" / SKILL
+            copy_tree(locations.target, origin_backup)
+            fsync_tree(origin_backup)
+            if differences(receipt["after"], inventory(origin_backup)):
+                raise Refused("The copy of the installed tree does not match the after-inventory")
             incoming_path = None
             if receipt["before"] is not None:
                 retired = Path(receipt["retired"])
@@ -954,8 +1096,9 @@ def command_rollback(options) -> dict:
                 else:
                     incoming_path = work / "restore" / SKILL
                     copy_tree(Path(receipt["backup"]), incoming_path)
+                    fsync_tree(incoming_path)
                     if differences(receipt["before"], inventory(incoming_path)):
-                        raise Incomplete("Neither the retired copy nor the backup matches the before-inventory")
+                        raise Refused("Neither the retired copy nor the backup matches the before-inventory")
             moves = []
             for duplicate in receipt["duplicates"]:
                 source, original = Path(duplicate["retired_to"]), Path(duplicate["path"])
@@ -963,6 +1106,9 @@ def command_rollback(options) -> dict:
                 if exists(original) or differences(duplicate_inventory, inventory(source)):
                     raise Refused(f"The retired duplicate {original} cannot be restored exactly")
                 moves.append({"from": str(source), "to": str(original), "inventory": duplicate_inventory})
+        except OSError as error:
+            finish(locations.state)
+            raise Refused(f"Preparing the rollback failed before any rename: {error}; the target is unchanged")
         except BaseException:
             finish(locations.state)
             raise
@@ -972,7 +1118,7 @@ def command_rollback(options) -> dict:
             "journal": str(journal),
             "target": str(locations.target),
             "origin": receipt["after"],
-            "origin_backup": None,
+            "origin_backup": str(origin_backup),
             "incoming": receipt["before"],
             "incoming_path": str(incoming_path) if incoming_path else None,
             "parked": str(work / "parked" / SKILL),
@@ -986,17 +1132,24 @@ def command_rollback(options) -> dict:
         return {"result": "rolled back", "target": str(locations.target), "restored": "absent" if receipt["before"] is None else "before-inventory"}
 
 
-def mark_rolled_back(record: dict) -> None:
+def mark_rolled_back(record: dict, tolerant: bool = False) -> bool:
     receipt_path = Path(record["receipt"])
-    receipt = read_json(receipt_path)
+    try:
+        receipt = read_json(receipt_path)
+    except Refused:
+        if tolerant:
+            return False
+        raise
     receipt["state"] = "rolled back"
     receipt["rollback"] = {"journal": record["journal"], "parked": record["parked"], **record.get("rollback_evidence", {})}
     write_json(receipt_path, receipt)
+    return True
 
 
 def command_recover(options) -> dict:
+    locations = Locations(options.runtime, options.home)
+    require_test_home(locations.home)
     boundary = maintenance_boundary(options.maintenance_confirmed)
-    locations = Locations(options.runtime, options.home, options.state_dir)
     locations.check()
     with Lock(locations.state):
         current = locations.state / "CURRENT"
@@ -1010,19 +1163,24 @@ def command_recover(options) -> dict:
         record = read_json(journal)
         operation = Operation(journal, record)
         if record.get("state") == "committed":
-            if record["operation"] == "rollback":
-                mark_rolled_back(record)
+            result = {"result": "already committed", "journal": str(journal)}
+            if record["operation"] == "rollback" and not mark_rolled_back(record, tolerant=True):
+                result["receipt_not_updated"] = record["receipt"]
             finish(locations.state)
-            return {"result": "already committed", "journal": str(journal)}
+            return result
         operation.record["recovery_boundary"] = boundary
         operation.undo()
+        result = {"result": "restored", "operation": record["operation"], "journal": str(journal), "target": record["target"]}
+        for key in ("parked_drift", "stale_restore_copies"):
+            if key in operation.record:
+                result[key] = operation.record[key]
         receipt = journal.parent / "receipt.json"
         if record["operation"] == "apply" and exists(receipt):
             value = read_json(receipt)
             value["state"] = "recovered to the before-state; not installed"
             write_json(receipt, value)
         finish(locations.state)
-        return {"result": "restored", "operation": record["operation"], "journal": str(journal), "target": record["target"]}
+        return result
 
 
 def parser() -> argparse.ArgumentParser:
@@ -1035,7 +1193,6 @@ def parser() -> argparse.ArgumentParser:
     plan = commands.add_parser("plan", help="read-only inventory, classification and duplicates")
     plan.add_argument("--runtime", choices=("claude", "codex"), required=True)
     plan.add_argument("--home")
-    plan.add_argument("--state-dir")
     plan.add_argument("--package", default=str(here))
     plan.add_argument("--checksums", required=True)
     plan.add_argument("--output")
@@ -1050,9 +1207,13 @@ def parser() -> argparse.ArgumentParser:
     recover = commands.add_parser("recover", help="restore the state before an interrupted transaction")
     recover.add_argument("--runtime", choices=("claude", "codex"), required=True)
     recover.add_argument("--home")
-    recover.add_argument("--state-dir")
     recover.add_argument("--maintenance-confirmed", action="store_true")
     return top
+
+
+def hook_report() -> dict:
+    hooks = active_test_hooks()
+    return {"test_hooks": sorted(hooks)} if hooks else {}
 
 
 def main(argv=None) -> int:
@@ -1062,12 +1223,13 @@ def main(argv=None) -> int:
     try:
         result = handlers[options.command](options)
     except Failure as error:
-        print(json.dumps({"error": str(error), "exit": error.code, "details": error.details}, indent=2, ensure_ascii=False), file=sys.stderr)
+        print(json.dumps({"error": str(error), "exit": error.code, "details": error.details, **hook_report()}, indent=2), file=sys.stderr)
         return error.code
     except OSError as error:
-        print(json.dumps({"error": f"Unexpected filesystem error: {error}", "exit": 3}, indent=2), file=sys.stderr)
+        print(json.dumps({"error": f"Unexpected filesystem error: {error}", "exit": 3, **hook_report()}, indent=2), file=sys.stderr)
         return 3
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    # ASCII output: a legacy console encoding cannot fail on a non-ASCII home path.
+    print(json.dumps({**result, **hook_report()}, indent=2))
     return 0
 
 
