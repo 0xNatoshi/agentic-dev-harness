@@ -490,6 +490,24 @@ class InstallerTests(unittest.TestCase):
                 if label == "changed":
                     self.assertTrue((retired / "local-notes.md").is_file())
 
+    def test_recover_killed_after_restoring_a_duplicate_can_be_rerun(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        plan = self.plan("codex")
+        crashed = self.apply(plan, "--retire-duplicate", legacy, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:activated"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        retired = next((self.home / ".agents" / "dev-harness-install").glob("*/duplicates/0/github-workflow"))
+        (retired / "local-notes.md").write_bytes(b"changed while retired\n")
+        killed = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed",
+                                    env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:undo-move-restore-0:done"})
+        self.assertEqual(killed.returncode, 70, killed.stderr)
+        report = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assertEqual(report.returncode, 0, report.stderr)
+        self.assertEqual(json.loads(report.stdout)["moved_drift"], [str(retired)])
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+        self.assertTrue((retired / "local-notes.md").is_file())
+
     @unittest.skipIf(os.name == "nt", "POSIX directory modes")
     def test_kept_directories_keep_their_mode(self):
         self.v52_layout()
@@ -622,7 +640,8 @@ class InstallerTests(unittest.TestCase):
                 crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
                                              env={"DEV_HARNESS_INSTALL_TEST_CRASH": name})
                 self.assertEqual(crashed.returncode, 70, crashed.stderr)
-                if names.index(name) < names.index("rollback:moved-0"):
+                # Up to the duplicate's rename, the rollback has not yet reached the two-copy before-state.
+                if names.index(name) < names.index("rollback:move-0:done"):
                     self.assertLessEqual(len(visible_copies(*self.roots)), 1)
                 self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
                 if name == "rollback:committed":

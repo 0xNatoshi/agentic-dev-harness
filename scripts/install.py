@@ -172,6 +172,8 @@ def rename(source: Path, destination: Path, point: str) -> None:
     os.rename(source, destination)
     sync_directory(source.parent)
     sync_directory(destination.parent)
+    # A crash here models a kill after the rename and before the journal records it.
+    checkpoint(point + ":done")
 
 
 def sync_directory(path: Path) -> None:
@@ -832,11 +834,14 @@ class Operation:
             if not backup or differences(move["inventory"], inventory(Path(backup))):
                 raise Incomplete("A moved copy is missing or changed and no verified backup exists",
                                  {"from": str(source), "to": str(destination)})
-            if exists(destination):
-                # Keep the differing copy where it is, as for the target.
+            if exists(destination) and str(destination) not in self.record.get("moved_drift", []):
+                # Keep the differing copy where it is, as for the target. Saved before the restoring rename,
+                # so a rerun after a kill recognizes the kept copy.
                 self.record.setdefault("moved_drift", []).append(str(destination))
+            self.save(f"restoring-move-{index}")
             self.restore_verified(Path(backup), move["inventory"], destination.parent.parent / f"restore-{index}" / source.name,
                                   source, f"{op}:undo-move-restore-{index}")
+            self.save(f"restored-move-{index}")
 
     def undo(self) -> None:
         """Return to the origin state, verified; Incomplete when that cannot be established.
@@ -863,6 +868,7 @@ class Operation:
                 if exists(parked):
                     # Keep the differing copy where it is; restore the verified backup instead.
                     self.record["parked_drift"] = str(parked)
+                self.save("restoring")
                 self.restore_from_backup()
         if not self.record.get("moves_last"):
             self.undo_moves()
@@ -887,6 +893,7 @@ class Operation:
             stale = copy.parent.parent / ("restore-stale-" + uuid.uuid4().hex[:8])
             os.rename(str(copy.parent), str(stale))
             self.record.setdefault("stale_restore_copies", []).append(str(stale))
+            write_json(self.path, self.record)
         copy_tree(backup, copy)
         fsync_tree(copy)
         if differences(expected, inventory(copy)):
