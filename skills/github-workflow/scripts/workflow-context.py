@@ -127,15 +127,20 @@ PAUSE_WORD = r'\b(?:suspend\w*|paused?|on\s+hold|disabled|forbidden|blocked|en\s
 # pushes are not allowed; merge through PRs' it restricts something else.
 BAN_WORD = (r'(?:\b(?:prohibit\w*|disallow\w*|banned|défendu\w*)\b|(?:\bnot|n[’\x27]t)\s+(?:allowed|permitted|authori[sz]ed)\b'
             r'|\b(?:ne\s+|n[’\x27])(?:\w+\s+){0,2}?pas\s+(?:autoris\w*|permis\w*))')
-# 'A frozen lockfile' and 'Freeze the lockfile' are package-manager settings.
-FREEZE_WORD = (r'\b(?:frozen|freeze|gel(?:é|ée|és|ées)?)\b'
-               r'(?![\s-]+(?:(?:the|your|our|a|all|any)\s+)?(?:lock[\s-]*files?|dependenc\w*|deps|versions?|pins?)\b)')
+FREEZE_STEM = r'\b(?:frozen|freeze|gel(?:é|ée|és|ées)?)\b'
+# 'A frozen lockfile' and 'Freeze the lockfile' are package-manager settings, but
+# 'Freeze dependency merges' and 'freeze versions and merges' still freeze merges.
+FREEZE_WORD = (FREEZE_STEM + r'(?![\s-]+(?:(?:the|your|our|a|all|any)\s+)?(?:lock[\s-]*files?|dependenc\w*|deps|versions?|pins?)\b'
+               r'(?!(?:[\s-]+(?!(?:before|after|until|unless|once|when|while|then|prior|during|avant|après)\b)[\w’\x27-]+){0,3}?'
+               r'[\s-]+(?:merg|fusion)))')
 FIRST_PERSON = r'\bi\b(?!\.e\b)|\bj(?=[’\x27])|\b(?:me|my|mine|we|us|our|je|moi|mon|ma|mes|nous|notre|nos)\b'
 # 'review' and 'ok' only when said by someone: 'my review', 'until I say ok'. A bare 'go' or
 # 'go-ahead' is a signal, as on the release before; 'then go to the next task' is a verb.
 APPROVAL_WORD = (r'\b(?:approv\w*|agreement|consent\w*|permission|authori[sz]\w*|sign(?:s|ed)?[ -]?off|green\s+light'
                  r'|feu\s+vert|accord|confirmation|autoris\w*|approbation'
-                 # Only 'go to', 'go home' and 'go back' are always the verb: 'the go on Slack' is a noun.
+                 # 'go to', 'go home' and 'go back' are the verb unless a determiner makes a noun:
+                 # 'then go back to work', but 'my go to proceed' and 'the go on Slack'.
+                 r'|(?:(?:my|our|your|their|his|her|the|a|mon|ma|ton|notre|votre|le|un)\s+|[’\x27]s\s+)go'
                  r'|go(?![\s-]+(?:to|home|back)\b)'
                  r'|(?:my|our|mon|ma|mes|notre|nos)\s+(?:own\s+)?(?:reviews?|ok(?:ay)?|relecture|revue)'
                  r'|(?:i|we)\s+(?:say|give)\s+(?:so|ok(?:ay)?))\b')
@@ -173,7 +178,9 @@ PR_HELD = re.compile(
     r'|^\W*(?:hold|pause|freeze|suspend)\s+(?:all\s+|every\s+|the\s+|any\s+)?(?:open\s+|pending\s+)?' + PR_NOUN
     + r'|\bkeep\s+(?:all\s+|the\s+)?(?:open\s+)?' + PR_NOUN + r'\s+on\s+hold\b'
     + r'|' + PR_NOUN + r'[^.!?;:]{0,30}\b(?:needs?|requires?|nécessitent|nécessite)\b[^.!?;:]{0,40}' + APPROVAL_WORD
-    + r'|\b(?:branch\w*|branche\w*|main|master|trunk)\b(?:\s+' + NOT_HELD + r'\w+){0,2}?\s+(?:(?:is|are|est|sont)\s+)?(?:frozen|gel(?:é|ée|és|ées))\b')
+    # Only a negation right before the state lifts it: 'Main not develop is frozen' holds.
+    + r'|\b(?:branch\w*|branche\w*|main|master|trunk)\b(?:\s+\w+){0,2}?\s+(?:(?:is|are|est|sont)\s+)?'
+    r'(?<!\bnot\s)(?<!\bno\s)(?<!\bnever\s)(?<!\bpas\s)(?<!\bplus\s)(?<!\bjamais\s)(?:frozen|gel(?:é|ée|és|ées))\b')
 # Restrictions that carry pause, approval or wait wording. Unlike a bare negation
 # ('- Do not add dependencies' beside '- Merge requests use squash'), they are
 # also read across the items of one list or the rows of one table.
@@ -224,7 +231,8 @@ HOLD_FREE = '|'.join(pattern for pattern, _ in HOLD_BRANCHES)
 RUN_WORDS = {
     'm': re.compile(MERGE_WORD),
     'p': re.compile(PAUSE_WORD + r'|\b(?:hold|attente)\b'),
-    'a': re.compile(APPROVAL_WORD + r'|\b(?:off|light)\b'),
+    # Supersets of the words each class stands for: 'my' and 'go to' may sit in two items.
+    'a': re.compile(APPROVAL_WORD + r'|\b(?:off|light|go)\b'),
     'q': re.compile(r'\b(?:only|seulement|uniquement|après|after|requires?|needs?|subject)\b'),
     'b': re.compile(r'\b(?:before|avant)\b'),
     'o': re.compile(r'\b(?:obtain|get|seek|receive|wait)\b'),
@@ -233,7 +241,7 @@ RUN_WORDS = {
     'u': re.compile(r'\b(?:until|unless|jusqu\w*|que)\b'),
     'x': re.compile(APPROVAL_OR_FIRST + r'|\b(?:off|light|vert)\b'),
     'n': re.compile(BAN_WORD + r'|\b(?:allowed|permitted|autoris\w*|permis\w*)\b'),
-    'z': re.compile(FREEZE_WORD),
+    'z': re.compile(FREEZE_STEM),
     'r': re.compile(r'\b(?:required|needed|mandatory|requise?s?|obligatoires?|nécessaires?)\b'),
     'k': re.compile(r'\b(?:ask|consult\w*|check|confirm|ping|demande\w*)\b'),
     't': re.compile(r'\b' + DECIDER),

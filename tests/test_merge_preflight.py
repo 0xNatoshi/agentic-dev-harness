@@ -537,6 +537,15 @@ TEXT_CASES = (
     Case("caught aucune fusion sans validation", 2, "Aucune fusion sans validation humaine."),
     Case("caught merge freeze lockdown", 2, "Merge freeze lockdown in effect."),
     Case("caught freeze locks merges", 2, "A freeze locks all merges until further notice."),
+    # Final delta recheck on 4d48804: 'go' as a noun after a determiner, freezes of dependency merges.
+    Case("caught my go to proceed", 2, "Merging requires my go to proceed."),
+    Case("caught the go to deploy", 2, "Merges require the go to deploy."),
+    Case("caught a go back from the owner", 2, "Merging needs a go back from the owner."),
+    Case("caught possessive go to proceed", 2, "Merging requires the maintainer’s go to proceed."),
+    Case("caught freeze dependency merges", 2, "Freeze dependency merges."),
+    Case("caught freeze version bumps and merges", 2, "Freeze version bumps and merges."),
+    Case("caught freeze the version-2 merges", 2, "Freeze the version-2 merges."),
+    Case("caught main not develop is frozen", 2, "Main not develop is frozen."),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -574,8 +583,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 455 or len({case.name for case in ALL_CASES}) != 455:
-    raise RuntimeError("Merge fixture inventory must contain 455 unique cases")
+if len(ALL_CASES) != 463 or len({case.name for case in ALL_CASES}) != 463:
+    raise RuntimeError("Merge fixture inventory must contain 463 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
