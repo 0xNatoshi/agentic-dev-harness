@@ -405,6 +405,51 @@ TEXT_CASES = (
     Case("kept only method cancelled by but not", 2, "No rebase merges; squash merges only, but not."),
     Case("kept French permitted method cancelled by jamais", 2,
          "Pas de squash merge ; utilisez des merge commits, jamais."),
+    # Hold vocabulary: integration verbs with PR scope, passive and modal forms, bans and freezes.
+    Case("caught integrate PR without approval", 2, "Do not integrate any PR without my approval."),
+    Case("caught merge after my review", 2, "Merge only after my review."),
+    Case("caught hold PRs until go", 2, "Hold all PRs until I say go."),
+    Case("caught PRs wait before landing", 2, "Pull requests must wait for my review before landing on main."),
+    Case("caught French integrate PR", 2, "N’intègre aucune PR sans mon accord."),
+    Case("caught French fusionne", 2, "Ne fusionne rien sans mon accord."),
+    Case("caught passive must not be merged", 2, "PRs must not be merged without my approval."),
+    Case("caught passive merged until", 2, "Nothing should be merged until I approve."),
+    Case("caught ask me before merged", 2, "Ask me before anything is merged."),
+    Case("caught French passive fusionné", 2, "Rien ne doit être fusionné sans mon accord."),
+    Case("caught merging not allowed until I approve", 2, "Merging is not allowed until I approve."),
+    Case("caught merging not allowed until Friday", 2, "Merging is not allowed until Friday."),
+    Case("caught merging prohibited", 2, "Merging is prohibited until I approve."),
+    Case("caught merges frozen", 2, "Merges are frozen."),
+    Case("caught merge freeze", 2, "Merge freeze until Friday."),
+    Case("caught no automerge", 2, "No automerge."),
+    Case("caught ask me before merging", 2, "Ask me before merging."),
+    Case("caught leave merging to me", 2, "Leave merging to me."),
+    Case("caught French jamais de fusion", 2, "Jamais de fusion sans moi."),
+    Case("caught approval required for merges", 2, "Approval required for merges."),
+    Case("caught must not merge from upstream", 2, "Agents must not merge from upstream."),
+    Case("caught may not merge PRs", 2, "Contributors may not merge PRs."),
+    Case("caught avoid merging PRs", 2, "Avoid merging pull requests."),
+    Case("caught ban across list items", 2, "- Merging\n- not allowed"),
+    Case("cleared land without PR scope", 0, "Do not land broken code."),
+    Case("cleared ship PRs", 0, "Ship small PRs."),
+    Case("cleared integrate upstream", 0, "Integrate upstream changes weekly."),
+    Case("cleared review without first person", 0, "Merge only after CI and review pass."),
+    Case("cleared approval not required", 0, "Approval is not required to merge a ready PR."),
+    Case("cleared merge for me", 0, "Merge it for me when ready."),
+    Case("cleared ask a bot before merging", 0, "Ask for a Codex review before merging."),
+    Case("cleared avoid merge conflicts", 0, "Avoid merge conflicts: rebase often."),
+    Case("cleared negated hold on PRs", 0, "Do not hold PRs for approval once gates pass."),
+    Case("cleared freeze in another clause", 0, "Feature freeze is over; merge ready PRs."),
+    Case("cleared frozen in another clause", 0, "Merge PRs to main; frozen tags stay untouched."),
+    Case("cleared must not in another clause", 0, "PR titles must not exceed 72 characters; merge with squash."),
+    Case("cleared ban in another clause", 0, "Direct pushes to main are not allowed; merge through PRs."),
+    Case("cleared merged without another go", 0, "Ready PRs are merged without another ritual go."),
+    Case("cleared criteria hold", 0,
+         "When the PR is ready and green, merge it directly - no approval needed when the criteria hold."),
+    Case("cleared integration named far from its PR", 0,
+         "Deliver the migration PR; its policy changes cannot override the hold governing its own integration."),
+    Case("conservative cannot merge a PR", 2, "You cannot merge a PR with failing checks."),
+    Case("conservative French do not hesitate", 2, "N’hésite pas à fusionner les PR prêtes."),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -442,8 +487,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 330 or len({case.name for case in ALL_CASES}) != 330:
-    raise RuntimeError("Merge fixture inventory must contain 330 unique cases")
+if len(ALL_CASES) != 372 or len({case.name for case in ALL_CASES}) != 372:
+    raise RuntimeError("Merge fixture inventory must contain 372 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

@@ -119,9 +119,27 @@ END = re.compile(r'^\s*<!--\s*github-workflow:end\s*-->\s*$')
 PREFIX = r'(?:autonomous\s+merge\s+suspended\s*-\s*(?:request\s+dated|requested\s+on|asked\s+on)|merge\s+autonome\s+suspendu\s*-\s*(?:demande\s+du|demandé\s+le))'
 EXAMPLE = re.compile(PREFIX + r'\s*<date>(?!\s*\d)')
 DATED = re.compile(PREFIX + r'\s*(\d{4}-\d{2}-\d{2})(?![\w-])')
-MERGE_WORD = r'\b(?:merges?|merging|merger|mergez|fusions?|fusionner|fusionnement|fusionnez)\b'
+MERGE_WORD = r'\b(?:merges?|merged|merging|merger|mergez|automerg\w*|fusions?|fusionn\w*)\b'
 PAUSE_WORD = r'\b(?:suspend\w*|paused?|on\s+hold|disabled|forbidden|blocked|en\s+attente|interdit\w*|interdic\w*|bloqu\w*|désactiv\w*|différ\w*)\b'
-APPROVAL_WORD = r'\b(?:approv\w*|agreement|consent\w*|permission|authori[sz]\w*|sign(?:s|ed)?[ -]?off|green\s+light|accord|go|confirmation|autoris\w*)\b'
+# Common rule wording that PAUSE_WORD lacks. Read within one clause only, as in 'Direct
+# pushes are not allowed; merge through PRs' it restricts something else.
+BAN_WORD = r'\b(?:prohibit\w*|not\s+(?:allowed|permitted))\b'
+FREEZE_WORD = r'\b(?:frozen|freeze|gel(?:é|ée|és|ées)?)\b'
+FIRST_PERSON = r'\bi\b(?!\.e\b)|\bj(?=[’\x27])|\b(?:me|my|mine|we|us|our|je|moi|mon|ma|mes|nous|notre|nos)\b'
+# 'review', 'ok' and 'go' said by someone: 'my review', 'mon feu vert', 'until I say go'.
+APPROVAL_WORD = (r'\b(?:approv\w*|agreement|consent\w*|permission|authori[sz]\w*|sign(?:s|ed)?[ -]?off|green\s+light'
+                 r'|feu\s+vert|accord|go|confirmation|autoris\w*'
+                 r'|(?:my|our|mon|ma|mes|notre|nos)\s+(?:own\s+)?(?:reviews?|ok(?:ay)?|relecture|revue)'
+                 r'|(?:i|we)\s+(?:say|give)\s+(?:so|ok(?:ay)?))\b')
+APPROVAL_OR_FIRST = r'(?:' + APPROVAL_WORD + r'|' + FIRST_PERSON + r')'
+# Landing or shipping a pull request integrates it; 'Do not land broken code' does not name one.
+INTEGRATION_WORD = re.compile(r'\b(?:integrat\w*|lands?|landed|landing|ships?|shipped|shipping|intègr\w*|intégr\w*)\b')
+# The scope must sit in the same clause, near the verb: 'integrate any PR', 'landing on main',
+# 'PRs are shipped', 'Hold all PRs'. A PR named in an earlier clause does not make 'its own
+# integration' a merge, nor 'no approval needed when they hold' a hold on it.
+SCOPE_NEAR = 40
+NOT_BEFORE = re.compile(r'\b(?:not|never|n[’\x27]t|no\s+need\s+to|pas|jamais)\s+(?:\w+\s+)?$')
+HOLD_VERB = re.compile(r'\b(?:hold\w*|paus\w*|freez\w*|frozen|wait\w*|suspend\w*|attend\w*|gel\w*)\b')
 # Restrictions that carry pause, approval or wait wording. Unlike a bare negation
 # ('- Do not add dependencies' beside '- Merge requests use squash'), they are
 # also read across the items of one list or the rows of one table.
@@ -133,7 +151,20 @@ HOLD_BRANCHES = (
     (APPROVAL_WORD + r'[^.!?]{0,90}\b(?:before|avant)\s+(?:de\s+|toute?\s+|any\s+)?' + MERGE_WORD, 'mab'),
     (r'\bbefore\s+' + MERGE_WORD + r'[^.!?]{0,90}\b(?:obtain|get|seek|receive|wait\s+for)\b[^.!?]{0,90}' + APPROVAL_WORD, 'mboa'),
     (MERGE_WORD + r'[^.!?]{0,90}\b(?:wait\w*|attend\w*)\b[^.!?]{0,90}' + APPROVAL_WORD, 'mwa'),
-    (r'\b(?:stop|hold|wait|attend\w*)\b[^.!?]{0,90}' + MERGE_WORD, 'mh'))
+    (r'\b(?:stop|hold|wait|attend\w*)\b[^.!?]{0,90}' + MERGE_WORD, 'mh'),
+    # 'without' is left to the negated forms: 'merged without another ritual go' grants autonomy.
+    (MERGE_WORD + r'[^.!?]{0,90}\b(?:until|unless|jusqu\w*|tant\s+que)\b[^.!?]{0,90}' + APPROVAL_OR_FIRST, 'mux'),
+    (MERGE_WORD + r'[^.!?;:]{0,60}' + BAN_WORD + r'|' + BAN_WORD + r'[^.!?;:,]{0,60}' + MERGE_WORD, 'mn'),
+    (MERGE_WORD + r'\s+(?:(?:is|are)\s+)?' + FREEZE_WORD + r'|' + FREEZE_WORD + r'\s+(?:on\s+|of\s+|des\s+)?' + MERGE_WORD, 'mz'),
+    # 'Approval required for merges'; 'Approval is not required to merge' grants autonomy.
+    (APPROVAL_WORD + r'\s+(?:(?:is|are|est|sont)\s+)?(?:required|needed|mandatory|requise?s?|obligatoires?|nécessaires?)\b'
+     r'[^.!?]{0,90}' + MERGE_WORD, 'arm'),
+    # Asking someone who decides, not a bot or CI: 'Ask me before merging'.
+    (r'\b(?:ask|consult)\s+(?:me|us|the\s+(?:owner|maintainers?))\b[^.!?]{0,60}\b(?:before|avant)\b[^.!?]{0,90}' + MERGE_WORD
+     + r'|\b(?:demande[rz]?-moi|demandez-nous|me\s+demander)\b[^.!?]{0,60}\bavant\b[^.!?]{0,90}' + MERGE_WORD, 'kbm'),
+    # 'Leave merging to me', 'Merging is up to us'; 'Merge it for me' delegates instead.
+    (r'\bleav\w*\b[^.!?]{0,30}' + MERGE_WORD + r'[^.!?]{0,30}\bto\s+(?:me|us)\b'
+     r'|' + MERGE_WORD + r'[^.!?]{0,60}\b(?:up\s+to|left\s+to|reserved\s+(?:to|for)|réservée?s?\s+à)\s+(?:me|us|moi|nous)\b', 'mt'))
 HOLD_FREE = '|'.join(pattern for pattern, _ in HOLD_BRANCHES)
 # Word classes of HOLD_BRANCHES. A phrase such as 'on hold' may be split across
 # two items, so its last word counts on its own.
@@ -145,7 +176,14 @@ RUN_WORDS = {
     'b': re.compile(r'\b(?:before|avant)\b'),
     'o': re.compile(r'\b(?:obtain|get|seek|receive|wait)\b'),
     'w': re.compile(r'\b(?:wait\w*|attend\w*)\b'),
-    'h': re.compile(r'\b(?:stop|hold|wait|attend\w*)\b')}
+    'h': re.compile(r'\b(?:stop|hold|wait|attend\w*)\b'),
+    'u': re.compile(r'\b(?:until|unless|jusqu\w*|que)\b'),
+    'x': re.compile(APPROVAL_OR_FIRST + r'|\b(?:off|light|vert)\b'),
+    'n': re.compile(BAN_WORD + r'|\b(?:allowed|permitted)\b'),
+    'z': re.compile(FREEZE_WORD),
+    'r': re.compile(r'\b(?:required|needed|mandatory|requise?s?|obligatoires?|nécessaires?)\b'),
+    'k': re.compile(r'\b(?:ask|consult|demande[rz]?-moi|demandez-nous|demander)\b'),
+    't': re.compile(r'\b(?:me|us|moi|nous)\b')}
 RUN_BRANCHES = tuple((re.compile(pattern), words) for pattern, words in HOLD_BRANCHES)
 # A HOLD_BRANCHES match has no sentence punctuation and, for ordinary word
 # lengths, starts fewer than RUN_WINDOW characters before its last item, so a
@@ -153,13 +191,17 @@ RUN_BRANCHES = tuple((re.compile(pattern), words) for pattern, words in HOLD_BRA
 RUN_WINDOW = 300
 FREE = re.compile(
     HOLD_FREE
-    + r'|\b(?:do\s+not|don[’\x27]t|no|never|ne\s+pas|pas\s+de|ne)\b[^.!?]{0,90}' + MERGE_WORD)
+    + r'|\b(?:do\s+not|don[’\x27]t|no|never|ne\s+pas|pas\s+de|ne)\b[^.!?]{0,90}' + MERGE_WORD
+    # Newer negators stay in one clause: 'PR titles must not exceed 72 characters; merge with squash'.
+    + r'|\b(?:n(?=[’\x27])|jamais|(?:must|may|should|shall)\s+not|cannot|can[’\x27]t|mustn[’\x27]t|shouldn[’\x27]t)\b'
+    r'[^.!?;:]{0,60}' + MERGE_WORD
+    + r'|\bavoid\w*\s+(?:any\s+|all\s+)?(?:merging|fusionner)\b')
 
 # A flagged unit that only states git mechanics is cleared when none of these apply.
 HOLD_CONTEXT = re.compile(
-    PAUSE_WORD + r'|' + APPROVAL_WORD
-    + r'|\bi\b(?!\.e\b)|\bj(?=[’\x27])'
-    r'|\b(?:me|my|mine|we|us|our|je|moi|mon|ma|mes|nous|notre|nos|until|unless|without|before|wait\w*|stop\w*'
+    PAUSE_WORD + r'|' + BAN_WORD + r'|' + APPROVAL_WORD
+    + r'|' + FIRST_PERSON
+    + r'|\b(?:until|unless|without|before|wait\w*|stop\w*'
     r'|hold\w*|ask\w*|review\w*|pending|confirm\w*|decision|decide\w*|notice|further|today|tomorrow|week\w*'
     r'|month\w*|sprint\w*|time\s+being|moment|instant|now|currently|temporar\w*|freez\w*|frozen'
     r'|jusqu\w*|sans|avant|attend\w*|tant|décision|décid\w*|nouvel\w*|ordre|demand\w*|revue|valid\w*'
@@ -399,7 +441,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
         # Only a restriction that ends in the new item is new; earlier ones were
         # read before. It cannot cross sentence punctuation, and each branch is
         # tried only when the run holds every word class it needs.
-        if len(run) == 1 or not set(words) & set('mpa'):
+        if len(run) == 1 or not set(words) & set('mpaxnz'):
             return
         earlier = ' '.join(item for item, _ in itertools.islice(run, len(run) - 1))
         start = max(earlier.rfind('.'), earlier.rfind('!'), earlier.rfind('?')) + 1
@@ -637,9 +679,28 @@ def mechanics_only(unit):
     return not (permitted & banned) and 'merge' not in banned and (bool(permitted) or not methods)
 
 
+def near_scope(text, match):
+    before = re.split(r'[.!?;:]', text[max(0, match.start() - SCOPE_NEAR):match.start()])[-1]
+    after = re.split(r'[.!?;:]', text[match.end():match.end() + SCOPE_NEAR])[0]
+    return bool(SCOPE.search(before) or SCOPE.search(after))
+
+
+def integrations_as_merges(text):
+    return INTEGRATION_WORD.sub(lambda match: 'merge' if near_scope(text, match) else match.group(), text)
+
+
 def free_restriction(context, unit):
     """True for a restriction, 'cleared' for an exempted git-mechanics rule, else False."""
     text = (context + ' ' + unit).strip()
+    if SCOPE.search(unit):
+        # 'Hold all PRs until I say go.' holds integration without a merge word.
+        # Read per sentence, as HOLD_BRANCHES never cross sentence punctuation.
+        # 'Do not hold PRs for approval' lifts a hold instead.
+        if any(re.search(APPROVAL_OR_FIRST, part) and any(
+                near_scope(part, verb) and not NOT_BEFORE.search(part[:verb.start()]) for verb in HOLD_VERB.finditer(part))
+               for part in re.split(r'[.!?]', unit)):
+            return True
+        text = integrations_as_merges(text)
     if not FREE.search(text):
         return False
     if HOLD_CONTEXT.search(text) or SCOPE.search(text) or NEVER_EXEMPT.search(text):
