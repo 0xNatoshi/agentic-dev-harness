@@ -590,14 +590,18 @@ class InstallerTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX directory modes")
     def test_rollback_blocks_a_target_without_owner_write_permission_before_any_rename(self):
         self.v52_layout()
+        # An explicit mode, so the recorded mode does not depend on the umask.
+        self.target.chmod(0o750)
         receipt_path = self.installed()
         after = snapshot(self.target)
         recorded = json.loads(receipt_path.read_text(encoding="utf-8"))["after"]["."]["mode"]
+        self.assertEqual(recorded, 0o750)
         self.target.chmod(0o555)
         self.addCleanup(self.target.chmod, recorded)
         result = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
         self.assert_refused(result, 2)
-        self.assertIn(f"add owner write permission to {self.target}", json.loads(result.stderr)["error"])
+        self.assertIn(f"add owner write permission to {self.target} (the receipt records mode 0750), then run rollback again",
+                      json.loads(result.stderr)["error"])
         self.assertEqual(snapshot(self.target), after)
         self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
         self.assertFalse((self.state() / "CURRENT").exists())
@@ -608,13 +612,14 @@ class InstallerTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX directory modes")
     def test_rollback_refusal_names_the_recorded_root_mode(self):
         self.v52_layout()
+        # An explicit mode, so the recorded mode does not depend on the umask.
+        self.target.chmod(0o755)
         receipt_path = self.installed()
-        recorded = json.loads(receipt_path.read_text(encoding="utf-8"))["after"]["."]["mode"]
-        self.assertNotEqual(recorded, 0o700)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["after"]["."]["mode"], 0o755)
         self.target.chmod(0o700)
         rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
         self.assert_refused(rollback, 1)
-        self.assertIn(f"restore mode {recorded:04o} on {self.target} (now 0700)", json.loads(rollback.stderr)["error"])
+        self.assertIn(f"restore mode 0755 on {self.target} (now 0700)", json.loads(rollback.stderr)["error"])
 
     def test_rerun_recover_sets_a_stale_restoration_copy_aside(self):
         before, parked = self.crash_after_parking()

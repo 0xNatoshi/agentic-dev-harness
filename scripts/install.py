@@ -497,20 +497,25 @@ class Locations:
         self.target = self.skills / SKILL
         self.state = self.skills.parent / "dev-harness-install"
 
-    def require_movable(self) -> None:
+    def require_movable(self, recorded_mode: int | None = None, retry: str = "plan again") -> None:
         """Block before any rename when the target or its skill root lacks owner write permission.
 
         POSIX refuses to move such a directory to another parent, or to rename inside such a root, so
         apply and rollback would stop at their first rename. Windows is not checked: a directory's
         read-only attribute does not prevent renames there, and Explorer sets it on customized folders.
+        recorded_mode is the target mode a receipt expects, named so one fix also satisfies its drift check.
         """
         if os.name == "nt":
             return
-        for path in (self.skills, self.target):
+        for path, reason in ((self.skills, f"so {SKILL} cannot be moved in or out of it"),
+                             (self.target, "so it cannot be moved to another directory")):
             if exists(path) and not os.lstat(str(path)).st_mode & stat.S_IWUSR:
                 mode = stat.S_IMODE(os.lstat(str(path)).st_mode)
-                raise Blocked(f"{path} has no owner write permission (mode {mode:04o}), so it cannot be renamed; "
-                              f"add owner write permission to {path}, then plan again", {"path": str(path), "mode": f"{mode:04o}"})
+                hint = f"add owner write permission to {path}"
+                if path == self.target and recorded_mode is not None:
+                    hint += f" (the receipt records mode {recorded_mode:04o})"
+                raise Blocked(f"{path} has no owner write permission (mode {mode:04o}), {reason}; {hint}, then {retry}",
+                              {"path": str(path), "mode": f"{mode:04o}"})
 
     def describe(self) -> dict:
         return {
@@ -1181,7 +1186,8 @@ def command_rollback(options) -> dict:
     with Lock(locations.state):
         if exists(locations.state / "CURRENT"):
             raise Blocked(f"An interrupted transaction is recorded in {locations.state / 'CURRENT'}; run `recover` first")
-        locations.require_movable()
+        root = receipt["after"].get(".")
+        locations.require_movable(root.get("mode") if isinstance(root, dict) else None, "run rollback again")
         changed = differences(receipt["after"], inventory(locations.target))
         if changed:
             message = "The active tree no longer matches the receipt's after-inventory; rollback refused"
