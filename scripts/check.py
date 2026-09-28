@@ -252,7 +252,7 @@ def main():
             # The managed policy documents this exact check as an instruction.
             text = text.replace("grep -nF 'TO FILL' <pr-body-file>", "the PR placeholder check")
         require(not re.search(r"\{\{[A-Z_]+\}\}|TO FILL|\[year\]|\[fullname\]", text), f"Unresolved project field: {name}")
-    for name in ["profiles/hermes-development.md", "docs/INSTALL-CODEX.md", "docs/INSTALL-CLAUDE.md", "docs/package-README.md"]:
+    for name in ["configurations/hermes/development.md", "docs/INSTALL-CODEX.md", "docs/INSTALL-CLAUDE.md", "docs/package-README.md"]:
         require("v" + release in (ROOT / name).read_text(encoding="utf-8"), f"Release version missing: {name}")
     module = ROOT / "skills/github-workflow/scripts/workflow-context.py"
     spec = importlib.util.spec_from_file_location("workflow_context", module)
@@ -260,7 +260,7 @@ def main():
     spec.loader.exec_module(context)
     # Project holds belong to merge preflight, not to the build/lint gate.
     # Distributed neutral profiles must not propagate a project's dated hold.
-    for name in ["profiles/AGENTS.template.md", "profiles/CLAUDE.template.md", "profiles/hermes-development.md"]:
+    for name in ["configurations/common/AGENTS.md", "configurations/claude-desktop/CLAUDE.md", "configurations/hermes/development.md"]:
         require(context.scan_text((ROOT / name).read_text(encoding="utf-8")) == 0, f"Unexpected suspension in source profile: {name}")
     workflow_findings = check_repository(ROOT)
     if workflow_findings:

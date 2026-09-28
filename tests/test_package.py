@@ -39,6 +39,8 @@ class PackageTests(unittest.TestCase):
                 self.assertEqual(common, archive.read(prefix + "configurations/codex/AGENTS.md"))
                 self.assertEqual(common, archive.read(prefix + "configurations/claude-desktop/AGENTS.md"))
                 self.assertEqual(archive.read(prefix + "CLAUDE.md"), archive.read(prefix + "configurations/claude-desktop/CLAUDE.md"))
+                self.assertEqual(archive.read(prefix + "configurations/hermes/development.md"),
+                                 (ROOT / "configurations/hermes/development.md").read_bytes())
                 self.assertTrue(all(".." not in Path(name).parts and not name.startswith("/") for name in names))
                 self.assertNotIn(prefix + "TASKS.md", names)
                 self.assertNotIn(prefix + ".git/config", names)
