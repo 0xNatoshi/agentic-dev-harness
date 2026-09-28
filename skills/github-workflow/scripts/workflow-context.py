@@ -2,7 +2,6 @@
 """Read-only origin binding and conservative suspension checks (Python 3.8+)."""
 import collections
 import datetime
-import itertools
 import json
 import re
 import subprocess
@@ -249,7 +248,7 @@ RUN_WORDS = {
     'g': re.compile(r'\b(?:nothing|nobody|no\s+one|aucune?|rien|personne)\b'),
     # A bare 'go' is an approval word, so 'must be approved' needs its own class.
     'e': re.compile(r'\b(?:approved|authori[sz]ed|signed)\b')}
-RUN_BRANCHES = tuple((re.compile(pattern), words) for pattern, words in HOLD_BRANCHES)
+RUN_BRANCHES = tuple((re.compile(pattern), frozenset(words)) for pattern, words in HOLD_BRANCHES)
 # A HOLD_BRANCHES match has no sentence punctuation and, for ordinary word
 # lengths, starts fewer than RUN_WINDOW characters before its last item, so a
 # list or table is read in bounded windows.
@@ -480,7 +479,8 @@ def units(lines, hold_found, heading_found=lambda level: None):
     row_intro = False  # the current table holds a negated lead-in row so far
     block, kind, indent = [], None, 0
     fence = None   # (marker, context, lines) of an open fenced block
-    run = collections.deque()  # (text, words) of recent adjacent list items and table rows
+    run = collections.deque()  # texts of recent adjacent list items and table rows
+    run_classes = collections.deque()  # their RUN_WORDS classes
     run_words = collections.Counter()  # RUN_WORDS classes across the run
     run_size, run_held = 0, False
 
@@ -503,12 +503,12 @@ def units(lines, hold_found, heading_found=lambda level: None):
         # cannot push an earlier item out of the window.
         text = strip_markers(text)
         # Keep at least RUN_WINDOW characters of earlier items before the new one.
-        while len(run) > 1 and run_size - len(run[0][0]) - 1 >= RUN_WINDOW:
-            old, words = run.popleft()
-            run_size -= len(old) + 1
-            run_words.subtract(words)
+        while len(run) > 1 and run_size - len(run[0]) - 1 >= RUN_WINDOW:
+            run_size -= len(run.popleft()) + 1
+            run_words.subtract(run_classes.popleft())
         words = ''.join(key for key, pattern in RUN_WORDS.items() if pattern.search(text))
-        run.append((text, words))
+        run.append(text)
+        run_classes.append(words)
         run_size += len(text) + 1
         run_words.update(words)
         # Only a restriction that ends in the new item is new; earlier ones were
@@ -516,17 +516,22 @@ def units(lines, hold_found, heading_found=lambda level: None):
         # tried only when the run holds every word class it needs.
         if len(run) == 1 or not set(words) & set('mpaxnz'):
             return
-        earlier = ' '.join(item for item, _ in itertools.islice(run, len(run) - 1))
-        start = max(earlier.rfind('.'), earlier.rfind('!'), earlier.rfind('?')) + 1
-        joined = (earlier + ' ' + text)[start:]
-        if any(all(run_words[key] for key in needed) and pattern.search(joined)
-               for pattern, needed in RUN_BRANCHES):
+        present = {key for key, count in run_words.items() if count}
+        candidates = [pattern for pattern, needed in RUN_BRANCHES if needed <= present]
+        if not candidates:
+            return
+        joined = ' '.join(run)
+        cut = len(joined) - len(text) - 1  # end of the earlier items
+        start = max(joined.rfind('.', 0, cut), joined.rfind('!', 0, cut), joined.rfind('?', 0, cut)) + 1
+        joined = joined[start:]
+        if any(pattern.search(joined) for pattern in candidates):
             run_held = True
             hold_found()
 
     def end_run():
         nonlocal run_size
         run.clear()
+        run_classes.clear()
         run_words.clear()
         run_size = 0
 
