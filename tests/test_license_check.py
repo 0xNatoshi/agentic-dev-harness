@@ -1,5 +1,6 @@
 """Exercise the documented exact license comparison in disposable repositories."""
 
+import os
 from pathlib import Path
 import re
 import shutil
@@ -65,9 +66,8 @@ class LicenseCheckTests(unittest.TestCase):
 
     def check(self, expected: int, message: str, environment: dict[str, str] | None = None,
               directory: Path | None = None) -> None:
-        # An absolute bash keeps the command runnable under a PATH without Python.
-        bash = str(Path(resolved_bash()).resolve())
-        result = run([bash, "-c", documented_command()], directory or self.repo, environment or self.environment)
+        # The resolved bash is absolute, so the command stays runnable under a PATH without Python.
+        result = run([resolved_bash(), "-c", documented_command()], directory or self.repo, environment or self.environment)
         self.assertEqual(result.returncode, expected, f"stdout={result.stdout!r}, stderr={result.stderr!r}")
         self.assertIn(message, result.stdout + result.stderr)
 
@@ -125,7 +125,11 @@ class LicenseCheckTests(unittest.TestCase):
         # A Windows Store alias exits 9009 instead of running Python.
         (tools / "python3").write_text("#!/bin/sh\nexit 9009\n", encoding="utf-8", newline="")
         (tools / "python3").chmod(0o755)
-        self.check(0, "Exact license text verified: staged LICENSE", self.environment | {"PATH": str(tools)})
+        path = str(tools)
+        if os.name == "nt":
+            # Native python.exe starts git through CreateProcess, which cannot run the sh shim.
+            path += os.pathsep + os.path.dirname(shutil.which("git", path=self.environment["PATH"]))
+        self.check(0, "Exact license text verified: staged LICENSE", self.environment | {"PATH": path})
 
     def test_subdirectory_run_is_not_compared(self) -> None:
         self.commit(MIT_LICENSE.encode())

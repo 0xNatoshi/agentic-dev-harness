@@ -16,20 +16,22 @@ def write_fixture(path: Path, text: str) -> None:
 
 
 def is_wsl_launcher(path: str) -> bool:
-    """True for the Windows System32 or WindowsApps bash.exe that starts WSL."""
-    parts = [part.lower() for part in PureWindowsPath(path).parts]
-    return parts[-1:] == ["bash.exe"] and ("system32" in parts or "windowsapps" in parts)
+    """True for the System32 or WindowsApps bash(.exe) that starts WSL."""
+    launcher = PureWindowsPath(path)
+    return (launcher.stem.lower() == "bash" and launcher.suffix.lower() in ("", ".exe")
+            and launcher.parent.name.lower() in ("system32", "windowsapps"))
 
 
 def resolve_bash(environ: dict[str, str] | None = None, which=shutil.which) -> str:
-    """HARNESS_BASH if set, else bash on PATH; the WSL launcher is rejected."""
+    """HARNESS_BASH if set and non-empty, else bash on PATH, as an absolute path; the WSL launcher is rejected."""
     environ = os.environ if environ is None else environ
     bash = environ.get("HARNESS_BASH") or which("bash")
     if not bash:
         raise RuntimeError("bash not found: install Git Bash or set HARNESS_BASH to its bash.exe")
     if is_wsl_launcher(bash):
         raise RuntimeError(f"{bash} starts WSL, not Git Bash: set HARNESS_BASH to Git Bash's bash.exe")
-    return bash
+    # Absolute, because a relative program path is resolved against each fixture's cwd.
+    return os.path.abspath(bash)
 
 
 @functools.cache
@@ -88,5 +90,5 @@ def run(
         args = [bash(), *args[1:]]
     return subprocess.run(
         args, cwd=cwd, env=environment, capture_output=True, text=True,
-        encoding="utf-8", timeout=20
+        encoding="utf-8", errors="backslashreplace", timeout=20
     )
