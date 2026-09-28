@@ -1180,6 +1180,8 @@ def command_rollback(options) -> dict:
         raise Refused(f"The receipt differs from the canonical receipt {receipt_path}; roll back with that one")
     if receipt.get("state") != "installed":
         raise Refused(f"The receipt state is {receipt.get('state')!r}; only an installed receipt can be rolled back")
+    if not isinstance(receipt.get("after"), dict):
+        raise Refused("The receipt has no after-inventory; rollback refused")
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check()

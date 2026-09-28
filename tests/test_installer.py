@@ -767,6 +767,15 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(snapshot(target), before)
                 self.assertEqual(snapshot(legacy), legacy_before)
 
+    def test_rollback_refuses_a_receipt_without_an_after_inventory(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt_path.write_text(json.dumps(dict(receipt, after=None)), encoding="utf-8")
+        result = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(result, 1)
+        self.assertIn("after-inventory", json.loads(result.stderr)["error"])
+
     def test_rollback_refuses_a_receipt_copy_that_differs(self):
         self.v52_layout()
         receipt_path = self.installed()
