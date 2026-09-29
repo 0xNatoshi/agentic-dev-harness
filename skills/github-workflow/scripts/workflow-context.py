@@ -282,7 +282,7 @@ HOLD_BRANCHES = (
     (r'\b(?:nothing|nobody|no\s+one|aucune?|rien|personne)\b[^.!?;:]{0,40}(?:' + MERGE_WORD + r'|' + INTEGRATION_WORD.pattern + r')'
      + r'[^.!?;:]{0,60}\b(?:without|sans|until|unless|jusqu\w*|before|avant)\b'
      + r'(?:(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:green\s+)?(?:ci|checks?|tests?|builds?|lint\w*|status\s+checks?)\b)'
-     + r'|[^.!?;:]{0,60}(?:' + APPROVAL_OR_FIRST + r'|\b' + DECIDER + r'))', 'mg'),
+     + r'|[^.!?;:]{0,60}(?:' + APPROVAL_OR_FIRST + r'|\b' + DECIDER + r'))', 'mgc'),
     # 'Approval required for merges'; 'Approval is not required to merge' grants autonomy.
     (APPROVAL_WORD + r'\s+(?:(?:is|are|est|sont)\s+)?(?:required|needed|mandatory|requise?s?|obligatoires?|nécessaires?)\b'
      r'[^.!?]{0,90}' + MERGE_WORD, 'arm'),
@@ -379,14 +379,17 @@ RUN_WORDS = {
     'f': re.compile(r'\b' + FIRST_WORD),
     'd': re.compile(r'\b' + DECIDER_ACT),
     'g': re.compile(r'\b(?:nothing|nobody|no\s+one|aucune?|rien|personne)\b'),
+    # The connective 'Nothing is merged without my consent' needs, so '- Merge nothing' above a
+    # long list of '- first' items is not read again on each of them.
+    'c': re.compile(r'\b(?:without|sans|until|unless|jusqu\w*|before|avant)\b'),
     # A bare 'go' is an approval word, so 'must be approved' needs its own class.
     'e': re.compile(r'\b(?:approved|authori[sz]ed|signed)\b')}
 # Word classes a branch can end on. Every branch can end on one of RUN_ENDS_ANY. An item with
 # none of them, only a decider or 'first', can end only the branches below, and only on the
-# listed classes: 'mkf' on 'first', 'kbm' and 'mtl' on who decides, 'mg' on either. 'mtl' then
+# listed classes: 'mkf' on 'first', 'kbm' and 'mtl' on who decides, 'mgc' on either. 'mtl' then
 # ends on 'to the owner', 'reserved for me' or 'm'est réservée', so the run must hold one.
 RUN_ENDS_ANY = frozenset('mpaxnz')
-RUN_ENDS_DECIDER = {'mkf': (frozenset('f'), None), 'kbm': (frozenset('t'), None), 'mg': (frozenset('ft'), None),
+RUN_ENDS_DECIDER = {'mkf': (frozenset('f'), None), 'kbm': (frozenset('t'), None), 'mgc': (frozenset('ft'), None),
                     'mtl': (frozenset('t'), re.compile(r'\b(?:to|for|à|aux?)\s+' + DECIDER_ROLE
                                                        + r'|\b(?:me\s+|nous\s+|m[’\x27])(?:est|sont)\s+réservée?s?\b'))}
 RUN_ENDS = RUN_ENDS_ANY | frozenset('ft')

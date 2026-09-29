@@ -855,3 +855,23 @@ class ScanTimeTests(unittest.TestCase):
         start = time.monotonic()
         self.assertEqual(module.scan_text("- merge\n- go\n" * 10000), 0)
         self.assertLess(time.monotonic() - start, 3)
+
+    def test_list_without_connective_tries_no_run_branch(self) -> None:
+        # Reading 'Nothing is merged without ...' on every '- first' item made this list 1.9x
+        # slower than before. Without its connective no branch can match, so none is tried.
+        spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        searches = []
+
+        class Counted:
+            def __init__(self, pattern):
+                self.pattern = pattern
+
+            def search(self, text):
+                searches.append(self.pattern.pattern)
+                return self.pattern.search(text)
+
+        module.RUN_BRANCHES = tuple((Counted(pattern), *rest) for pattern, *rest in module.RUN_BRANCHES)
+        self.assertEqual(module.scan_text("- merge no one\n- first\n- first\n" * 200), 0)
+        self.assertEqual(len(searches), 0)
