@@ -1188,14 +1188,18 @@ def command_rollback(options) -> dict:
     with Lock(locations.state):
         if exists(locations.state / "CURRENT"):
             raise Blocked(f"An interrupted transaction is recorded in {locations.state / 'CURRENT'}; run `recover` first")
+        # A receipt field is untrusted input: only an integer mode is quoted back in guidance.
         root = receipt["after"].get(".")
-        locations.require_movable(root.get("mode") if isinstance(root, dict) else None, "run rollback again")
+        recorded = root.get("mode") if isinstance(root, dict) else None
+        locations.require_movable(recorded if type(recorded) is int else None, "run rollback again")
         changed = differences(receipt["after"], inventory(locations.target))
         if changed:
             message = "The active tree no longer matches the receipt's after-inventory; rollback refused"
             root = next((item for item in changed if item["path"] == "."), None)
-            if root and isinstance(root["expected"], dict) and isinstance(root["actual"], dict) and root["expected"]["type"] == root["actual"]["type"]:
-                message += f"; restore mode {root['expected']['mode']:04o} on {locations.target} (now {root['actual']['mode']:04o})"
+            expected, actual = (root["expected"], root["actual"]) if root else (None, None)
+            if (isinstance(expected, dict) and isinstance(actual, dict) and expected.get("type") == actual.get("type")
+                    and type(expected.get("mode")) is int and type(actual.get("mode")) is int):
+                message += f"; restore mode {expected['mode']:04o} on {locations.target} (now {actual['mode']:04o})"
             raise Refused(message, changed)
         work = transaction / ("rollback-" + uuid.uuid4().hex[:8])
         journal = work / "journal.json"

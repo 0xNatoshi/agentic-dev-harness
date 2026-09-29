@@ -776,6 +776,18 @@ class InstallerTests(unittest.TestCase):
         self.assert_refused(result, 1)
         self.assertIn("after-inventory", json.loads(result.stderr)["error"])
 
+    def test_rollback_refuses_a_receipt_with_a_non_integer_root_mode(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["after"]["."]["mode"] = "0755"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        result = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(result, 1)
+        error = json.loads(result.stderr)["error"]
+        self.assertIn("after-inventory", error)
+        self.assertNotIn("restore mode", error)
+
     def test_rollback_refuses_a_receipt_copy_that_differs(self):
         self.v52_layout()
         receipt_path = self.installed()
