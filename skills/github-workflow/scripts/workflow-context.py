@@ -1085,7 +1085,9 @@ def identity_mode(args):
             findings.append(('blocker', 'profile-name'))
     else:
         findings.append(('indeterminate', 'profile-name-unset'))
-    if possible is None:
+    # An empty list is not evidence: every account can commit with its noreply, and the default gh token
+    # scopes return an empty list.
+    if not possible:
         findings.append(('indeterminate', 'possible-commit-emails-unreadable'))
     else:
         allowed = any(same_ascii(email, address) for email in possible)
@@ -1099,11 +1101,11 @@ def identity_mode(args):
         findings.append(('warning', 'default-commit-email'))
     code = report('identity', facts, findings)
     if ('blocker', 'profile-name') in findings:
-        print('identity: decision required: the server-generated squash author name follows the profile display '
+        print('identity: decision required: the server-generated merge author name follows the profile display '
               'name, not the handle. Set the profile display name to the account login exactly, case included; no other '
               'author name has a gated merge path, so the merge stays blocked.', file=sys.stderr)
-    if possible is None:
-        print('identity: possible commit emails are unreadable; check the token scope.', file=sys.stderr)
+    if not possible:
+        print('identity: possible commit emails are unreadable or empty; check the token scope.', file=sys.stderr)
     if code == 0:
         print(address)
     return code

@@ -723,6 +723,9 @@ IDENTITY_CASES = (
                   stderr="identity: blocker=noreply-not-possible-commit-email"),
     identity_case("identity possible commit emails unreadable", 2, ("FIXTURE_POSSIBLE", "__null__"),
                   stderr="identity: indeterminate=possible-commit-emails-unreadable"),
+    # The default gh token scopes return an empty list, which is not a commit-email decision.
+    identity_case("identity possible commit emails empty", 2, ("FIXTURE_POSSIBLE_SHAPE", "[]"),
+                  stderr=("identity: indeterminate=possible-commit-emails-unreadable", "check the token scope")),
     identity_case("identity default commit email is personal", 0, ("FIXTURE_POSSIBLE", NOREPLY + ",person@example.invalid"),
                   ("FIXTURE_DEFAULT_EMAIL", "person@example.invalid"), stderr="identity: warning=default-commit-email"),
     identity_case("identity legacy account", 2, ("FIXTURE_CREATED", "2017-07-18T12:00:00Z"), stderr="legacy account"),

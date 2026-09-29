@@ -9,9 +9,11 @@ SKILL_DIR = Path(__file__).resolve().parents[1] / "skills/github-workflow"
 SKILL = SKILL_DIR / "SKILL.md"
 GUARDED_EMAIL = '--author-email "${workflow_author_email:?'
 PREFLIGHT = "workflow_author_email=$(bash <skill-dir>/scripts/merge-preflight.sh identity "
-# Any documented way to merge a PR: the gh command, the REST endpoint or the GraphQL mutation.
-MERGE_SURFACE = re.compile(r"gh\s+pr\s+merge\b[^`\n]*|pulls/[^/\s`]+/merge\b|mergePullRequest")
-IDENTITY_CALL = re.compile(r"identity \S+ \S+ \S+ \S+ (\S+)\) \|\| exit")
+# Any documented way to merge a PR or its branch: the gh command, the REST endpoints or the GraphQL mutations.
+MERGE_SURFACE = re.compile(r"gh\s+pr\s+merge\b[^`\n]*|pulls/[^/\s`]+/merge\b|repos/[^\s`]+/merges\b"
+                           r"|mergePullRequest|mergeBranch|enqueuePullRequest")
+IDENTITY_CALL = re.compile(r"identity \S+ \S+ (\S+) \S+ (\S+)\) \|\| exit")
+MERGE_PR = re.compile(r"gh pr merge --repo \S+ (\S+) ")
 
 
 def section(text: str, heading: str) -> str:
@@ -66,10 +68,12 @@ class SkillIdentityContractTests(unittest.TestCase):
                     between = text[preflight:found.start()]
                     self.assertNotIn("\n\n", between)
                     self.assertNotIn("```", between)
-                    # Both commands name the same merge method, so identity checks the method used.
-                    method = IDENTITY_CALL.search(between)
-                    self.assertIsNotNone(method)
-                    self.assertIn(" --" + method.group(1) + " ", command)
+                    # Both commands name the same PR and merge method, so identity checks the merge that runs.
+                    # The repository is bound to origin by the preflight in both, so it is not compared here.
+                    identity = IDENTITY_CALL.search(between)
+                    self.assertIsNotNone(identity)
+                    self.assertEqual(MERGE_PR.match(command).group(1), identity.group(1))
+                    self.assertIn(" --" + identity.group(2) + " ", command)
         self.assertGreaterEqual(len(commands), 2)
 
     def test_identity_exit_codes_block_merge(self) -> None:
