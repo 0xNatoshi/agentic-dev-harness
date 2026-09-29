@@ -116,6 +116,18 @@ class FixtureEnvironmentTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue(result.stdout.startswith("git version "), result.stdout)
 
+    def test_nested_bash_starts_with_no_tools_on_path(self) -> None:
+        with TemporaryDirectory(prefix="fixture-support-") as directory:
+            root = Path(directory) / "root with spaces and 'quotes'"
+            root.mkdir()
+            environment, _ = support.fixture_environment(root)
+            # BASH names the running shell, bypassing launchers that add their own tools.
+            result = support.run(
+                ["bash", "-c", 'PATH=; export PATH; exec "$BASH" -c \'[ -z "$PATH" ] && printf "%s\\n" "fixture started"\''],
+                root, environment,
+            )
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "fixture started\n", ""))
+
     def test_native_python_runs_python_fixture_scripts(self) -> None:
         # Exercise Bash -> native Python -> a real fake process, with no installed CLI lookup.
         newlines = ("\n", "\r\n") if os.name == "nt" else ("\n",)

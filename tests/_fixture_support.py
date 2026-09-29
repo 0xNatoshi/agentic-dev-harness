@@ -138,9 +138,10 @@ def fixture_environment(root: Path) -> tuple[dict[str, str], Path]:
     if os.name == "nt":
         # Git's bin/bash.exe prepends its own tools. Restore fixture precedence
         # only when the caller's PATH includes it, preserving restricted-PATH tests.
+        # Builtins work without PATH tools; logical pwd preserves Windows short names in PATH.
         bash_startup = fixture_config / "bash-env"
         write_fixture(bash_startup,
-                      f"_fixture_tools=$(cygpath -u {shlex.quote(tools.as_posix())}) || exit 1\n"
+                      f"_fixture_tools=$(cd -- {shlex.quote(tools.as_posix())} && pwd -L) || exit 1\n"
                       'case ":$PATH:" in\n'
                       '  ":$_fixture_tools:"*) ;;\n'
                       '  *":$_fixture_tools:"*) export PATH="$_fixture_tools:$PATH" ;;\n'
