@@ -9,6 +9,9 @@ SKILL_DIR = Path(__file__).resolve().parents[1] / "skills/github-workflow"
 SKILL = SKILL_DIR / "SKILL.md"
 GUARDED_EMAIL = '--author-email "${workflow_author_email:?'
 PREFLIGHT = "workflow_author_email=$(bash <skill-dir>/scripts/merge-preflight.sh identity "
+# Any documented way to merge a PR: the gh command, the REST endpoint or the GraphQL mutation.
+MERGE_SURFACE = re.compile(r"gh\s+pr\s+merge\b[^`\n]*|pulls/[^/\s`]+/merge\b|mergePullRequest")
+IDENTITY_CALL = re.compile(r"identity \S+ \S+ \S+ \S+ (\S+)\) \|\| exit")
 
 
 def section(text: str, heading: str) -> str:
@@ -46,16 +49,27 @@ class SkillIdentityContractTests(unittest.TestCase):
             if "templates" in path.relative_to(SKILL_DIR).parts:
                 continue
             text = path.read_text(encoding="utf-8")
-            for found in re.finditer(r"gh pr merge [^`\n]*", text):
-                commands.append(found.group())
-                with self.subTest(path=path.name, command=found.group()):
+            for found in MERGE_SURFACE.finditer(text):
+                command = found.group()
+                commands.append(command)
+                with self.subTest(path=path.name, command=command):
+                    # The REST and GraphQL merges have no gated form: only gh pr merge may be documented.
+                    self.assertTrue(re.match(r"gh pr merge ", command))
                     # An empty address must stop the merge: gh drops it and uses the account default.
-                    self.assertIn(GUARDED_EMAIL, found.group())
-                    self.assertIn("--match-head-commit ", found.group())
+                    self.assertIn(GUARDED_EMAIL, command)
+                    self.assertIn("--match-head-commit ", command)
                     for forbidden in ("--auto", "--admin"):
-                        self.assertNotIn(forbidden, found.group())
-                    self.assertLess(text.find(PREFLIGHT), found.start())
-                    self.assertNotEqual(text.find(PREFLIGHT), -1)
+                        self.assertNotIn(forbidden, command)
+                    # The preflight belongs to the same block, not merely somewhere earlier in the file.
+                    preflight = text.rfind(PREFLIGHT, 0, found.start())
+                    self.assertNotEqual(preflight, -1)
+                    between = text[preflight:found.start()]
+                    self.assertNotIn("\n\n", between)
+                    self.assertNotIn("```", between)
+                    # Both commands name the same merge method, so identity checks the method used.
+                    method = IDENTITY_CALL.search(between)
+                    self.assertIsNotNone(method)
+                    self.assertIn(" --" + method.group(1) + " ", command)
         self.assertGreaterEqual(len(commands), 2)
 
     def test_identity_exit_codes_block_merge(self) -> None:

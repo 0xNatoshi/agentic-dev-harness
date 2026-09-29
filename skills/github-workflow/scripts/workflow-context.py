@@ -949,10 +949,12 @@ def published_instructions(branch):
 # noreply address.
 HANDLE = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}')
 PR_NUMBER = re.compile(r'[1-9][0-9]{0,9}')
-CREATED = re.compile(r'(\d{4})-(\d{2})-(\d{2})T')
+CREATED = re.compile(r'([0-9]{4})-([0-9]{2})-([0-9]{2})T')
 NOREPLY_CUTOFF = datetime.date(2017, 7, 18)
 # The noreply format and its cutoff are github.com facts; other hosts are unsupported.
 NOREPLY_HOST = 'github.com'
+# published reads one merge commit, so a rebase merge, which re-creates every PR commit, has no gated path.
+MERGE_METHODS = ('squash', 'merge')
 COMMIT_EMAILS = ('query($owner:String!,$name:String!){repository(owner:$owner,name:$name)'
                  '{viewerPossibleCommitEmails viewerDefaultCommitEmail}}')
 
@@ -975,15 +977,17 @@ def field(record, key, kind, label):
     return value
 
 
-def identity_arguments(args):
-    """Validate before any read: owner/repository, PR number and handle."""
-    if len(args) != 4:
-        raise EvidenceError('Expected owner, repository, PR number and handle')
-    owner, name, number, handle = args
+def identity_arguments(args, method=False):
+    """Validate before any read: owner/repository, PR number, handle and, for identity, the merge method."""
+    if len(args) != (5 if method else 4):
+        raise EvidenceError('Expected owner, repository, PR number, handle' + (' and merge method' if method else ''))
+    owner, name, number, handle = args[:4]
     if not PR_NUMBER.fullmatch(number):
         raise EvidenceError('Invalid PR number')
     if not HANDLE.fullmatch(handle):
         raise EvidenceError('Invalid GitHub handle')
+    if method and args[4] not in MERGE_METHODS:
+        raise EvidenceError('Merge method must be squash or merge; a rebase merge has no gated identity path')
     return owner + '/' + name, number, handle
 
 
@@ -1050,7 +1054,7 @@ def report(mode, facts, findings):
 
 def identity_mode(args):
     """Pre-merge prediction of the server author; exit 0 prints only the noreply."""
-    expected, number, handle = identity_arguments(args)
+    expected, number, handle = identity_arguments(args, method=True)
     host, full = identity_origin(expected)
     viewer = api_json(host, 'user', 'viewer')
     viewer_id = field(viewer, 'id', int, 'viewer')
@@ -1061,7 +1065,8 @@ def identity_mode(args):
     merged = field(pull, 'merged', bool, 'pull request')
     possible, default = commit_emails(host, full)
     address = noreply(account)
-    name = account.get('name')
+    # The squash author name is the merging account's own profile name; the public users/<handle> record may lag.
+    name = viewer.get('name')
     login = account['login']
 
     facts = [
@@ -1095,7 +1100,7 @@ def identity_mode(args):
     code = report('identity', facts, findings)
     if ('blocker', 'profile-name') in findings:
         print('identity: decision required: the server-generated squash author name follows the profile display '
-              'name, not the handle. Set the profile display name to the handle exactly, case included; no other '
+              'name, not the handle. Set the profile display name to the account login exactly, case included; no other '
               'author name has a gated merge path, so the merge stays blocked.', file=sys.stderr)
     if possible is None:
         print('identity: possible commit emails are unreadable; check the token scope.', file=sys.stderr)
@@ -1105,7 +1110,7 @@ def identity_mode(args):
 
 
 def published_mode(args):
-    """Post-merge proof: compare the PR's merge commit with the handle, booleans only."""
+    """Post-merge proof: compare the PR's merge commit with the handle; report booleans and finding keys."""
     expected, number, handle = identity_arguments(args)
     host, full = identity_origin(expected)
     pull = api_json(host, 'repos/' + full + '/pulls/' + number, 'pull request')
@@ -1154,13 +1159,17 @@ def main():
             raise EvidenceError('origin expects at most owner/repository')
         print('\t'.join(origin_context(args[0] if args else None)))
         return 0
-    if mode == 'identity':
-        return identity_mode(args)
-    if mode == 'published':
-        return published_mode(args)
+    if mode in ('identity', 'published'):
+        try:
+            return identity_mode(args) if mode == 'identity' else published_mode(args)
+        except (EvidenceError, OSError, UnicodeError, ValueError):
+            raise
+        except Exception as error:
+            # Exit 1 is a user decision in these modes: any other failure must block as indeterminate.
+            raise EvidenceError('Unexpected ' + mode + ' evidence failure') from error
     if mode != 'suspension' or not args:
         raise EvidenceError('Expected origin, suspension <all applicable instruction files>, '
-                            'identity or published <owner> <repo> <pr> <handle>')
+                            'identity <owner> <repo> <pr> <handle> <method> or published <owner> <repo> <pr> <handle>')
     _, _, branch = origin_context()
     inputs = []
     for name in args:

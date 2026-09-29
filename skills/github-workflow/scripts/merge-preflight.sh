@@ -2,7 +2,7 @@
 # Read-only checks. Exit 0: clear; 1: blocker; 2: unreadable or invalid evidence.
 # Modes: origin, suspension, reviews, pages, identity (predicted server-generated
 # merge author before merge; exit 0 prints only the noreply) and published (the
-# merged PR's commit author and committer, booleans only).
+# merged PR's commit author and committer, as booleans and finding keys).
 # Requires Bash, awk, Git, gh and Python 3.8+; no external jq.
 set -u
 fail() { printf '%s\n' "$*" >&2; exit 2; }

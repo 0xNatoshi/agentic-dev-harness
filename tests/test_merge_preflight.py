@@ -50,36 +50,46 @@ if os.getenv('FIXTURE_API_FAIL') == args[1]:
 env = os.getenv
 if args[1] == 'graphql' and any('viewerPossibleCommitEmails' in arg for arg in args):
     if env('FIXTURE_GRAPHQL_ERRORS') == '1':
-        print(json.dumps({'data': None, 'errors': [{'message': 'fixture'}]}))
+        print(json.dumps({'data': None, 'errors': [{'message': 'person@example.invalid'}]}))
         sys.exit(0)
     if env('FIXTURE_GRAPHQL_DATA') is not None:
         print(json.dumps({'data': env('FIXTURE_GRAPHQL_DATA')}))
         sys.exit(0)
     possible = env('FIXTURE_POSSIBLE', '1001+octo-fixture@users.noreply.github.com')
     possible = None if possible == '__null__' else possible.split(',')
+    shape = env('FIXTURE_POSSIBLE_SHAPE')
     payload = {'data': {'repository': {
-        'viewerPossibleCommitEmails': env('FIXTURE_POSSIBLE_SHAPE', possible),
+        'viewerPossibleCommitEmails': possible if shape is None else json.loads(shape),
         'viewerDefaultCommitEmail': env('FIXTURE_DEFAULT_EMAIL', '1001+octo-fixture@users.noreply.github.com'),
     }}}
     if env('FIXTURE_GRAPHQL_ERRORS') == 'partial':
-        payload['errors'] = [{'message': 'fixture'}]
+        payload['errors'] = [{'message': 'person@example.invalid'}]
     print(json.dumps(payload))
     sys.exit(0)
 if args[1] == 'graphql':
     print('false\\t0')
     sys.exit(0)
+# Nesting beyond the JSON decoder's recursion limit raises RecursionError, not ValueError.
+DEEP = '[' * 100000
 if args[1] == 'user':
-    print(json.dumps({'login': env('FIXTURE_VIEWER', 'octo-fixture'), 'id': int(env('FIXTURE_VIEWER_ID', '1001'))}))
+    if env('FIXTURE_VIEWER_SHAPE') == 'deep':
+        print(DEEP)
+        sys.exit(0)
+    name = env('FIXTURE_PROFILE_NAME', 'octo-fixture')
+    print(json.dumps({'login': env('FIXTURE_VIEWER', 'octo-fixture'), 'id': json.loads(env('FIXTURE_VIEWER_ID', '1001')),
+                      'name': {'__null__': None, '__empty__': ''}.get(name, name)}))
     sys.exit(0)
 if args[1] == 'users/octo-fixture':
-    name = env('FIXTURE_PROFILE_NAME', 'octo-fixture')
     print(json.dumps({'login': env('FIXTURE_ACCOUNT_LOGIN', 'octo-fixture'),
                       'id': json.loads(env('FIXTURE_ACCOUNT_ID', '1001')),
                       'created_at': env('FIXTURE_CREATED', '2020-01-01T00:00:00Z'),
-                      'name': None if name == '__null__' else name}))
+                      'name': env('FIXTURE_PUBLIC_NAME', 'octo-fixture')}))
     sys.exit(0)
 MERGE_SHA = '0123456789abcdef' * 2 + '01234567'
 if args[1] == 'repos/fixture/repo/pulls/7':
+    if env('FIXTURE_PR_SHAPE') is not None:
+        print({'list': '[]', 'deep': DEEP}[env('FIXTURE_PR_SHAPE')])
+        sys.exit(0)
     print(json.dumps({'user': {'login': 'octo-fixture', 'id': int(env('FIXTURE_PR_AUTHOR_ID', '1001'))},
                       'state': env('FIXTURE_PR_STATE', 'open'), 'merged': env('FIXTURE_PR_MERGED') == 'true',
                       'merge_commit_sha': env('FIXTURE_MERGE_SHA', MERGE_SHA)}))
@@ -657,6 +667,7 @@ MERGE_SHA = "0123456789abcdef" * 2 + "01234567"
 # The noreply format is a github.com fact, so the identity fixtures use that origin host.
 def identity_case(name, expected, *environment, stderr=(), api_calls=4, host="github.com", **options):
     stderr = (stderr,) if isinstance(stderr, str) else stderr
+    options.setdefault("arguments", ("7", "octo-fixture", "squash"))
     return Case(name, expected, mode="identity", environment=(("FIXTURE_HOST", host), *environment), stderr=stderr,
                 api_calls=api_calls, **options)
 
@@ -672,7 +683,7 @@ IDENTITY_CASES = (
     # A verified local author never covers the server-generated squash author.
     identity_case("identity verified local author with profile alias", 1, *VERIFIED_LOCAL_AUTHOR,
                   ("FIXTURE_PROFILE_NAME", "Fixture Alias"), setup="local_author_verified",
-                  stderr=("identity: blocker=profile-name", "Set the profile display name to the handle exactly")),
+                  stderr=("identity: blocker=profile-name", "Set the profile display name to the account login exactly")),
     identity_case("identity viewer is not handle", 1, ("FIXTURE_VIEWER", "other-account"), ("FIXTURE_VIEWER_ID", "2002"),
                   ("FIXTURE_PR_AUTHOR_ID", "2002"), stderr="identity: blocker=merger-is-handle"),
     identity_case("identity PR author differs from merger", 2, ("FIXTURE_PR_AUTHOR_ID", "2002"),
@@ -695,9 +706,12 @@ IDENTITY_CASES = (
     identity_case("identity GraphQL partial errors", 2, ("FIXTURE_GRAPHQL_ERRORS", "partial"), stderr="commit-email"),
     identity_case("identity GraphQL data not an object", 2, ("FIXTURE_GRAPHQL_DATA", "fixture"),
                   stderr="commit-email"),
-    identity_case("identity possible commit emails not a list", 2, ("FIXTURE_POSSIBLE_SHAPE", NOREPLY),
+    identity_case("identity possible commit emails not a list", 2, ("FIXTURE_POSSIBLE_SHAPE", json.dumps(NOREPLY)),
                   stderr="commit-email"),
-    identity_case("identity account login differs", 2, ("FIXTURE_ACCOUNT_LOGIN", "other-account"), api_calls=2,
+    identity_case("identity possible commit email not a string", 2,
+                  ("FIXTURE_POSSIBLE_SHAPE", json.dumps([NOREPLY, 7])), stderr="commit-email"),
+    # PRIVATE as the returned login: the mismatch must be reported without echoing it.
+    identity_case("identity account login differs", 2, ("FIXTURE_ACCOUNT_LOGIN", "Fixture Alias"), api_calls=2,
                   stderr="another login"),
     # The noreply keeps the account login's case, as GitHub forms it; the handle argument may differ in case.
     identity_case("identity account login case kept in noreply", 0, ("FIXTURE_ACCOUNT_LOGIN", "Octo-Fixture"),
@@ -705,6 +719,7 @@ IDENTITY_CASES = (
     identity_case("identity account id is boolean", 2, ("FIXTURE_ACCOUNT_ID", "true"), api_calls=2,
                   stderr="account response"),
     identity_case("identity noreply not a possible commit email", 1, ("FIXTURE_POSSIBLE", "person@example.invalid"),
+                  ("FIXTURE_DEFAULT_EMAIL", "person@example.invalid"),
                   stderr="identity: blocker=noreply-not-possible-commit-email"),
     identity_case("identity possible commit emails unreadable", 2, ("FIXTURE_POSSIBLE", "__null__"),
                   stderr="identity: indeterminate=possible-commit-emails-unreadable"),
@@ -714,8 +729,29 @@ IDENTITY_CASES = (
     identity_case("identity PR closed", 1, ("FIXTURE_PR_STATE", "closed"), stderr="identity: blocker=pr-open"),
     identity_case("identity user endpoint fails", 2, ("FIXTURE_API_FAIL", "user"), api_calls=1),
     identity_case("identity upstream selection", 2, ("FIXTURE_SELECTED", "upstream/repo"), api_calls=0),
-    identity_case("identity invalid PR", 2, api_calls=0, arguments=("07", "octo-fixture")),
-    identity_case("identity invalid handle", 2, api_calls=0, arguments=("7", "../x")),
+    identity_case("identity invalid PR", 2, api_calls=0, arguments=("07", "octo-fixture", "squash")),
+    identity_case("identity invalid handle", 2, api_calls=0, arguments=("7", "../x", "squash")),
+    identity_case("identity merge commit method", 0, arguments=("7", "octo-fixture", "merge")),
+    # published reads one merge commit and cannot check the commits a rebase merge re-creates.
+    identity_case("identity rebase method", 2, api_calls=0, arguments=("7", "octo-fixture", "rebase"),
+                  stderr="squash or merge"),
+    identity_case("identity missing method", 2, api_calls=0, arguments=("7", "octo-fixture"),
+                  stderr="merge method"),
+    identity_case("identity viewer id is boolean", 2, ("FIXTURE_VIEWER_ID", "true"), api_calls=1,
+                  stderr="viewer response"),
+    identity_case("identity profile name empty", 2, ("FIXTURE_PROFILE_NAME", "__empty__"),
+                  stderr="identity: indeterminate=profile-name-unset"),
+    # The merging account's own record governs; a stale public profile name does not.
+    identity_case("identity viewer profile name governs", 0, ("FIXTURE_PUBLIC_NAME", "Fixture Alias"),
+                  stderr="identity: profile-name-is-handle=true"),
+    identity_case("identity created date malformed", 2, ("FIXTURE_CREATED", "2020-01-01"), stderr="account response"),
+    identity_case("identity created date non-ASCII digits", 2, ("FIXTURE_CREATED", "\u0662\u0660\u0662\u0660-01-01T00:00:00Z"),
+                  stderr="account response"),
+    identity_case("identity pull request not an object", 2, ("FIXTURE_PR_SHAPE", "list"), api_calls=3,
+                  stderr="pull request response"),
+    # Exit 1 is a user decision here, so an unexpected failure must not surface as 1.
+    identity_case("identity unexpected failure", 2, ("FIXTURE_VIEWER_SHAPE", "deep"), api_calls=1,
+                  stderr="Unexpected identity evidence failure"),
     published_case("published compliant", 0, stderr="published: author-name-is-handle=true"),
     # The observed squash shape: display name as author, noreply email, linked account, web-flow.
     published_case("published display-name author", 1, ("FIXTURE_COMMIT_NAME", "Fixture Alias"),
@@ -750,6 +786,8 @@ IDENTITY_CASES = (
                    stderr="no merge commit"),
     published_case("published unsupported host", 2, api_calls=0, host="github.example",
                    stderr="support only github.com"),
+    published_case("published unexpected failure", 2, ("FIXTURE_PR_SHAPE", "deep"), api_calls=1,
+                   stderr="Unexpected published evidence failure"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES + IDENTITY_CASES
 INVENTORY = 466 + len(IDENTITY_CASES)
