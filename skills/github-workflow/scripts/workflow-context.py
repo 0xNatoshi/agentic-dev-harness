@@ -227,9 +227,10 @@ PR_BLOCKED = (r'^\W*(?:(?:all|every|any|the|open|pending|toutes|tous|les)\s+){0,
               r'|\s+(?:until|till|while|jusqu\w*|tant|pendant|for\s+now|today|pour\s+le\s+moment)\b'
               r'(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:(?:failing|green)\s+)?' + CHECK_NOUN + r'\b))')
 # A PR state that PR_HELD reads as a gate, not a hold: 'held to the same standard', 'blocked by failing checks'.
-PR_GATE = re.compile(PR_NOUN + r'[^.!?]{0,80}?\b(?:held|blocked|bloquée?s?)\b')
+PR_GATE = re.compile(r'(?P<gate_prefix>' + PR_NOUN + r'[^.!?]{0,80}?)\b(?:held|blocked|bloquée?s?)\b')
 # Only a gate's own words, so the rest of its sentence is still read for a hold: 'All PRs are
 # blocked by the maintainer until further notice.' keeps 'maintainer until further notice'.
+# The prefix may itself contain an owner hold, so the substitution must preserve it.
 GATE_WORDS = re.compile(PR_GATE.pattern + r'(?:\s+(?:until|till|by|for|on)\s+(?:the\s+)?'
                         r'(?:(?:failing|failed|red|required)\s+)?' + CHECK_NOUN
                         + r'(?:\s+(?:pass\w*|(?:are|is)\s+green))?)?'
@@ -1069,7 +1070,7 @@ def scan_normalized(text):
         # a gate beside a method rule; the rest of its unit still qualifies that rule.
         follows = follows or (result != 'gate' and bool(FOLLOW_HOLD.search(unit)))
         mechanics = mechanics or result == 'cleared'
-        gate_follows = gate_follows or (result == 'gate' and bool(FOLLOW_HOLD.search(GATE_WORDS.sub(' ', unit))))
+        gate_follows = gate_follows or (result == 'gate' and bool(FOLLOW_HOLD.search(GATE_WORDS.sub(r'\g<gate_prefix> ', unit))))
     if held:
         return 2  # a list or table carries a pause or approval restriction across items
     # A hold or approval sentence anywhere in the file may qualify a cleared

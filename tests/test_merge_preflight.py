@@ -824,6 +824,28 @@ TEXT_CASES = (
     Case("caught French PRs blocked by the maintainer then method rule", 2,
          "Les PR sont bloquées par le mainteneur jusqu’à nouvel ordre.\n\n"
          "Do not use squash merges; use merge commits."),
+    # Codex review of ec5c0bc: the words before a gate verb are the gate's subject, not its
+    # mechanics, so an owner's wait or decision there still qualifies a method rule.
+    Case("caught PRs wait for the owner's final say blocked by CI then method rule", 2,
+         "PRs must wait for the owner's final say and are blocked by CI.\n\n"
+         "Do not use squash merges; use merge commits."),
+    Case("caught method rule then PRs wait for the owner's final say blocked by CI", 2,
+         "Do not use squash merges; use merge commits.\n\n"
+         "PRs must wait for the owner's final say and are blocked by CI."),
+    Case("caught PRs subject to the owner's decision blocked by checks then method rule", 2,
+         "PRs remain subject to the owner's decision and are blocked by failing checks.\n\n"
+         "Do not use squash merges; use merge commits."),
+    Case("caught method rule then PRs subject to the owner's decision blocked by checks", 2,
+         "Do not use squash merges; use merge commits.\n\n"
+         "PRs remain subject to the owner's decision and are blocked by failing checks."),
+    Case("caught PRs await the owner's final say blocked by CI then method rule", 2,
+         "All PRs await the owner's final say and are blocked by CI.\n\n"
+         "Do not use squash merges; use merge commits."),
+    Case("caught method rule then PRs await the owner's final say blocked by CI", 2,
+         "Do not use squash merges; use merge commits.\n\n"
+         "All PRs await the owner's final say and are blocked by CI."),
+    Case("cleared PRs wait for CI and are blocked by failing checks", 0,
+         "PRs wait for CI and are blocked by failing checks."),
     Case("cleared PRs blocked until CI passes then method rule", 0,
          "PRs are blocked until CI passes.\n\nDo not use squash merges; use merge commits."),
     Case("cleared method section then CI section PRs blocked by failing checks", 0,
@@ -853,6 +875,16 @@ TEXT_CASES = (
     Case("conservative PRs held to the standard and approved after CI beside method rule", 2,
          "PRs are held to the same standard and approved after CI.\n\n"
          "Do not use squash merges; use merge commits."),
+    # The words before a gate verb stay readable, so a CI wait written there reads like an
+    # owner's wait beside a method rule; a paragraph after a gate is read as the gate's section.
+    Case("conservative PRs wait for CI blocked by failing checks then method rule", 2,
+         "PRs wait for CI and are blocked by failing checks.\n\n"
+         "Do not use squash merges; use merge commits."),
+    Case("conservative PRs are waiting for CI blocked by failing checks then method rule", 2,
+         "PRs are waiting for CI and are blocked by failing checks.\n\n"
+         "Do not use squash merges; use merge commits."),
+    Case("conservative CI section PRs blocked by failing checks then checks paragraph", 2,
+         "## CI\nPRs are blocked by failing checks.\n\nChecks run automatically."),
     Case("conservative main is frozen in a screenshot", 2, "Main is frozen in the screenshot below."),
 )
 
@@ -891,8 +923,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 700 or len({case.name for case in ALL_CASES}) != 700:
-    raise RuntimeError("Merge fixture inventory must contain 700 unique cases")
+if len(ALL_CASES) != 710 or len({case.name for case in ALL_CASES}) != 710:
+    raise RuntimeError("Merge fixture inventory must contain 710 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
