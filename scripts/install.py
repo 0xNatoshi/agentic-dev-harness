@@ -28,6 +28,8 @@ import zlib
 INSTALLER_VERSION = "1.1.0"
 SKILL = "github-workflow"
 SKILL_PREFIX = "skills/" + SKILL + "/"
+# The installer's own path in the package; apply keeps a verified copy of it with each receipt.
+PACKAGE_INSTALLER = "install.py"
 # Obsolete v5.2 files owned by earlier installations. They leave the active tree but stay in the
 # retired and backup copies, so rollback restores them. Retirement is by pathname, without a hash
 # check, so an edited copy is retired too; the plan, apply output and receipt name each one (#43).
@@ -596,7 +598,8 @@ def retirements(classification: dict, before: dict | None, backup: Path | None =
     """Each named obsolete file with its hash; with the transaction copies, where its exact bytes are kept."""
     entries = []
     for name in sorted(name for name, kind in classification.items() if kind == "named obsolete"):
-        entry = {"path": name, "sha256": before[name]["sha256"], "bytes": before[name]["bytes"]}
+        entry = {"path": name, "listed_as": RETIREMENT_LIST["paths"][name], "sha256": before[name]["sha256"],
+                 "bytes": before[name]["bytes"]}
         if retired is not None and backup is not None:
             parts = PurePosixPath(name).parts
             entry.update(retired_copy=str(retired.joinpath(*parts)), backup=str(backup.joinpath(*parts)))
@@ -649,7 +652,8 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
         "retirements": retirements(classification, before),
         "retirement_copies": {"state_root": str(locations.state), "transaction": None,
                               "note": "The transaction directory is allocated at apply; the apply output and receipt "
-                                      "give each retired file's retired_copy and backup location"},
+                                      "give each retired file's retired_copy and backup location, and a rollback_command "
+                                      "that runs the package installer's verified copy kept in that directory"},
         "duplicates": duplicates,
         "duplicate_inventories": {path: inventory(Path(path)) for path in duplicates},
         "legacy_commands": [str(path) for path in locations.legacy if exists(path)],
@@ -1016,6 +1020,21 @@ def command_apply(options) -> dict:
         return install(fresh, package, locations, boundary)
 
 
+def keep_installer(package: Package, transaction: Path) -> dict:
+    """Keep the verified package's installer in the transaction, so the receipt's rollback command does
+    not depend on the extracted package, which the operator may delete or replace with another build."""
+    listed = package.manifest["files"].get(PACKAGE_INSTALLER)
+    data = package.files.get(PACKAGE_INSTALLER)
+    if data is None or not isinstance(listed, dict) or listed.get("sha256") != digest(data):
+        raise Refused(f"The verified package holds no {PACKAGE_INSTALLER} matching its manifest")
+    # Named like the original: the maintenance boundary recognizes this installer's launchers by that name.
+    path = transaction / "installer" / PACKAGE_INSTALLER
+    write_durable(path, data)
+    if digest(path.read_bytes()) != listed["sha256"]:
+        raise Refused(f"The installer copy {path} does not match the package manifest")
+    return {"path": str(path), "sha256": listed["sha256"]}
+
+
 def install(plan: dict, package: Package, locations: Locations, boundary: dict) -> dict:
     # The package bytes verified by the fresh plan, not a second read of the source.
     package_files = package.skill_files()
@@ -1025,6 +1044,7 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
     transaction.mkdir(parents=True)
     begin(locations.state, journal)
     try:
+        installer = keep_installer(package, transaction)
         backup = transaction / "backup" / SKILL
         if before is not None:
             copy_tree(locations.target, backup)
@@ -1092,7 +1112,7 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         "before": before,
         "after": after,
         "retired_paths": sorted(name for name, kind in classification.items() if kind == "named obsolete"),
-        "retirements": retirements(classification, before, backup, retired) if before is not None else [],
+        "retirements": retirements(classification, before, backup, retired),
         "dropped_paths": sorted(name for name, kind in classification.items() if kind == "regenerable cache"),
         "preserved_paths": sorted(name for name, kind in classification.items() if kind in PRESERVED),
         "replaced_paths": sorted(name for name, kind in classification.items() if kind == "package"),
@@ -1105,9 +1125,11 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         "discovered_after": discovered,
         "state": "installed",
         "note": "Two renames are not an atomic or continuously available replacement; the maintenance boundary covers the gap.",
+        "installer_copy": installer,
         # An argument list, not a shell string: quoting differs between PowerShell, cmd and sh. It omits
-        # --maintenance-confirmed, which the operator appends once every consuming session is stopped.
-        "rollback_command": [sys.executable, os.path.abspath(__file__), "rollback", "--receipt", str(receipt_path)],
+        # --maintenance-confirmed, which the operator appends once every consuming session is stopped. It
+        # runs the installer copy kept with the receipt, so it outlives the extracted package.
+        "rollback_command": [sys.executable, installer["path"], "rollback", "--receipt", str(receipt_path)],
     }
     write_json(receipt_path, receipt)
     operation.save("committed")
@@ -1299,6 +1321,16 @@ def command_recover(options) -> dict:
             result = {"result": "already committed", "journal": str(journal)}
             if record["operation"] == "rollback" and not mark_rolled_back(record, tolerant=True):
                 result["receipt_not_updated"] = record["receipt"]
+            if record["operation"] == "apply":
+                # The apply output may never have been printed: name the receipt and what it retired.
+                receipt = journal.parent / "receipt.json"
+                result["receipt"] = str(receipt)
+                try:
+                    value = read_json(receipt)
+                except Refused as error:
+                    result["receipt_unreadable"] = str(error)
+                else:
+                    result.update({key: value[key] for key in ("retirements", "rollback_command") if key in value})
             finish(locations.state)
             return result
         operation.record["recovery_boundary"] = boundary

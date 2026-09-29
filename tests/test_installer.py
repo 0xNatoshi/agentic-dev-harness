@@ -109,9 +109,14 @@ class InstallerTests(unittest.TestCase):
         environment.update(env or {})
         return environment
 
-    def run_installer(self, *arguments, env=None, processes=True):
-        return subprocess.run([sys.executable, "-B", str(self.installer), *map(str, arguments)], cwd=self.base,
+    def run_installer(self, *arguments, env=None, processes=True, installer=None):
+        return subprocess.run([sys.executable, "-B", str(installer or self.installer), *map(str, arguments)], cwd=self.base,
                               env=self.environment(env, processes), capture_output=True, text=True, encoding="utf-8", timeout=120)
+
+    def run_recorded(self, command, *extra):
+        """Run a recorded argument list as the operator would, without the test's -B or installer path."""
+        return subprocess.run([*command, *extra], cwd=self.base, env=self.environment(), capture_output=True, text=True,
+                              encoding="utf-8", timeout=120)
 
     def plan(self, runtime="claude", **kwargs):
         output = self.base / "plan.json"
@@ -319,7 +324,8 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual([entry["path"] for entry in plan["retirements"]], sorted(RETIRED))
         for entry in plan["retirements"]:
             data = before[entry["path"]][2]
-            self.assertEqual(entry, {"path": entry["path"], "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)})
+            self.assertEqual(entry, {"path": entry["path"], "listed_as": "v5.2", "sha256": hashlib.sha256(data).hexdigest(),
+                                     "bytes": len(data)})
         self.assertEqual(plan["retirement_copies"]["state_root"], str(self.state()))
         self.assertIsNone(plan["retirement_copies"]["transaction"])
         for name, (kind, _) in kept.items():
@@ -336,7 +342,7 @@ class InstallerTests(unittest.TestCase):
         transaction = Path(receipt["transaction"])
         for entry in receipt["retirements"]:
             self.assertNotIn(entry["path"], after)
-            self.assertEqual({key: entry[key] for key in ("path", "sha256", "bytes")},
+            self.assertEqual({key: entry[key] for key in ("path", "listed_as", "sha256", "bytes")},
                              next(item for item in plan["retirements"] if item["path"] == entry["path"]))
             for key, copy in (("retired_copy", "retired"), ("backup", "backup")):
                 location = Path(entry[key])
@@ -353,7 +359,12 @@ class InstallerTests(unittest.TestCase):
         command = output["rollback_command"]
         self.assertEqual(command, receipt["rollback_command"])
         self.assertEqual(command[2:], ["rollback", "--receipt", str(receipt_path)])
-        self.assertTrue(os.path.samefile(command[1], self.installer))
+        self.assertTrue(os.path.samefile(command[0], sys.executable))
+        # The installer runs from its verified copy in the transaction, not from the extracted package.
+        packaged = (self.package / "install.py").read_bytes()
+        self.assertEqual(Path(command[1]), transaction / "installer" / "install.py")
+        self.assertEqual(Path(command[1]).read_bytes(), packaged)
+        self.assertEqual(receipt["installer_copy"], {"path": command[1], "sha256": hashlib.sha256(packaged).hexdigest()})
         run = dict(cwd=self.base, env=self.environment(), capture_output=True, text=True, encoding="utf-8", timeout=120)
         # The recorded command leaves the maintenance confirmation to the operator.
         self.assert_refused(subprocess.run(command, **run), 2)
@@ -367,11 +378,90 @@ class InstallerTests(unittest.TestCase):
         before = self.v52_layout()
         receipt_path = self.installed()
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        for key in ("retirements", "rollback_command"):
+        for key in ("retirements", "rollback_command", "installer_copy"):
             receipt.pop(key, None)
         receipt["installer_version"] = "1.0.0"
         receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
         rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual(snapshot(self.target), before)
+
+    def test_recorded_rollback_command_outlives_the_extracted_package(self):
+        # The operator runs the extracted package, deletes it, and may later extract another build under the
+        # same folder name. The recorded command must still run the installer that made the receipt.
+        download = self.base / "download"
+        extracted = download / self.package.name
+        shutil.copytree(self.package, extracted)
+        installer = extracted / "install.py"
+        before = self.v52_layout()
+        plan = self.base / "plan.json"
+        planned = self.run_installer("plan", "--runtime", "claude", "--home", self.home, "--checksums", self.checksums,
+                                     "--output", plan, installer=installer)
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        applied = self.run_installer("apply", "--plan", plan, "--checksums", self.checksums, "--maintenance-confirmed",
+                                     installer=installer)
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        after = snapshot(self.target)
+        command = json.loads(applied.stdout)["rollback_command"]
+        shutil.rmtree(download)
+        extracted.mkdir(parents=True)
+        installer.write_text("import sys\nsys.exit(99)\n", encoding="utf-8")
+        self.assert_refused(self.run_recorded(command), 2)
+        self.assertEqual(snapshot(self.target), after)
+        rollback = self.run_recorded(command, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual(snapshot(self.target), before)
+        receipt = json.loads(Path(command[4]).read_text(encoding="utf-8"))
+        self.assertEqual(receipt["state"], "rolled back")
+
+    def test_only_present_named_files_are_listed(self):
+        # A fresh home has nothing to retire.
+        plan = self.plan()
+        self.assertEqual(json.loads(plan.read_text(encoding="utf-8"))["retirements"], [])
+        result = self.apply(plan)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["retirements"], [])
+        self.assertEqual(json.loads(Path(output["receipt"]).read_text(encoding="utf-8"))["retirements"], [])
+        # A partial v5.2 layout lists only the named files it holds.
+        shutil.rmtree(self.home)
+        self.home.mkdir()
+        self.v52_layout()
+        present = ["templates/LICENSE-PolyForm-Noncommercial", "templates/README.md"]
+        for name in RETIRED:
+            if name not in present:
+                (self.target / name).unlink()
+        before = snapshot(self.target)
+        plan = self.plan()
+        self.assertEqual([entry["path"] for entry in json.loads(plan.read_text(encoding="utf-8"))["retirements"]], present)
+        result = self.apply(plan)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        receipt = json.loads(Path(output["receipt"]).read_text(encoding="utf-8"))
+        self.assertEqual(output["retirements"], receipt["retirements"])
+        self.assertEqual([entry["path"] for entry in receipt["retirements"]], present)
+        self.assertEqual(receipt["retired_paths"], present)
+        for entry in receipt["retirements"]:
+            for key in ("retired_copy", "backup"):
+                self.assertTrue(Path(entry[key]).is_file(), entry[key])
+                self.assertEqual(Path(entry[key]).read_bytes(), before[entry["path"]][2])
+
+    def test_recover_after_a_crash_at_commit_names_the_receipt_and_its_retirements(self):
+        # A kill after the commit and before the output: recover reports what apply could not print.
+        before = self.v52_layout()
+        crashed = self.apply(self.plan(), env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:committed"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        self.assertEqual(crashed.stdout, "")
+        report = self.recover()
+        self.assertEqual(report["result"], "already committed")
+        receipt_path = Path(report["receipt"])
+        self.assertEqual(receipt_path, Path(report["journal"]).parent / "receipt.json")
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(receipt["state"], "installed")
+        self.assertEqual(report["retirements"], receipt["retirements"])
+        self.assertEqual([entry["path"] for entry in report["retirements"]], sorted(RETIRED))
+        self.assertEqual(report["rollback_command"], receipt["rollback_command"])
+        rollback = self.run_recorded(report["rollback_command"], "--maintenance-confirmed")
         self.assertEqual(rollback.returncode, 0, rollback.stderr)
         self.assertEqual(snapshot(self.target), before)
 
