@@ -720,10 +720,8 @@ TEXT_CASES = (
     Case("cleared PRs aren't on hold", 0, "PRs aren't on hold."),
     Case("cleared lock the main branch for force pushes", 0, "Lock the main branch for force pushes."),
     Case("cleared lock main require signed commits", 0, "Lock main: require signed commits."),
-    # Independent review of 0816ddf: an app object, 'held to' and a check explanation after
+    # Independent review of 0816ddf: 'held to' a standard and a check explanation after
     # punctuation name no merge hold; their held neighbors stay caught.
-    Case("cleared integration my approval to connect the app", 0, "Integration: needs my approval to connect the app."),
-    Case("cleared integration my approval for the Slack app", 0, "Integration: needs my approval for the Slack app."),
     Case("cleared PRs held to the same standard", 0, "PRs are held to the same standard and approved after CI."),
     Case("cleared PRs blocked colon failing checks", 0, "PRs are blocked: failing checks."),
     Case("cleared PRs blocked parenthesis failing checks", 0, "PRs are blocked (failing checks)."),
@@ -763,12 +761,42 @@ TEXT_CASES = (
          "Integration: PRs need my approval to connect the app."),
     Case("caught integration app approval then hold all PRs", 2,
          "Integration: needs my approval for the app. Hold all PRs until I say go."),
-    Case("cleared PRs held by the merge queue until checks pass", 0, "PRs are held by the merge queue until checks pass."),
-    Case("cleared integration app approval then PRs merge after CI", 0,
-         "Integration: needs my approval to connect the app. PRs may merge after CI."),
+    # Independent review of 69e25ee: a PR gate is read like a cleared rule, so a heading,
+    # lead-in, later sentence or later unit still holds it; an app approval is no exception.
+    Case("caught integration app approval then same for PRs", 2,
+         "Integration: needs my approval for the app. Same for PRs."),
+    Case("caught integration service OK then no PR without it", 2,
+         "Integration: needs my OK for the service. Pas de PR sans cela."),
+    Case("caught lead-in until I approve over merge queue gate", 2,
+         "Until I approve:\n- PRs are held by the merge queue until checks pass."),
+    Case("caught merge queue gate then I merge", 2, "PRs are held by the merge queue until checks pass. Then I merge."),
+    Case("caught PRs held to a high bar until I approve", 2, "PRs are held to a high bar until I approve."),
+    Case("caught PRs held to the standard below I approve", 2,
+         "PRs are held to the standard below: I approve each one."),
+    Case("caught PRs held to standards and held until I approve", 2,
+         "Pull requests are held to quality standards, and held until I approve."),
+    Case("caught integration paused until my OK for the service", 2, "Integration: paused until my OK for the service."),
+    Case("caught integration my approval for every service", 2, "Integration: needs my approval for every service."),
+    Case("caught freeze heading over integration app approval", 2, "# Freeze\nIntegration: needs my approval for the app."),
+    Case("caught freeze heading over PRs blocked failing checks", 2,
+         "## Freeze until I approve\nPRs are blocked: failing checks."),
+    Case("caught PRs blocked failing checks then wait paragraph", 2,
+         "PRs are blocked: failing checks.\n\nWait for my approval."),
+    Case("caught PRs held to the standard then wait paragraph", 2,
+         "PRs are held to the same standard.\n\nWait for my go before merging."),
+    Case("caught PRs blocked failing checks then I merge", 2, "PRs are blocked: failing checks. I merge when ready."),
+    Case("cleared CI heading over PRs blocked by failing checks", 0, "## CI\nPRs are blocked by failing checks."),
     # Accepted false 2s: stopping costs one question, a false 0 an unwanted merge. Asking code
     # owners by name reads as asking people; a merge done 'myself' reads as a reservation; a
-    # hold until CI passes and a frozen main anywhere in a sentence read as holds.
+    # hold until CI passes and a frozen main anywhere in a sentence read as holds. A speaker's
+    # approval of an app under an 'Integration:' label and a merge queue that holds PRs until
+    # checks pass read as holds: the exceptions tried for them cleared real holds nearby.
+    Case("conservative integration my approval to connect the app", 2, "Integration: needs my approval to connect the app."),
+    Case("conservative integration my approval for the Slack app", 2, "Integration: needs my approval for the Slack app."),
+    Case("conservative PRs held by the merge queue until checks pass", 2,
+         "PRs are held by the merge queue until checks pass."),
+    Case("conservative integration app approval then PRs merge after CI", 2,
+         "Integration: needs my approval to connect the app. PRs may merge after CI."),
     Case("conservative check with the code owners before merging", 2,
          "Before merging, check with the code owners listed in CODEOWNERS."),
     Case("conservative we merge dependency updates ourselves", 2, "We merge dependency updates ourselves on Fridays."),
@@ -812,8 +840,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 666 or len({case.name for case in ALL_CASES}) != 666:
-    raise RuntimeError("Merge fixture inventory must contain 666 unique cases")
+if len(ALL_CASES) != 681 or len({case.name for case in ALL_CASES}) != 681:
+    raise RuntimeError("Merge fixture inventory must contain 681 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

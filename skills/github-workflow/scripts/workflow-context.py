@@ -197,13 +197,13 @@ FIRST_WORD = r'(?:first|beforehand|d[’\x27]abord|avant|before(?=\s*(?:$|[|,;.)
 SCOPE_NEAR = 40
 NOT_BEFORE = re.compile(r'\b(?:not|never|n[’\x27]t|no\s+need\s+to|pas|jamais)\s+(?:\w+\s+)?$')
 CHECK_NOUN = r'(?:ci|checks?|tests?|builds?|lint\w*|status\s+checks?)'
-# 'PRs are held to the same standard' and 'PRs are held by the merge queue until checks pass'
-# name no hold, but 'held in the queue until I approve', 'held up' and 'held to my approval' do:
-# only these exact idioms are excluded, the queue one when it ends the sentence.
-HELD_BY_QUEUE = (r'\s+by\s+the\s+merge\s+queue\s+until\s+(?:the\s+)?(?:required\s+)?' + CHECK_NOUN
-                 + r'\s+(?:pass|passes|are\s+green|is\s+green)\s*\)?\s*$')
-HELD_IDIOM = (r'\s+(?:accountable|responsible)\b|\s+to\s+(?:(?:the|a|an|our|same|high\w*|strict\w*)\s+){0,3}'
-              r'(?:standards?|bar|rules?|conventions?|quality|expectations?)\b|' + HELD_BY_QUEUE)
+# 'PRs are held to the same standard' names no hold, but 'held in the queue until I approve',
+# 'held up' and 'held to my approval' do: only the standard idiom is excluded, and only when
+# no condition or speaker follows in its sentence ('held to a high bar until I approve').
+# The window is bounded so the lookahead stays linear.
+HELD_IDIOM = (r'(?:\s+(?:accountable|responsible)\b|\s+to\s+(?:(?:the|a|an|our|same|high\w*|strict\w*)\s+){0,3}'
+              r'(?:standards?|bar|rules?|conventions?|quality|expectations?)\b)'
+              r'(?![^.!?]{0,120}?(?:\b(?:until|till|pending|unless|before|wait\w*|jusqu\w*)\b|' + FIRST_PERSON + r'))')
 HOLD_VERB = re.compile(r'\b(?:hold\w*|paus\w*|freez\w*|frozen|wait\w*|suspend\w*|attend\w*|gel\w*|block\w*|bloqu\w*'
                        r'|park\w*|held(?!' + HELD_IDIOM + r')|unmerged)\b')
 # A held pull request or frozen branch needs no merge word or approver: 'All PRs are on hold.',
@@ -211,7 +211,7 @@ HOLD_VERB = re.compile(r'\b(?:hold\w*|paus\w*|freez\w*|frozen|wait\w*|suspend\w*
 PR_NOUN = r'\b(?:prs?|mrs?|pull[\s-]+requests?|merge[\s-]+requests?|demandes?\s+de\s+fusion)\b'
 # 'PRs are not on hold' and 'The main branch is not frozen' lift the state instead.
 NOT_HELD = r'(?!(?:not|no|never|pas|plus|jamais)\b)'
-PR_STATE = (r'(?:on\s+hold|on\s+pause|en\s+pause|paused|suspended|frozen|parked|held(?!\s+(?:to|in|against|accountable|responsible|up)\b|' + HELD_BY_QUEUE + r')'
+PR_STATE = (r'(?:on\s+hold|on\s+pause|en\s+pause|paused|suspended|frozen|parked|held(?!\s+(?:to|in|against|accountable|responsible|up)\b)'
             r'|en\s+attente|suspendue?s?|gelée?s?)')
 # 'All PRs are blocked' holds them; 'Draft PRs are blocked', 'PRs are blocked by failing checks'
 # or '... until CI passes' describe a gate. So the PRs open the clause, with at most a
@@ -219,12 +219,14 @@ PR_STATE = (r'(?:on\s+hold|on\s+pause|en\s+pause|paused|suspended|frozen|parked|
 # After punctuation, only a failure explanation that ends the sentence describes a gate:
 # 'PRs are blocked: failing checks.' but not 'All PRs are blocked: CI is down.'
 FAILURE_EXPLANATION = (r'\s*(?:the\s+)?(?:(?:failing|failed|red)\s+' + CHECK_NOUN + r'|' + CHECK_NOUN
-                       + r'\s+(?:fail|fails|failed|(?:are|is)\s+(?:red|failing)))\s*\)?\s*$')
+                       + r'\s+(?:fail|fails|failed|(?:are|is)\s+(?:red|failing)))\s*(?:\)\s*)?$')
 PR_BLOCKED = (r'^\W*(?:(?:all|every|any|the|open|pending|toutes|tous|les)\s+){0,2}' + PR_NOUN
               + r'\s+(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:(?:now|currently|temporarily|all|actuellement|désormais)\s+)?'
               r'(?:blocked|bloquée?s?)\b(?=\s*$|\s*[,;:)](?!' + FAILURE_EXPLANATION + r')'
               r'|\s+(?:until|till|while|jusqu\w*|tant|pendant|for\s+now|today|pour\s+le\s+moment)\b'
               r'(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:(?:failing|green)\s+)?' + CHECK_NOUN + r'\b))')
+# A PR state that PR_HELD reads as a gate, not a hold: 'held to the same standard', 'blocked by failing checks'.
+PR_GATE = re.compile(PR_NOUN + r'[^.!?]{0,80}?\b(?:held|blocked|bloquée?s?)\b')
 # A lifted state: 'PRs are not on hold', 'PRs aren't on hold', 'PRs are no longer on hold'.
 LIFTED = r'(?:(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:not|no\s+longer|pas|plus)|(?:aren|isn)[’\x27]t)\s+'
 # Imperatives open their clause, after an optional softener: 'Please freeze main.'
@@ -947,15 +949,10 @@ def near_scope(text, match):
 
 # 'Integration:' opening a unit is a rule label for the merge step itself; 'Continuous
 # integration:' and 'Integration tests:' name something else. The label also needs a speaker
-# or a PR in its unit: 'Integration: needs admin consent in Entra ID' is an app integration,
-# and so is a speaker's approval whose direct object is an app and ends the clause:
-# 'Integration: needs my approval to connect the app.' An app word elsewhere clears nothing:
-# 'Integration: needs my approval, even for app changes.'
+# or a PR in its unit: 'Integration: needs admin consent in Entra ID' is an app integration.
+# A speaker's approval of an app ('needs my approval to connect the app') still holds: no
+# reviewed wording separates it from a merge approval in every context.
 INTEGRATION_LABEL = re.compile(r'[\W_]*(integration|intégration)[*_`]*\s*:')
-APP_APPROVAL = re.compile(r'\b(?:approval|ok|okay|sign-?off|consent)\s+(?:to\s+(?:connect|install|add|enable|authori[sz]e'
-                          r'|link|configure|set\s+up)\s+|for\s+)(?:(?:the|a|an|this|our|my|new)\s+)?(?:[\w-]+\s+)?'
-                          r'(?:apps?|applications?|connectors?|plugins?|extensions?|webhooks?|services?'
-                          r'|tokens?|accounts?|oauth|sso|api\s+keys?)\s*$')
 FIRST_PERSON_WORD = re.compile(FIRST_PERSON)
 
 
@@ -964,7 +961,7 @@ def integrations_as_merges(text):
 
 
 def free_restriction(context, unit):
-    """True for a restriction, 'cleared' for an exempted git-mechanics rule, else False."""
+    """True for a restriction, 'cleared' for an exempted git-mechanics rule, 'gate' for a PR gate, else False."""
     text = (context + ' ' + unit).strip()
     if any(PR_HELD.search(part) for part in re.split(r'[.!?]', unit)):
         return True
@@ -977,19 +974,19 @@ def free_restriction(context, unit):
                for part in re.split(r'[.!?]', unit)):
             return True
     label = INTEGRATION_LABEL.match(unit)
-    # Read per clause: 'Integration: needs my approval for the app. Ask me first.' still holds.
-    # A PR elsewhere does not turn the label's own app approval into a merge rule:
-    # 'Integration: needs my approval to connect the app. PRs may merge after CI.'
-    if label:
-        parts = re.split(r'[.;!?]', unit)
-        app_only = [bool(APP_APPROVAL.search(part)) and not PR_SCOPE.search(part) for part in parts]
-        if (PR_SCOPE.search(unit) and not app_only[0]
-                or any(FIRST_PERSON_WORD.search(part) and not app for part, app in zip(parts, app_only))):
-            unit = unit[:label.start(1)] + 'merge' + unit[label.end(1):]
-            text = (context + ' ' + unit).strip()
+    if label and (FIRST_PERSON_WORD.search(unit) or PR_SCOPE.search(unit)):
+        unit = unit[:label.start(1)] + 'merge' + unit[label.end(1):]
+        text = (context + ' ' + unit).strip()
     if PR_SCOPE.search(unit):
         text = integrations_as_merges(text)
     if not FREE_NEEDS.search(text) or not FREE.search(text):
+        # 'PRs are held to the same standard.' or 'PRs are blocked: failing checks.' describes a
+        # gate, but a heading, lead-in, later sentence or later unit can still hold it
+        # ('## Freeze until I approve'), so it is read like a cleared rule. Its own gate words
+        # ('blocked', 'until CI passes') are not a hold.
+        if PR_GATE.search(unit):
+            rest = [part for part in re.split(r'[.!?]', unit) if not PR_GATE.search(part)]
+            return True if any(FOLLOW_HOLD.search(part) or HOLD_CONTEXT.search(part) for part in rest) else 'gate'
         return False
     if HOLD_CONTEXT.search(text) or SCOPE.search(text) or NEVER_EXEMPT.search(text):
         return True
@@ -1053,14 +1050,14 @@ def scan_normalized(text):
         result = free_restriction(strip_markers(context), unit)
         if result is True:
             return 2
-        if result == 'cleared' and FOLLOW_HOLD.search(strip_markers(context)):
+        if result in ('cleared', 'gate') and FOLLOW_HOLD.search(strip_markers(context)):
             return 2  # a heading, lead-in or parent item conditions the rule
         if section is not None and NEXT_HOLD.search(unit):
             return 2  # a later unit of the section qualifies the cleared rule
-        if result == 'cleared' and section is None:
+        if result in ('cleared', 'gate') and section is None:
             section = level
-        cleared = cleared or result == 'cleared'
-        follows = follows or bool(FOLLOW_HOLD.search(unit))
+        cleared = cleared or result in ('cleared', 'gate')
+        follows = follows or (result != 'gate' and bool(FOLLOW_HOLD.search(unit)))
     if held:
         return 2  # a list or table carries a pause or approval restriction across items
     # A hold or approval sentence anywhere in the file may qualify a cleared
