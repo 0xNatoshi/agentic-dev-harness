@@ -25,11 +25,12 @@ import uuid
 import zipfile
 import zlib
 
-INSTALLER_VERSION = "1.0.0"
+INSTALLER_VERSION = "1.1.0"
 SKILL = "github-workflow"
 SKILL_PREFIX = "skills/" + SKILL + "/"
 # Obsolete v5.2 files owned by earlier installations. They leave the active tree but stay in the
-# retired and backup copies, so rollback restores them.
+# retired and backup copies, so rollback restores them. Retirement is by pathname, without a hash
+# check, so an edited copy is retired too; the plan, apply output and receipt name each one (#43).
 RETIREMENT_LIST = {
     "version": 1,
     "paths": {
@@ -591,6 +592,18 @@ def classify(name: str, entry: dict, package_files: dict) -> str:
     return "customization"
 
 
+def retirements(classification: dict, before: dict | None, backup: Path | None = None, retired: Path | None = None) -> list:
+    """Each named obsolete file with its hash; with the transaction copies, where its exact bytes are kept."""
+    entries = []
+    for name in sorted(name for name, kind in classification.items() if kind == "named obsolete"):
+        entry = {"path": name, "sha256": before[name]["sha256"], "bytes": before[name]["bytes"]}
+        if retired is not None and backup is not None:
+            parts = PurePosixPath(name).parts
+            entry.update(retired_copy=str(retired.joinpath(*parts)), backup=str(backup.joinpath(*parts)))
+        entries.append(entry)
+    return entries
+
+
 def make_plan(runtime: str, home: str | None, config: str | None, package_source: Path, checksums: Path):
     """Return the plan and the verified package it describes."""
     locations = Locations(runtime, home, config)
@@ -632,6 +645,11 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
         "retirement_list": RETIREMENT_LIST,
         "before": before,
         "classification": classification,
+        # Derived from before and classification, so neither key is a drift key.
+        "retirements": retirements(classification, before),
+        "retirement_copies": {"state_root": str(locations.state), "transaction": None,
+                              "note": "The transaction directory is allocated at apply; the apply output and receipt "
+                                      "give each retired file's retired_copy and backup location"},
         "duplicates": duplicates,
         "duplicate_inventories": {path: inventory(Path(path)) for path in duplicates},
         "legacy_commands": [str(path) for path in locations.legacy if exists(path)],
@@ -1060,6 +1078,7 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         finish(locations.state)
         raise Refused("Exactly one discoverable copy was not established; the original state was restored", discovered)
     classification = plan["classification"]
+    receipt_path = transaction / "receipt.json"
     receipt = {
         "receipt_format": 1,
         "installer_version": INSTALLER_VERSION,
@@ -1073,6 +1092,7 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         "before": before,
         "after": after,
         "retired_paths": sorted(name for name, kind in classification.items() if kind == "named obsolete"),
+        "retirements": retirements(classification, before, backup, retired) if before is not None else [],
         "dropped_paths": sorted(name for name, kind in classification.items() if kind == "regenerable cache"),
         "preserved_paths": sorted(name for name, kind in classification.items() if kind in PRESERVED),
         "replaced_paths": sorted(name for name, kind in classification.items() if kind == "package"),
@@ -1085,13 +1105,17 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         "discovered_after": discovered,
         "state": "installed",
         "note": "Two renames are not an atomic or continuously available replacement; the maintenance boundary covers the gap.",
+        # An argument list, not a shell string: quoting differs between PowerShell, cmd and sh. It omits
+        # --maintenance-confirmed, which the operator appends once every consuming session is stopped.
+        "rollback_command": [sys.executable, os.path.abspath(__file__), "rollback", "--receipt", str(receipt_path)],
     }
-    write_json(transaction / "receipt.json", receipt)
+    write_json(receipt_path, receipt)
     operation.save("committed")
     finish(locations.state)
-    return {"result": "installed", "receipt": str(transaction / "receipt.json"), "target": str(locations.target),
-            "retired_paths": receipt["retired_paths"], "dropped_paths": receipt["dropped_paths"],
-            "preserved_paths": receipt["preserved_paths"], "duplicates_retired": [move["from"] for move in moves]}
+    return {"result": "installed", "receipt": str(receipt_path), "target": str(locations.target),
+            "retired_paths": receipt["retired_paths"], "retirements": receipt["retirements"],
+            "dropped_paths": receipt["dropped_paths"], "preserved_paths": receipt["preserved_paths"],
+            "duplicates_retired": [move["from"] for move in moves], "rollback_command": receipt["rollback_command"]}
 
 
 def stage(staged: Path, package_files: dict, target: Path, before: dict, classification: dict) -> None:
