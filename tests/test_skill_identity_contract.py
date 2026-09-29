@@ -5,7 +5,10 @@ import re
 import unittest
 
 
-SKILL = Path(__file__).resolve().parents[1] / "skills/github-workflow/SKILL.md"
+SKILL_DIR = Path(__file__).resolve().parents[1] / "skills/github-workflow"
+SKILL = SKILL_DIR / "SKILL.md"
+GUARDED_EMAIL = '--author-email "${workflow_author_email:?'
+PREFLIGHT = "workflow_author_email=$(bash <skill-dir>/scripts/merge-preflight.sh identity "
 
 
 def section(text: str, heading: str) -> str:
@@ -28,13 +31,32 @@ class SkillIdentityContractTests(unittest.TestCase):
         self.assertEqual(len(merge_lines), 1)
         line = merge_lines[0]
         self.assertIn("--match-head-commit <headRefOid>", line)
-        self.assertIn('--author-email "$workflow_author_email"', line)
+        self.assertIn(GUARDED_EMAIL, line)
         for forbidden in ("--auto", "--admin"):
             self.assertNotIn(forbidden, line)
         preflight = merge.index("workflow_author_email=$(bash <skill-dir>/scripts/merge-preflight.sh identity ")
         # Fail closed: an empty address must never reach gh pr merge.
         self.assertTrue(merge[preflight:].splitlines()[0].endswith(") || exit"))
         self.assertLess(preflight, merge.index(line))
+
+    def test_every_skill_merge_command_is_identity_gated(self) -> None:
+        # Templates are exported project text owned by the template family (#15), not skill procedure.
+        commands = []
+        for path in sorted(SKILL_DIR.rglob("*.md")):
+            if "templates" in path.relative_to(SKILL_DIR).parts:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for found in re.finditer(r"gh pr merge [^`\n]*", text):
+                commands.append(found.group())
+                with self.subTest(path=path.name, command=found.group()):
+                    # An empty address must stop the merge: gh drops it and uses the account default.
+                    self.assertIn(GUARDED_EMAIL, found.group())
+                    self.assertIn("--match-head-commit ", found.group())
+                    for forbidden in ("--auto", "--admin"):
+                        self.assertNotIn(forbidden, found.group())
+                    self.assertLess(text.find(PREFLIGHT), found.start())
+                    self.assertNotEqual(text.find(PREFLIGHT), -1)
+        self.assertGreaterEqual(len(commands), 2)
 
     def test_identity_exit_codes_block_merge(self) -> None:
         merge = section(self.text, "### `merge <pr>`")

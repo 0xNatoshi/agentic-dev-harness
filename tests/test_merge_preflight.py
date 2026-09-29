@@ -23,6 +23,7 @@ from pathlib import Path
 import sys
 
 args = sys.argv[1:]
+host = os.getenv('FIXTURE_HOST', 'github.example')
 with Path(os.environ['FIXTURE_LOG']).open('a', encoding='utf-8') as log:
     log.write(json.dumps(args) + '\\n')
 if args[:2] == ['repo', 'view']:
@@ -32,7 +33,7 @@ if args[:2] == ['repo', 'view']:
     full = 'fixture/repo' if explicit else os.getenv('FIXTURE_SELECTED', 'fixture/repo')
     print(json.dumps({
         'nameWithOwner': full,
-        'url': 'https://github.example/' + full,
+        'url': 'https://' + host + '/' + full,
         'defaultBranchRef': {'name': 'main'},
     }))
     sys.exit(0)
@@ -41,18 +42,28 @@ if not args or args[0] != 'api' or '--repo' in args:
 if '--hostname' not in args:
     sys.exit(91)
 index = args.index('--hostname')
-if args[index + 1] != 'github.example':
+if args[index + 1] != host:
     sys.exit(92)
 del args[index:index + 2]
 if os.getenv('FIXTURE_API_FAIL') == args[1]:
     sys.exit(1)
 env = os.getenv
 if args[1] == 'graphql' and any('viewerPossibleCommitEmails' in arg for arg in args):
+    if env('FIXTURE_GRAPHQL_ERRORS') == '1':
+        print(json.dumps({'data': None, 'errors': [{'message': 'fixture'}]}))
+        sys.exit(0)
+    if env('FIXTURE_GRAPHQL_DATA') is not None:
+        print(json.dumps({'data': env('FIXTURE_GRAPHQL_DATA')}))
+        sys.exit(0)
     possible = env('FIXTURE_POSSIBLE', '1001+octo-fixture@users.noreply.github.com')
-    print(json.dumps({'data': {'repository': {
-        'viewerPossibleCommitEmails': None if possible == '__null__' else possible.split(','),
+    possible = None if possible == '__null__' else possible.split(',')
+    payload = {'data': {'repository': {
+        'viewerPossibleCommitEmails': env('FIXTURE_POSSIBLE_SHAPE', possible),
         'viewerDefaultCommitEmail': env('FIXTURE_DEFAULT_EMAIL', '1001+octo-fixture@users.noreply.github.com'),
-    }}}))
+    }}}
+    if env('FIXTURE_GRAPHQL_ERRORS') == 'partial':
+        payload['errors'] = [{'message': 'fixture'}]
+    print(json.dumps(payload))
     sys.exit(0)
 if args[1] == 'graphql':
     print('false\\t0')
@@ -62,27 +73,30 @@ if args[1] == 'user':
     sys.exit(0)
 if args[1] == 'users/octo-fixture':
     name = env('FIXTURE_PROFILE_NAME', 'octo-fixture')
-    print(json.dumps({'login': 'octo-fixture', 'id': 1001, 'created_at': env('FIXTURE_CREATED', '2020-01-01T00:00:00Z'),
+    print(json.dumps({'login': env('FIXTURE_ACCOUNT_LOGIN', 'octo-fixture'),
+                      'id': json.loads(env('FIXTURE_ACCOUNT_ID', '1001')),
+                      'created_at': env('FIXTURE_CREATED', '2020-01-01T00:00:00Z'),
                       'name': None if name == '__null__' else name}))
     sys.exit(0)
 MERGE_SHA = '0123456789abcdef' * 2 + '01234567'
 if args[1] == 'repos/fixture/repo/pulls/7':
     print(json.dumps({'user': {'login': 'octo-fixture', 'id': int(env('FIXTURE_PR_AUTHOR_ID', '1001'))},
                       'state': env('FIXTURE_PR_STATE', 'open'), 'merged': env('FIXTURE_PR_MERGED') == 'true',
-                      'merge_commit_sha': MERGE_SHA}))
+                      'merge_commit_sha': env('FIXTURE_MERGE_SHA', MERGE_SHA)}))
     sys.exit(0)
 if args[1] == 'repos/fixture/repo/commits/' + MERGE_SHA:
     login = env('FIXTURE_COMMIT_LOGIN', 'octo-fixture')
+    author = {'__none__': {}, '__null__': None}.get(login, {'login': login, 'id': int(env('FIXTURE_COMMIT_ID', '1001'))})
     # The committer email is deliberately absent: the check must never read it.
     print(json.dumps({
-        'sha': MERGE_SHA,
+        'sha': env('FIXTURE_COMMIT_SHA', MERGE_SHA),
         'commit': {
             'author': {'name': env('FIXTURE_COMMIT_NAME', 'octo-fixture'),
                        'email': env('FIXTURE_COMMIT_EMAIL', '1001+octo-fixture@users.noreply.github.com')},
             'committer': {'name': env('FIXTURE_COMMITTER_NAME', 'GitHub')},
             'verification': {'verified': env('FIXTURE_VERIFIED', 'true') == 'true'},
         },
-        'author': {} if login == '__none__' else {'login': login, 'id': int(env('FIXTURE_COMMIT_ID', '1001'))},
+        'author': author,
         'committer': {'login': env('FIXTURE_COMMITTER_LOGIN', 'web-flow')},
     }))
     sys.exit(0)
@@ -106,6 +120,7 @@ class Case:
     api_calls: int = 0
     stderr: tuple[str, ...] = ()
     arguments: tuple[str, ...] = ("7", "octo-fixture")
+    stdout: str | None = None
 
 
 TEXT_CASES = (
@@ -639,30 +654,56 @@ MERGED = (("FIXTURE_PR_STATE", "closed"), ("FIXTURE_PR_MERGED", "true"))
 MERGE_SHA = "0123456789abcdef" * 2 + "01234567"
 
 
-def identity_case(name, expected, *environment, stderr=(), api_calls=4, **options):
+# The noreply format is a github.com fact, so the identity fixtures use that origin host.
+def identity_case(name, expected, *environment, stderr=(), api_calls=4, host="github.com", **options):
     stderr = (stderr,) if isinstance(stderr, str) else stderr
-    return Case(name, expected, mode="identity", environment=environment, stderr=stderr, api_calls=api_calls, **options)
-
-
-def published_case(name, expected, *environment, stderr=(), api_calls=3, **options):
-    stderr = (stderr,) if isinstance(stderr, str) else stderr
-    return Case(name, expected, mode="published", environment=MERGED + environment, stderr=stderr,
+    return Case(name, expected, mode="identity", environment=(("FIXTURE_HOST", host), *environment), stderr=stderr,
                 api_calls=api_calls, **options)
+
+
+def published_case(name, expected, *environment, stderr=(), api_calls=3, host="github.com", **options):
+    stderr = (stderr,) if isinstance(stderr, str) else stderr
+    return Case(name, expected, mode="published", environment=(("FIXTURE_HOST", host), *MERGED, *environment),
+                stderr=stderr, api_calls=api_calls, **options)
 
 
 IDENTITY_CASES = (
     identity_case("identity compliant", 0, stderr="identity: profile-name-is-handle=true"),
+    # A verified local author never covers the server-generated squash author.
     identity_case("identity verified local author with profile alias", 1, *VERIFIED_LOCAL_AUTHOR,
-                  ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
-                  stderr=("identity: blocker=profile-name", "User decisions: set the profile display name to the handle")),
+                  ("FIXTURE_PROFILE_NAME", "Fixture Alias"), setup="local_author_verified",
+                  stderr=("identity: blocker=profile-name", "Set the profile display name to the handle exactly")),
     identity_case("identity viewer is not handle", 1, ("FIXTURE_VIEWER", "other-account"), ("FIXTURE_VIEWER_ID", "2002"),
                   ("FIXTURE_PR_AUTHOR_ID", "2002"), stderr="identity: blocker=merger-is-handle"),
     identity_case("identity PR author differs from merger", 2, ("FIXTURE_PR_AUTHOR_ID", "2002"),
                   stderr="identity: indeterminate=pr-author-is-merger"),
     identity_case("identity profile name unset", 2, ("FIXTURE_PROFILE_NAME", "__null__"),
                   stderr="identity: indeterminate=profile-name-unset"),
-    identity_case("identity profile name case variant", 0, ("FIXTURE_PROFILE_NAME", "Octo-Fixture"),
-                  stderr="identity: warning=profile-name-case-variant"),
+    # published compares the author name exactly, so a case variant must not clear here.
+    identity_case("identity profile name case variant", 1, ("FIXTURE_PROFILE_NAME", "Octo-Fixture"),
+                  stderr="identity: blocker=profile-name"),
+    identity_case("identity profile name lookalike", 1, ("FIXTURE_PROFILE_NAME", "octo-ﬁxture"),
+                  stderr="identity: blocker=profile-name"),
+    identity_case("identity unsupported host", 2, api_calls=0, host="github.example",
+                  stderr="support only github.com"),
+    identity_case("identity indeterminate outranks blocker", 2, ("FIXTURE_PR_AUTHOR_ID", "2002"),
+                  ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
+                  stderr=("identity: indeterminate=pr-author-is-merger", "identity: blocker=profile-name")),
+    identity_case("identity PR open but merged", 1, ("FIXTURE_PR_MERGED", "true"), stderr="identity: blocker=pr-open"),
+    identity_case("identity GraphQL errors", 2, ("FIXTURE_GRAPHQL_ERRORS", "1"), stderr="commit-email"),
+    # A partial response is not evidence, even when its data looks complete.
+    identity_case("identity GraphQL partial errors", 2, ("FIXTURE_GRAPHQL_ERRORS", "partial"), stderr="commit-email"),
+    identity_case("identity GraphQL data not an object", 2, ("FIXTURE_GRAPHQL_DATA", "fixture"),
+                  stderr="commit-email"),
+    identity_case("identity possible commit emails not a list", 2, ("FIXTURE_POSSIBLE_SHAPE", NOREPLY),
+                  stderr="commit-email"),
+    identity_case("identity account login differs", 2, ("FIXTURE_ACCOUNT_LOGIN", "other-account"), api_calls=2,
+                  stderr="another login"),
+    # The noreply keeps the account login's case, as GitHub forms it; the handle argument may differ in case.
+    identity_case("identity account login case kept in noreply", 0, ("FIXTURE_ACCOUNT_LOGIN", "Octo-Fixture"),
+                  ("FIXTURE_PROFILE_NAME", "Octo-Fixture"), stdout="1001+Octo-Fixture@users.noreply.github.com\n"),
+    identity_case("identity account id is boolean", 2, ("FIXTURE_ACCOUNT_ID", "true"), api_calls=2,
+                  stderr="account response"),
     identity_case("identity noreply not a possible commit email", 1, ("FIXTURE_POSSIBLE", "person@example.invalid"),
                   stderr="identity: blocker=noreply-not-possible-commit-email"),
     identity_case("identity possible commit emails unreadable", 2, ("FIXTURE_POSSIBLE", "__null__"),
@@ -691,6 +732,24 @@ IDENTITY_CASES = (
                    stderr="published: warning=signature-verified"),
     published_case("published PR not merged", 2, ("FIXTURE_PR_MERGED", "false"), api_calls=1),
     published_case("published commit endpoint fails", 2, ("FIXTURE_API_FAIL", "repos/fixture/repo/commits/" + MERGE_SHA)),
+    published_case("published committer name not GitHub", 2, ("FIXTURE_COMMITTER_NAME", "octo-fixture"),
+                   stderr="published: indeterminate=committer-is-web-flow"),
+    published_case("published author id differs", 1, ("FIXTURE_COMMIT_ID", "2002"),
+                   stderr="published: blocker=author-id-matches"),
+    published_case("published null author", 1, ("FIXTURE_COMMIT_LOGIN", "__null__"),
+                   stderr=("published: blocker=author-login-is-handle", "published: blocker=author-id-matches")),
+    published_case("published author name case variant", 1, ("FIXTURE_COMMIT_NAME", "Octo-Fixture"),
+                   stderr="published: blocker=author-name-is-handle"),
+    published_case("published author email ASCII case", 0, ("FIXTURE_COMMIT_EMAIL", NOREPLY.upper()),
+                   stderr="published: author-email-is-noreply=true"),
+    published_case("published author email lookalike", 1,
+                   ("FIXTURE_COMMIT_EMAIL", NOREPLY.replace("users", "uſers")),
+                   stderr="published: blocker=author-email-is-noreply"),
+    published_case("published commit SHA differs", 2, ("FIXTURE_COMMIT_SHA", "f" * 40), stderr="commit response"),
+    published_case("published malformed merge SHA", 2, ("FIXTURE_MERGE_SHA", MERGE_SHA.upper()), api_calls=1,
+                   stderr="no merge commit"),
+    published_case("published unsupported host", 2, api_calls=0, host="github.example",
+                   stderr="support only github.com"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES + IDENTITY_CASES
 INVENTORY = 466 + len(IDENTITY_CASES)
@@ -729,8 +788,16 @@ class MergePreflightTests(unittest.TestCase):
             write_fixture(self.instructions, (ROOT / case.source).read_bytes().decode("utf-8"))
         elif case.text is not None:
             write_fixture(self.instructions, case.text)
+        environment = self.environment | dict(case.environment)
+        if "FIXTURE_HOST" in environment:
+            self.git("remote", "set-url", "origin", f"https://{environment['FIXTURE_HOST']}/fixture/repo.git")
         if case.setup == "push_mismatch":
             self.git("remote", "set-url", "--push", "origin", "https://github.example/other/repo.git")
+        elif case.setup == "local_author_verified":
+            # Establish the premise: git itself reports the verified handle and noreply locally.
+            for variable in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"):
+                ident = run(["git", "var", variable], self.repo, environment)
+                self.assertTrue(ident.stdout.startswith(f"octo-fixture <{NOREPLY}> "), ident.stdout)
         elif case.setup == "published_wait":
             write_fixture(self.instructions, "Autonomous merge suspended — asked on 2026-09-27\n")
             self.git("add", "AGENTS.md")
@@ -740,7 +807,6 @@ class MergePreflightTests(unittest.TestCase):
         elif case.setup == "missing_published_ref":
             self.git("update-ref", "-d", "refs/remotes/origin/main")
         write_fixture(self.log, "")
-        environment = self.environment | dict(case.environment)
         arguments = [str(self.instructions)] if case.mode == "suspension" else ["fixture", "repo"]
         if case.mode == "reviews":
             arguments.append("1")
@@ -755,7 +821,8 @@ class MergePreflightTests(unittest.TestCase):
         )
         if case.mode in ("identity", "published"):
             # Only a clear identity result prints, and only the noreply address.
-            self.assertEqual(result.stdout, NOREPLY + "\n" if (case.mode, case.expected) == ("identity", 0) else "")
+            printed = NOREPLY + "\n" if (case.mode, case.expected) == ("identity", 0) else ""
+            self.assertEqual(result.stdout, printed if case.stdout is None else case.stdout)
             for value in PRIVATE:
                 self.assertNotIn(value, result.stdout + result.stderr, case.name)
         for text in case.stderr:

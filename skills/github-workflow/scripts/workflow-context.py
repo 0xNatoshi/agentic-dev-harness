@@ -951,6 +951,8 @@ HANDLE = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}')
 PR_NUMBER = re.compile(r'[1-9][0-9]{0,9}')
 CREATED = re.compile(r'(\d{4})-(\d{2})-(\d{2})T')
 NOREPLY_CUTOFF = datetime.date(2017, 7, 18)
+# The noreply format and its cutoff are github.com facts; other hosts are unsupported.
+NOREPLY_HOST = 'github.com'
 COMMIT_EMAILS = ('query($owner:String!,$name:String!){repository(owner:$owner,name:$name)'
                  '{viewerPossibleCommitEmails viewerDefaultCommitEmail}}')
 
@@ -985,11 +987,23 @@ def identity_arguments(args):
     return owner + '/' + name, number, handle
 
 
+def identity_origin(expected):
+    host, full, _ = origin_context(expected)
+    if host != NOREPLY_HOST:
+        raise EvidenceError('Server-author checks support only ' + NOREPLY_HOST + ' origins')
+    return host, full
+
+
+def same_ascii(left, right):
+    """Equal up to ASCII case only: Unicode casefold would equate lookalikes such as U+FB01 and 'fi'."""
+    return left.isascii() and right.isascii() and left.lower() == right.lower()
+
+
 def handle_account(host, handle):
     account = api_json(host, 'users/' + handle, 'account')
     login = field(account, 'login', str, 'account')
     field(account, 'id', int, 'account')
-    if login.casefold() != handle.casefold():
+    if not same_ascii(login, handle):
         raise EvidenceError('Account lookup returned another login')
     field(account, 'created_at', str, 'account')
     return account
@@ -1013,7 +1027,8 @@ def commit_emails(host, full):
         raise EvidenceError('Unreadable commit-email response') from error
     if not isinstance(value, dict) or value.get('errors'):
         raise EvidenceError('Unexpected commit-email response')
-    repository = (value.get('data') or {}).get('repository')
+    data = value.get('data')
+    repository = data.get('repository') if isinstance(data, dict) else None
     if not isinstance(repository, dict):
         raise EvidenceError('Unexpected commit-email response')
     possible = repository.get('viewerPossibleCommitEmails')
@@ -1036,7 +1051,7 @@ def report(mode, facts, findings):
 def identity_mode(args):
     """Pre-merge prediction of the server author; exit 0 prints only the noreply."""
     expected, number, handle = identity_arguments(args)
-    host, full, _ = origin_context(expected)
+    host, full = identity_origin(expected)
     viewer = api_json(host, 'user', 'viewer')
     viewer_id = field(viewer, 'id', int, 'viewer')
     account = handle_account(host, handle)
@@ -1059,23 +1074,20 @@ def identity_mode(args):
     if not facts[2][1]:
         findings.append(('indeterminate', 'pr-author-is-merger'))
     if isinstance(name, str) and name:
+        # Exact, case included: published compares the squash author name the same way.
         facts.append(('profile-name-is-handle', name == login))
-        variant = name != login and name.casefold() == login.casefold()
-        facts.append(('profile-name-case-variant', variant))
-        if variant:
-            findings.append(('warning', 'profile-name-case-variant'))
-        elif name != login:
+        if name != login:
             findings.append(('blocker', 'profile-name'))
     else:
         findings.append(('indeterminate', 'profile-name-unset'))
     if possible is None:
         findings.append(('indeterminate', 'possible-commit-emails-unreadable'))
     else:
-        allowed = address.casefold() in {email.casefold() for email in possible}
+        allowed = any(same_ascii(email, address) for email in possible)
         facts.append(('noreply-is-possible-commit-email', allowed))
         if not allowed:
             findings.append(('blocker', 'noreply-not-possible-commit-email'))
-    is_default = default is not None and default.casefold() == address.casefold()
+    is_default = default is not None and same_ascii(default, address)
     facts.append(('default-commit-email-is-noreply', is_default))
     if not is_default:
         # Neutralized by the pinned --author-email; reported for transparency.
@@ -1083,8 +1095,8 @@ def identity_mode(args):
     code = report('identity', facts, findings)
     if ('blocker', 'profile-name') in findings:
         print('identity: decision required: the server-generated squash author name follows the profile display '
-              'name, not the handle. User decisions: set the profile display name to the handle, adopt rebase '
-              'merge, or explicitly accept this author name for this PR.', file=sys.stderr)
+              'name, not the handle. Set the profile display name to the handle exactly, case included; no other '
+              'author name has a gated merge path, so the merge stays blocked.', file=sys.stderr)
     if possible is None:
         print('identity: possible commit emails are unreadable; check the token scope.', file=sys.stderr)
     if code == 0:
@@ -1095,7 +1107,7 @@ def identity_mode(args):
 def published_mode(args):
     """Post-merge proof: compare the PR's merge commit with the handle, booleans only."""
     expected, number, handle = identity_arguments(args)
-    host, full, _ = origin_context(expected)
+    host, full = identity_origin(expected)
     pull = api_json(host, 'repos/' + full + '/pulls/' + number, 'pull request')
     sha = pull.get('merge_commit_sha')
     if pull.get('merged') is not True or not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}', sha):
@@ -1116,8 +1128,8 @@ def published_mode(args):
     login = user.get('login')
     facts = [
         ('author-name-is-handle', name == account['login']),
-        ('author-email-is-noreply', email.casefold() == address.casefold()),
-        ('author-login-is-handle', isinstance(login, str) and login.casefold() == account['login'].casefold()),
+        ('author-email-is-noreply', same_ascii(email, address)),
+        ('author-login-is-handle', isinstance(login, str) and same_ascii(login, account['login'])),
         ('author-id-matches', type(user.get('id')) is int and user['id'] == account['id']),
     ]
     findings = [('blocker', key) for key, value in facts if not value]
