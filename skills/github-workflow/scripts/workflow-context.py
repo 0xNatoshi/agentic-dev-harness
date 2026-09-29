@@ -196,27 +196,32 @@ ASK_DECIDER = (r'(?:\b(?:ask|consult|check\s+with|confirm\s+with|ping|talk\s+to|
 FIRST_WORD = r'(?:first|beforehand|d[’\x27]abord|avant|before(?=\s*(?:$|[|,;.)])))\b'
 SCOPE_NEAR = 40
 NOT_BEFORE = re.compile(r'\b(?:not|never|n[’\x27]t|no\s+need\s+to|pas|jamais)\s+(?:\w+\s+)?$')
-# 'PRs are held to the same standard' names no hold.
-HELD = r'held(?!\s+(?:to|in|against|accountable|responsible|up)\b)'
+# 'PRs are held to the same standard' names no hold, but 'held in the queue until I approve',
+# 'held up' and 'held to my approval' do: only the standard idiom is excluded.
+HELD_TO_A_STANDARD = (r'held(?!\s+(?:accountable|responsible)\b|\s+to\s+(?:(?:the|a|an|our|same|high\w*|strict\w*)\s+){0,3}'
+                      r'(?:standards?|bar|rules?|conventions?|quality|expectations?)\b)')
 HOLD_VERB = re.compile(r'\b(?:hold\w*|paus\w*|freez\w*|frozen|wait\w*|suspend\w*|attend\w*|gel\w*|block\w*|bloqu\w*'
-                       r'|park\w*|' + HELD + r'|unmerged)\b')
+                       r'|park\w*|' + HELD_TO_A_STANDARD + r'|unmerged)\b')
 # A held pull request or frozen branch needs no merge word or approver: 'All PRs are on hold.',
 # 'Hold PRs.', 'Every PR needs my approval.', 'The main branch is frozen.'
 PR_NOUN = r'\b(?:prs?|mrs?|pull[\s-]+requests?|merge[\s-]+requests?|demandes?\s+de\s+fusion)\b'
 # 'PRs are not on hold' and 'The main branch is not frozen' lift the state instead.
 NOT_HELD = r'(?!(?:not|no|never|pas|plus|jamais)\b)'
-PR_STATE = (r'(?:on\s+hold|on\s+pause|en\s+pause|paused|suspended|frozen|parked|' + HELD
-            + r'|en\s+attente|suspendue?s?|gelée?s?)')
+PR_STATE = (r'(?:on\s+hold|on\s+pause|en\s+pause|paused|suspended|frozen|parked|held(?!\s+(?:to|in|against|accountable|responsible|up)\b)'
+            r'|en\s+attente|suspendue?s?|gelée?s?)')
 # 'All PRs are blocked' holds them; 'Draft PRs are blocked', 'PRs are blocked by failing checks'
-# '... until CI passes' or 'PRs are blocked: failing checks.' describe a gate. So the PRs open
-# the clause, with at most a quantifier, and the state ends it, or punctuation or a time or
-# event condition follows without a check after it.
-NOT_A_CHECK = (r'(?!\s*(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:(?:failing|failed|green|red)\s+)?'
-               r'(?:ci|checks?|tests?|builds?|lint\w*|status\s+checks?)\b)')
+# or '... until CI passes' describe a gate. So the PRs open the clause, with at most a
+# quantifier, and the state ends it or a time or event condition that is not a check follows.
+# After punctuation, only a failure explanation that ends the sentence describes a gate:
+# 'PRs are blocked: failing checks.' but not 'All PRs are blocked: CI is down.'
+CHECK_NOUN = r'(?:ci|checks?|tests?|builds?|lint\w*|status\s+checks?)'
+FAILURE_EXPLANATION = (r'\s*(?:the\s+)?(?:(?:failing|failed|red)\s+' + CHECK_NOUN + r'|' + CHECK_NOUN
+                       + r'\s+(?:fail|fails|failed|(?:are|is)\s+(?:red|failing)))\s*\)?\s*$')
 PR_BLOCKED = (r'^\W*(?:(?:all|every|any|the|open|pending|toutes|tous|les)\s+){0,2}' + PR_NOUN
               + r'\s+(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:(?:now|currently|temporarily|all|actuellement|désormais)\s+)?'
-              r'(?:blocked|bloquée?s?)\b(?=\s*$|\s*[,;:)]' + NOT_A_CHECK
-              + r'|\s+(?:until|till|while|jusqu\w*|tant|pendant|for\s+now|today|pour\s+le\s+moment)\b' + NOT_A_CHECK + r')')
+              r'(?:blocked|bloquée?s?)\b(?=\s*$|\s*[,;:)](?!' + FAILURE_EXPLANATION + r')'
+              r'|\s+(?:until|till|while|jusqu\w*|tant|pendant|for\s+now|today|pour\s+le\s+moment)\b'
+              r'(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:(?:failing|green)\s+)?' + CHECK_NOUN + r'\b))')
 # A lifted state: 'PRs are not on hold', 'PRs aren't on hold', 'PRs are no longer on hold'.
 LIFTED = r'(?:(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:not|no\s+longer|pas|plus)|(?:aren|isn)[’\x27]t)\s+'
 # Imperatives open their clause, after an optional softener: 'Please freeze main.'
@@ -940,11 +945,14 @@ def near_scope(text, match):
 # 'Integration:' opening a unit is a rule label for the merge step itself; 'Continuous
 # integration:' and 'Integration tests:' name something else. The label also needs a speaker
 # or a PR in its unit: 'Integration: needs admin consent in Entra ID' is an app integration,
-# and so is a speaker's approval with an app object: 'Integration: needs my approval to
-# connect the app.'
+# and so is a speaker's approval whose direct object is an app and ends the clause:
+# 'Integration: needs my approval to connect the app.' An app word elsewhere clears nothing:
+# 'Integration: needs my approval, even for app changes.'
 INTEGRATION_LABEL = re.compile(r'[\W_]*(integration|intégration)[*_`]*\s*:')
-APP_OBJECT = re.compile(r'\b(?:apps?|applications?|connectors?|plugins?|extensions?|webhooks?|services?'
-                        r'|tokens?|accounts?|oauth|sso|api\s+keys?)\b')
+APP_APPROVAL = re.compile(r'\b(?:approval|ok|okay|sign-?off|consent)\s+(?:to\s+(?:connect|install|add|enable|authori[sz]e'
+                          r'|link|configure|set\s+up)\s+|for\s+)(?:(?:the|a|an|this|our|my|new)\s+)?(?:[\w-]+\s+)?'
+                          r'(?:apps?|applications?|connectors?|plugins?|extensions?|webhooks?|services?'
+                          r'|tokens?|accounts?|oauth|sso|api\s+keys?)\s*$')
 FIRST_PERSON_WORD = re.compile(FIRST_PERSON)
 
 
@@ -966,9 +974,8 @@ def free_restriction(context, unit):
                for part in re.split(r'[.!?]', unit)):
             return True
     label = INTEGRATION_LABEL.match(unit)
-    # The app object must share the speaker's clause: 'Integration: needs my approval; rotate
-    # tokens monthly.' still holds the merge step.
-    if label and (PR_SCOPE.search(unit) or any(FIRST_PERSON_WORD.search(part) and not APP_OBJECT.search(part)
+    # Read per clause: 'Integration: needs my approval for the app. Ask me first.' still holds.
+    if label and (PR_SCOPE.search(unit) or any(FIRST_PERSON_WORD.search(part) and not APP_APPROVAL.search(part)
                                                for part in re.split(r'[.;!?]', unit))):
         unit = unit[:label.start(1)] + 'merge' + unit[label.end(1):]
         text = (context + ' ' + unit).strip()

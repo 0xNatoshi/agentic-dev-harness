@@ -738,6 +738,19 @@ TEXT_CASES = (
          "Integration: needs my approval; rotate tokens monthly."),
     Case("caught integration ask me first then services sentence", 2,
          "Integration: ask me first. Services restart after."),
+    # Independent review of 06ae000: each exception clears only its reviewed idiom, so these
+    # holds next to it stay caught.
+    Case("caught PRs held in the queue until I approve", 2, "PRs are held in the queue until I approve."),
+    Case("caught PRs held up until I approve", 2, "All PRs are held up until I approve them."),
+    Case("caught PRs held to my approval", 2, "PRs are held to my approval."),
+    Case("caught PRs blocked colon CI is down", 2, "All PRs are blocked: CI is down."),
+    Case("caught PRs blocked comma CI included", 2, "PRs are blocked, CI included."),
+    Case("caught integration my approval even for app changes", 2,
+         "Integration: needs my approval, even for app changes."),
+    Case("caught integration ask me first then deploy the app", 2,
+         "Integration: ask me first, then deploy the app."),
+    Case("caught integration app approval then ask me first", 2,
+         "Integration: needs my approval for the app. Ask me first."),
     # Accepted false 2s: stopping costs one question, a false 0 an unwanted merge. Asking code
     # owners by name reads as asking people; a merge done 'myself' reads as a reservation; a
     # hold until CI passes and a frozen main anywhere in a sentence read as holds.
@@ -784,8 +797,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 649 or len({case.name for case in ALL_CASES}) != 649:
-    raise RuntimeError("Merge fixture inventory must contain 649 unique cases")
+if len(ALL_CASES) != 657 or len({case.name for case in ALL_CASES}) != 657:
+    raise RuntimeError("Merge fixture inventory must contain 657 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
