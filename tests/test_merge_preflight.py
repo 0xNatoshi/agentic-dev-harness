@@ -751,6 +751,21 @@ TEXT_CASES = (
          "Integration: ask me first, then deploy the app."),
     Case("caught integration app approval then ask me first", 2,
          "Integration: needs my approval for the app. Ask me first."),
+    Case("caught PRs held in review pending my approval", 2, "All PRs are held in review pending my approval."),
+    Case("caught PR heading integration approval and service checks", 2,
+         "## Pull requests\nIntegration: only after my approval and after the service checks pass."),
+    Case("caught PRs blocked checks passed awaiting the owner", 2,
+         "PRs are blocked: checks passed, awaiting the owner's decision."),
+    Case("caught PRs held by the merge queue until I approve", 2, "PRs are held by the merge queue until I approve."),
+    Case("caught PRs held by the merge queue then wait for me", 2,
+         "PRs are held by the merge queue until checks pass, then wait for me."),
+    Case("caught integration PRs need my approval to connect the app", 2,
+         "Integration: PRs need my approval to connect the app."),
+    Case("caught integration app approval then hold all PRs", 2,
+         "Integration: needs my approval for the app. Hold all PRs until I say go."),
+    Case("cleared PRs held by the merge queue until checks pass", 0, "PRs are held by the merge queue until checks pass."),
+    Case("cleared integration app approval then PRs merge after CI", 0,
+         "Integration: needs my approval to connect the app. PRs may merge after CI."),
     # Accepted false 2s: stopping costs one question, a false 0 an unwanted merge. Asking code
     # owners by name reads as asking people; a merge done 'myself' reads as a reservation; a
     # hold until CI passes and a frozen main anywhere in a sentence read as holds.
@@ -797,8 +812,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 657 or len({case.name for case in ALL_CASES}) != 657:
-    raise RuntimeError("Merge fixture inventory must contain 657 unique cases")
+if len(ALL_CASES) != 666 or len({case.name for case in ALL_CASES}) != 666:
+    raise RuntimeError("Merge fixture inventory must contain 666 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

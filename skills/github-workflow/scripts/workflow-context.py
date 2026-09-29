@@ -196,25 +196,28 @@ ASK_DECIDER = (r'(?:\b(?:ask|consult|check\s+with|confirm\s+with|ping|talk\s+to|
 FIRST_WORD = r'(?:first|beforehand|d[’\x27]abord|avant|before(?=\s*(?:$|[|,;.)])))\b'
 SCOPE_NEAR = 40
 NOT_BEFORE = re.compile(r'\b(?:not|never|n[’\x27]t|no\s+need\s+to|pas|jamais)\s+(?:\w+\s+)?$')
-# 'PRs are held to the same standard' names no hold, but 'held in the queue until I approve',
-# 'held up' and 'held to my approval' do: only the standard idiom is excluded.
-HELD_TO_A_STANDARD = (r'held(?!\s+(?:accountable|responsible)\b|\s+to\s+(?:(?:the|a|an|our|same|high\w*|strict\w*)\s+){0,3}'
-                      r'(?:standards?|bar|rules?|conventions?|quality|expectations?)\b)')
+CHECK_NOUN = r'(?:ci|checks?|tests?|builds?|lint\w*|status\s+checks?)'
+# 'PRs are held to the same standard' and 'PRs are held by the merge queue until checks pass'
+# name no hold, but 'held in the queue until I approve', 'held up' and 'held to my approval' do:
+# only these exact idioms are excluded, the queue one when it ends the sentence.
+HELD_BY_QUEUE = (r'\s+by\s+the\s+merge\s+queue\s+until\s+(?:the\s+)?(?:required\s+)?' + CHECK_NOUN
+                 + r'\s+(?:pass|passes|are\s+green|is\s+green)\s*\)?\s*$')
+HELD_IDIOM = (r'\s+(?:accountable|responsible)\b|\s+to\s+(?:(?:the|a|an|our|same|high\w*|strict\w*)\s+){0,3}'
+              r'(?:standards?|bar|rules?|conventions?|quality|expectations?)\b|' + HELD_BY_QUEUE)
 HOLD_VERB = re.compile(r'\b(?:hold\w*|paus\w*|freez\w*|frozen|wait\w*|suspend\w*|attend\w*|gel\w*|block\w*|bloqu\w*'
-                       r'|park\w*|' + HELD_TO_A_STANDARD + r'|unmerged)\b')
+                       r'|park\w*|held(?!' + HELD_IDIOM + r')|unmerged)\b')
 # A held pull request or frozen branch needs no merge word or approver: 'All PRs are on hold.',
 # 'Hold PRs.', 'Every PR needs my approval.', 'The main branch is frozen.'
 PR_NOUN = r'\b(?:prs?|mrs?|pull[\s-]+requests?|merge[\s-]+requests?|demandes?\s+de\s+fusion)\b'
 # 'PRs are not on hold' and 'The main branch is not frozen' lift the state instead.
 NOT_HELD = r'(?!(?:not|no|never|pas|plus|jamais)\b)'
-PR_STATE = (r'(?:on\s+hold|on\s+pause|en\s+pause|paused|suspended|frozen|parked|held(?!\s+(?:to|in|against|accountable|responsible|up)\b)'
+PR_STATE = (r'(?:on\s+hold|on\s+pause|en\s+pause|paused|suspended|frozen|parked|held(?!\s+(?:to|in|against|accountable|responsible|up)\b|' + HELD_BY_QUEUE + r')'
             r'|en\s+attente|suspendue?s?|gelée?s?)')
 # 'All PRs are blocked' holds them; 'Draft PRs are blocked', 'PRs are blocked by failing checks'
 # or '... until CI passes' describe a gate. So the PRs open the clause, with at most a
 # quantifier, and the state ends it or a time or event condition that is not a check follows.
 # After punctuation, only a failure explanation that ends the sentence describes a gate:
 # 'PRs are blocked: failing checks.' but not 'All PRs are blocked: CI is down.'
-CHECK_NOUN = r'(?:ci|checks?|tests?|builds?|lint\w*|status\s+checks?)'
 FAILURE_EXPLANATION = (r'\s*(?:the\s+)?(?:(?:failing|failed|red)\s+' + CHECK_NOUN + r'|' + CHECK_NOUN
                        + r'\s+(?:fail|fails|failed|(?:are|is)\s+(?:red|failing)))\s*\)?\s*$')
 PR_BLOCKED = (r'^\W*(?:(?:all|every|any|the|open|pending|toutes|tous|les)\s+){0,2}' + PR_NOUN
@@ -975,10 +978,15 @@ def free_restriction(context, unit):
             return True
     label = INTEGRATION_LABEL.match(unit)
     # Read per clause: 'Integration: needs my approval for the app. Ask me first.' still holds.
-    if label and (PR_SCOPE.search(unit) or any(FIRST_PERSON_WORD.search(part) and not APP_APPROVAL.search(part)
-                                               for part in re.split(r'[.;!?]', unit))):
-        unit = unit[:label.start(1)] + 'merge' + unit[label.end(1):]
-        text = (context + ' ' + unit).strip()
+    # A PR elsewhere does not turn the label's own app approval into a merge rule:
+    # 'Integration: needs my approval to connect the app. PRs may merge after CI.'
+    if label:
+        parts = re.split(r'[.;!?]', unit)
+        app_only = [bool(APP_APPROVAL.search(part)) and not PR_SCOPE.search(part) for part in parts]
+        if (PR_SCOPE.search(unit) and not app_only[0]
+                or any(FIRST_PERSON_WORD.search(part) and not app for part, app in zip(parts, app_only))):
+            unit = unit[:label.start(1)] + 'merge' + unit[label.end(1):]
+            text = (context + ' ' + unit).strip()
     if PR_SCOPE.search(unit):
         text = integrations_as_merges(text)
     if not FREE_NEEDS.search(text) or not FREE.search(text):
