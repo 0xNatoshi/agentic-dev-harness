@@ -786,6 +786,52 @@ TEXT_CASES = (
          "PRs are held to the same standard.\n\nWait for my go before merging."),
     Case("caught PRs blocked failing checks then I merge", 2, "PRs are blocked: failing checks. I merge when ready."),
     Case("cleared CI heading over PRs blocked by failing checks", 0, "## CI\nPRs are blocked by failing checks."),
+    # Independent review of 337c85b: a gate's own words are not a hold, but the rest of its
+    # sentence still qualifies a merge-method rule anywhere in the file, in any layout.
+    Case("caught PRs blocked by the maintainer then method rule", 2,
+         "All PRs are blocked by the maintainer until further notice.\n\n"
+         "Do not use squash merges; use merge commits."),
+    Case("caught method rule then PRs blocked by the maintainer", 2,
+         "Do not use squash merges; use merge commits.\n\n"
+         "All PRs are blocked by the maintainer until further notice."),
+    Case("caught PRs blocked by the owner section beside method section", 2,
+         "## Pull requests\nAll PRs are blocked by the owner for now.\n\n"
+         "## Merge method\nDo not use squash merges; use merge commits."),
+    Case("caught PRs held in the queue until Friday item beside method item", 2,
+         "- PRs are held in the queue until Friday.\n- Do not use squash merges; use merge commits."),
+    Case("caught PRs held in the queue table row beside method row", 2,
+         "| Rule | Detail |\n|---|---|\n| Queue | PRs are held in the queue until Friday. |\n"
+         "| Method | Do not use squash merges; use merge commits. |"),
+    Case("caught nested PRs blocked by the maintainer beside nested method rule", 2,
+         "- Pull requests\n  - All PRs are blocked by the maintainer until further notice.\n"
+         "- Merging\n  - Do not use squash merges; use merge commits."),
+    Case("caught method rule then later PRs held in the queue", 2,
+         "## Merging\nDo not use squash merges; use merge commits.\n\nPRs are held in the queue until Friday."),
+    Case("caught bold PRs held in the queue then method rule", 2,
+         "**PRs are held in the queue until Friday.**\n\nDo not use squash merges; use merge commits."),
+    Case("caught until the maintainer is back PRs blocked then method rule", 2,
+         "Until the maintainer is back, PRs are blocked.\n\nNever create a merge commit; use squash merges."),
+    Case("caught PRs held to the standard and wait then method rule", 2,
+         "PRs are held to the same standard, and wait for the maintainer.\n\n"
+         "Never create a merge commit; use squash merges."),
+    Case("caught PRs blocked by failing checks owner final say then method rule", 2,
+         "PRs are blocked by failing checks, and the owner has the final say.\n\n"
+         "Never create a merge commit; use squash merges."),
+    Case("caught owner holds all PRs they are blocked then method rule", 2,
+         "The owner holds all PRs; they are blocked.\n\nDo not use squash merges; use merge commits."),
+    Case("caught PRs held up until the owner is back then upstream rule", 2,
+         "PRs are held up until the owner is back.\n\n- Never merge from the upstream remote."),
+    Case("caught French PRs blocked by the maintainer then method rule", 2,
+         "Les PR sont bloquées par le mainteneur jusqu’à nouvel ordre.\n\n"
+         "Do not use squash merges; use merge commits."),
+    Case("cleared PRs blocked until CI passes then method rule", 0,
+         "PRs are blocked until CI passes.\n\nDo not use squash merges; use merge commits."),
+    Case("cleared method section then CI section PRs blocked by failing checks", 0,
+         "## Merging\nDo not use squash merges; use merge commits.\n\n## CI\nPRs are blocked by failing checks."),
+    Case("cleared PRs held to the standard then method rule", 0,
+         "PRs are held to the same standard.\n\nDo not use squash merges; use merge commits."),
+    Case("cleared PRs blocked failing checks item beside method item", 0,
+         "- PRs are blocked: failing checks.\n- Never create a merge commit; use squash merges."),
     # Accepted false 2s: stopping costs one question, a false 0 an unwanted merge. Asking code
     # owners by name reads as asking people; a merge done 'myself' reads as a reservation; a
     # hold until CI passes and a frozen main anywhere in a sentence read as holds. A speaker's
@@ -802,6 +848,11 @@ TEXT_CASES = (
     Case("conservative we merge dependency updates ourselves", 2, "We merge dependency updates ourselves on Fridays."),
     Case("conservative I rebase and merge small fixes myself", 2, "I usually rebase and merge small fixes myself."),
     Case("conservative hold PRs until CI passes", 2, "Hold PRs until CI passes."),
+    # The rest of a gate sentence beside a method rule is read for a hold, so an approval word
+    # there stops, even for CI: the gate words are the only ones set aside.
+    Case("conservative PRs held to the standard and approved after CI beside method rule", 2,
+         "PRs are held to the same standard and approved after CI.\n\n"
+         "Do not use squash merges; use merge commits."),
     Case("conservative main is frozen in a screenshot", 2, "Main is frozen in the screenshot below."),
 )
 
@@ -840,8 +891,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 681 or len({case.name for case in ALL_CASES}) != 681:
-    raise RuntimeError("Merge fixture inventory must contain 681 unique cases")
+if len(ALL_CASES) != 700 or len({case.name for case in ALL_CASES}) != 700:
+    raise RuntimeError("Merge fixture inventory must contain 700 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

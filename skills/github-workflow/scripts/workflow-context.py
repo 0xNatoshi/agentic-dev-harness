@@ -198,7 +198,8 @@ SCOPE_NEAR = 40
 NOT_BEFORE = re.compile(r'\b(?:not|never|n[’\x27]t|no\s+need\s+to|pas|jamais)\s+(?:\w+\s+)?$')
 CHECK_NOUN = r'(?:ci|checks?|tests?|builds?|lint\w*|status\s+checks?)'
 # 'PRs are held to the same standard' names no hold, but 'held in the queue until I approve',
-# 'held up' and 'held to my approval' do: only the standard idiom is excluded, and only when
+# 'held up' and 'held to my approval' do: only the standard idiom (and 'held accountable' or
+# 'held responsible') is excluded, and only when
 # no condition or speaker follows in its sentence ('held to a high bar until I approve').
 # The window is bounded so the lookahead stays linear.
 HELD_IDIOM = (r'(?:\s+(?:accountable|responsible)\b|\s+to\s+(?:(?:the|a|an|our|same|high\w*|strict\w*)\s+){0,3}'
@@ -227,6 +228,12 @@ PR_BLOCKED = (r'^\W*(?:(?:all|every|any|the|open|pending|toutes|tous|les)\s+){0,
               r'(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:(?:failing|green)\s+)?' + CHECK_NOUN + r'\b))')
 # A PR state that PR_HELD reads as a gate, not a hold: 'held to the same standard', 'blocked by failing checks'.
 PR_GATE = re.compile(PR_NOUN + r'[^.!?]{0,80}?\b(?:held|blocked|bloquée?s?)\b')
+# Only a gate's own words, so the rest of its sentence is still read for a hold: 'All PRs are
+# blocked by the maintainer until further notice.' keeps 'maintainer until further notice'.
+GATE_WORDS = re.compile(PR_GATE.pattern + r'(?:\s+(?:until|till|by|for|on)\s+(?:the\s+)?'
+                        r'(?:(?:failing|failed|red|required)\s+)?' + CHECK_NOUN
+                        + r'(?:\s+(?:pass\w*|(?:are|is)\s+green))?)?'
+                        r'|\b(?:the\s+)?' + CHECK_NOUN + r'\s+(?:fail\w*|(?:are|is)\s+(?:red|failing))')
 # A lifted state: 'PRs are not on hold', 'PRs aren't on hold', 'PRs are no longer on hold'.
 LIFTED = r'(?:(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:not|no\s+longer|pas|plus)|(?:aren|isn)[’\x27]t)\s+'
 # Imperatives open their clause, after an optional softener: 'Please freeze main.'
@@ -982,8 +989,8 @@ def free_restriction(context, unit):
     if not FREE_NEEDS.search(text) or not FREE.search(text):
         # 'PRs are held to the same standard.' or 'PRs are blocked: failing checks.' describes a
         # gate, but a heading, lead-in, later sentence or later unit can still hold it
-        # ('## Freeze until I approve'), so it is read like a cleared rule. Its own gate words
-        # ('blocked', 'until CI passes') are not a hold.
+        # ('## Freeze until I approve'), so it is read like a cleared rule. Only sentences without
+        # the gate are read here; scan_normalized reads the gate sentence without its GATE_WORDS.
         if PR_GATE.search(unit):
             rest = [part for part in re.split(r'[.!?]', unit) if not PR_GATE.search(part)]
             return True if any(FOLLOW_HOLD.search(part) or HOLD_CONTEXT.search(part) for part in rest) else 'gate'
@@ -1040,6 +1047,7 @@ def scan_normalized(text):
     # Free-form restrictions are read per Markdown unit so that sibling list
     # items and separate sentences are not joined into one false restriction.
     cleared, follows, held, headings = False, False, [], []
+    mechanics, gate_follows = False, False  # a git-mechanics rule; a hold beside a gate's own words
     level, section = 0, None  # current heading level; level of the cleared rule's section
     for context, unit in units(outside, lambda: held.append(True), headings.append):
         if headings:
@@ -1057,13 +1065,17 @@ def scan_normalized(text):
         if result in ('cleared', 'gate') and section is None:
             section = level
         cleared = cleared or result in ('cleared', 'gate')
+        # A gate's own words ('blocked', 'until CI passes') are not a hold, so they would clear
+        # a gate beside a method rule; the rest of its unit still qualifies that rule.
         follows = follows or (result != 'gate' and bool(FOLLOW_HOLD.search(unit)))
+        mechanics = mechanics or result == 'cleared'
+        gate_follows = gate_follows or (result == 'gate' and bool(FOLLOW_HOLD.search(GATE_WORDS.sub(' ', unit))))
     if held:
         return 2  # a list or table carries a pause or approval restriction across items
     # A hold or approval sentence anywhere in the file may qualify a cleared
     # rule without naming a merge, even from a sibling section under the
     # same parent heading.
-    if cleared and follows:
+    if cleared and follows or mechanics and gate_follows:
         return 2
     return 1 if found else 0
 
