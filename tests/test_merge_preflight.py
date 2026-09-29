@@ -720,6 +720,24 @@ TEXT_CASES = (
     Case("cleared PRs aren't on hold", 0, "PRs aren't on hold."),
     Case("cleared lock the main branch for force pushes", 0, "Lock the main branch for force pushes."),
     Case("cleared lock main require signed commits", 0, "Lock main: require signed commits."),
+    # Independent review of 0816ddf: an app object, 'held to' and a check explanation after
+    # punctuation name no merge hold; their held neighbors stay caught.
+    Case("cleared integration my approval to connect the app", 0, "Integration: needs my approval to connect the app."),
+    Case("cleared integration my approval for the Slack app", 0, "Integration: needs my approval for the Slack app."),
+    Case("cleared PRs held to the same standard", 0, "PRs are held to the same standard and approved after CI."),
+    Case("cleared PRs blocked colon failing checks", 0, "PRs are blocked: failing checks."),
+    Case("cleared PRs blocked parenthesis failing checks", 0, "PRs are blocked (failing checks)."),
+    Case("cleared PRs blocked semicolon the tests fail", 0, "PRs are blocked; the tests fail."),
+    Case("caught integration needs my approval", 2, "Integration: needs my approval."),
+    Case("caught integration PRs need my approval before the app", 2,
+         "Integration: PRs need my approval before connecting the app."),
+    Case("caught PRs blocked colon waiting for my approval", 2, "PRs are blocked: waiting for my approval."),
+    Case("caught PRs blocked comma until I return", 2, "All PRs are blocked, until I return."),
+    Case("caught PRs held for my approval", 2, "PRs are held for my approval."),
+    Case("caught integration my approval then tokens clause", 2,
+         "Integration: needs my approval; rotate tokens monthly."),
+    Case("caught integration ask me first then services sentence", 2,
+         "Integration: ask me first. Services restart after."),
     # Accepted false 2s: stopping costs one question, a false 0 an unwanted merge. Asking code
     # owners by name reads as asking people; a merge done 'myself' reads as a reservation; a
     # hold until CI passes and a frozen main anywhere in a sentence read as holds.
@@ -766,8 +784,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 636 or len({case.name for case in ALL_CASES}) != 636:
-    raise RuntimeError("Merge fixture inventory must contain 636 unique cases")
+if len(ALL_CASES) != 649 or len({case.name for case in ALL_CASES}) != 649:
+    raise RuntimeError("Merge fixture inventory must contain 649 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
