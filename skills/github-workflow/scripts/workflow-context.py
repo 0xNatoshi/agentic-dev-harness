@@ -938,6 +938,203 @@ def published_instructions(branch):
     return command('git', 'show', ref + ':AGENTS.md')
 
 
+# Server-generated merge identity (issue #21). GitHub writes the squash/merge
+# commit itself. Its author name follows the merging account's profile display
+# name (observed, undocumented) and no REST, async, GraphQL or gh option sets it;
+# only the author email is selectable (GraphQL authorEmail, gh --author-email).
+# The committer is GitHub (web-flow). Local user.name/user.email evidence says
+# nothing about that commit: `identity` predicts it before merge and only
+# `published` proves it afterwards. Names and addresses read from the API stay in
+# memory; output is limited to boolean facts, finding keys and the constructed
+# noreply address.
+HANDLE = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}')
+PR_NUMBER = re.compile(r'[1-9][0-9]{0,9}')
+CREATED = re.compile(r'(\d{4})-(\d{2})-(\d{2})T')
+NOREPLY_CUTOFF = datetime.date(2017, 7, 18)
+COMMIT_EMAILS = ('query($owner:String!,$name:String!){repository(owner:$owner,name:$name)'
+                 '{viewerPossibleCommitEmails viewerDefaultCommitEmail}}')
+
+
+def api_json(host, endpoint, label):
+    try:
+        value = json.loads(command('gh', 'api', '--hostname', host, endpoint))
+    except ValueError as error:
+        raise EvidenceError('Unreadable ' + label + ' response') from error
+    if not isinstance(value, dict):
+        raise EvidenceError('Unexpected ' + label + ' response')
+    return value
+
+
+def field(record, key, kind, label):
+    value = record.get(key) if isinstance(record, dict) else None
+    # Exact type: a JSON boolean is not an account id.
+    if type(value) is not kind:
+        raise EvidenceError('Unexpected ' + label + ' response')
+    return value
+
+
+def identity_arguments(args):
+    """Validate before any read: owner/repository, PR number and handle."""
+    if len(args) != 4:
+        raise EvidenceError('Expected owner, repository, PR number and handle')
+    owner, name, number, handle = args
+    if not PR_NUMBER.fullmatch(number):
+        raise EvidenceError('Invalid PR number')
+    if not HANDLE.fullmatch(handle):
+        raise EvidenceError('Invalid GitHub handle')
+    return owner + '/' + name, number, handle
+
+
+def handle_account(host, handle):
+    account = api_json(host, 'users/' + handle, 'account')
+    login = field(account, 'login', str, 'account')
+    field(account, 'id', int, 'account')
+    if login.casefold() != handle.casefold():
+        raise EvidenceError('Account lookup returned another login')
+    field(account, 'created_at', str, 'account')
+    return account
+
+
+def noreply(account):
+    found = CREATED.match(account['created_at'])
+    if not found:
+        raise EvidenceError('Unexpected account response')
+    if datetime.date(*map(int, found.groups())) <= NOREPLY_CUTOFF:
+        raise EvidenceError('legacy account: confirm the noreply address in account settings')
+    return '{}+{}@users.noreply.github.com'.format(account['id'], account['login'])
+
+
+def commit_emails(host, full):
+    owner, name = full.split('/')
+    try:
+        value = json.loads(command('gh', 'api', '--hostname', host, 'graphql', '-f', 'owner=' + owner,
+                                   '-f', 'name=' + name, '-f', 'query=' + COMMIT_EMAILS))
+    except ValueError as error:
+        raise EvidenceError('Unreadable commit-email response') from error
+    if not isinstance(value, dict) or value.get('errors'):
+        raise EvidenceError('Unexpected commit-email response')
+    repository = (value.get('data') or {}).get('repository')
+    if not isinstance(repository, dict):
+        raise EvidenceError('Unexpected commit-email response')
+    possible = repository.get('viewerPossibleCommitEmails')
+    default = repository.get('viewerDefaultCommitEmail')
+    if possible is not None and not (isinstance(possible, list) and all(isinstance(e, str) for e in possible)):
+        raise EvidenceError('Unexpected commit-email response')
+    return possible, default if isinstance(default, str) else None
+
+
+def report(mode, facts, findings):
+    """Print booleans and finding keys only; 2 if indeterminate, else 1 if blocked."""
+    for key, value in facts:
+        print(mode + ': ' + key + '=' + ('true' if value else 'false'), file=sys.stderr)
+    for kind, key in findings:
+        print(mode + ': ' + kind + '=' + key, file=sys.stderr)
+    kinds = {kind for kind, _ in findings}
+    return 2 if 'indeterminate' in kinds else 1 if 'blocker' in kinds else 0
+
+
+def identity_mode(args):
+    """Pre-merge prediction of the server author; exit 0 prints only the noreply."""
+    expected, number, handle = identity_arguments(args)
+    host, full, _ = origin_context(expected)
+    viewer = api_json(host, 'user', 'viewer')
+    viewer_id = field(viewer, 'id', int, 'viewer')
+    account = handle_account(host, handle)
+    pull = api_json(host, 'repos/' + full + '/pulls/' + number, 'pull request')
+    author_id = field(pull.get('user'), 'id', int, 'pull request')
+    state = field(pull, 'state', str, 'pull request')
+    merged = field(pull, 'merged', bool, 'pull request')
+    possible, default = commit_emails(host, full)
+    address = noreply(account)
+    name = account.get('name')
+    login = account['login']
+
+    facts = [
+        ('merger-is-handle', viewer_id == account['id']),
+        ('pr-open', state == 'open' and not merged),
+        # Undocumented which identity authors the squash when these differ.
+        ('pr-author-is-merger', author_id == viewer_id),
+    ]
+    findings = [('blocker', key) for key, value in facts[:2] if not value]
+    if not facts[2][1]:
+        findings.append(('indeterminate', 'pr-author-is-merger'))
+    if isinstance(name, str) and name:
+        facts.append(('profile-name-is-handle', name == login))
+        variant = name != login and name.casefold() == login.casefold()
+        facts.append(('profile-name-case-variant', variant))
+        if variant:
+            findings.append(('warning', 'profile-name-case-variant'))
+        elif name != login:
+            findings.append(('blocker', 'profile-name'))
+    else:
+        findings.append(('indeterminate', 'profile-name-unset'))
+    if possible is None:
+        findings.append(('indeterminate', 'possible-commit-emails-unreadable'))
+    else:
+        allowed = address.casefold() in {email.casefold() for email in possible}
+        facts.append(('noreply-is-possible-commit-email', allowed))
+        if not allowed:
+            findings.append(('blocker', 'noreply-not-possible-commit-email'))
+    is_default = default is not None and default.casefold() == address.casefold()
+    facts.append(('default-commit-email-is-noreply', is_default))
+    if not is_default:
+        # Neutralized by the pinned --author-email; reported for transparency.
+        findings.append(('warning', 'default-commit-email'))
+    code = report('identity', facts, findings)
+    if ('blocker', 'profile-name') in findings:
+        print('identity: decision required: the server-generated squash author name follows the profile display '
+              'name, not the handle. User decisions: set the profile display name to the handle, adopt rebase '
+              'merge, or explicitly accept this author name for this PR.', file=sys.stderr)
+    if possible is None:
+        print('identity: possible commit emails are unreadable; check the token scope.', file=sys.stderr)
+    if code == 0:
+        print(address)
+    return code
+
+
+def published_mode(args):
+    """Post-merge proof: compare the PR's merge commit with the handle, booleans only."""
+    expected, number, handle = identity_arguments(args)
+    host, full, _ = origin_context(expected)
+    pull = api_json(host, 'repos/' + full + '/pulls/' + number, 'pull request')
+    sha = pull.get('merge_commit_sha')
+    if pull.get('merged') is not True or not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}', sha):
+        raise EvidenceError('Pull request is not merged or has no merge commit')
+    account = handle_account(host, handle)
+    commit = api_json(host, 'repos/' + full + '/commits/' + sha, 'commit')
+    if commit.get('sha') != sha:
+        raise EvidenceError('Unexpected commit response')
+    details = commit.get('commit')
+    author = details.get('author') if isinstance(details, dict) else None
+    name = field(author, 'name', str, 'commit')
+    email = field(author, 'email', str, 'commit')
+    committer = details.get('committer')
+    field(committer, 'name', str, 'commit')
+    address = noreply(account)
+    # An unlinked author is an empty object or null: its login and id are absent.
+    user = commit.get('author') if isinstance(commit.get('author'), dict) else {}
+    login = user.get('login')
+    facts = [
+        ('author-name-is-handle', name == account['login']),
+        ('author-email-is-noreply', email.casefold() == address.casefold()),
+        ('author-login-is-handle', isinstance(login, str) and login.casefold() == account['login'].casefold()),
+        ('author-id-matches', type(user.get('id')) is int and user['id'] == account['id']),
+    ]
+    findings = [('blocker', key) for key, value in facts if not value]
+    # The committer email is a GitHub service address: never read or compare it.
+    web_flow = (isinstance(commit.get('committer'), dict) and commit['committer'].get('login') == 'web-flow'
+                and committer['name'] == 'GitHub')
+    facts.append(('committer-is-web-flow', web_flow))
+    if not web_flow:
+        findings.append(('indeterminate', 'committer-is-web-flow'))
+    verification = details.get('verification')
+    verified = isinstance(verification, dict) and verification.get('verified') is True
+    facts.append(('signature-verified', verified))
+    if not verified:
+        findings.append(('warning', 'signature-verified'))
+    return report('published', facts, findings)
+
+
 def main():
     mode, *args = sys.argv[1:]
     if mode == 'origin':
@@ -945,8 +1142,13 @@ def main():
             raise EvidenceError('origin expects at most owner/repository')
         print('\t'.join(origin_context(args[0] if args else None)))
         return 0
+    if mode == 'identity':
+        return identity_mode(args)
+    if mode == 'published':
+        return published_mode(args)
     if mode != 'suspension' or not args:
-        raise EvidenceError('Expected origin or suspension <all applicable instruction files>')
+        raise EvidenceError('Expected origin, suspension <all applicable instruction files>, '
+                            'identity or published <owner> <repo> <pr> <handle>')
     _, _, branch = origin_context()
     inputs = []
     for name in args:
