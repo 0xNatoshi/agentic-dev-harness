@@ -62,6 +62,15 @@ if args[1] == 'graphql' and any('viewerPossibleCommitEmails' in arg for arg in a
         'viewerPossibleCommitEmails': possible if shape is None else json.loads(shape),
         'viewerDefaultCommitEmail': env('FIXTURE_DEFAULT_EMAIL', '1001+octo-fixture@users.noreply.github.com'),
     }}}
+    # Like GraphQL, the PR's merge-path fields appear only when the query selects them for the typed number.
+    if any('pullRequest(number:$number)' in arg for arg in args):
+        if args[args.index('-F') + 1:args.index('-F') + 2] != ['number=7']:
+            sys.exit(94)
+        auto = {'enabledAt': '2026-01-01T00:00:00Z'} if env('FIXTURE_AUTO_MERGE') == 'true' else None
+        pull = {'isMergeQueueEnabled': env('FIXTURE_MERGE_QUEUE') == 'true',
+                'isInMergeQueue': env('FIXTURE_IN_QUEUE') == 'true', 'autoMergeRequest': auto}
+        pull_shape = env('FIXTURE_MERGE_PATH_SHAPE')
+        payload['data']['repository']['pullRequest'] = pull if pull_shape is None else json.loads(pull_shape)
     if env('FIXTURE_GRAPHQL_ERRORS') == 'partial':
         payload['errors'] = [{'message': 'person@example.invalid'}]
     print(json.dumps(payload))
@@ -679,7 +688,28 @@ def published_case(name, expected, *environment, stderr=(), api_calls=3, host="g
 
 
 IDENTITY_CASES = (
-    identity_case("identity compliant", 0, stderr="identity: profile-name-is-handle=true"),
+    identity_case("identity compliant", 0, stderr=("identity: profile-name-is-handle=true",
+                  "identity: merge-queue-enabled=false", "identity: pr-in-merge-queue=false",
+                  "identity: auto-merge-enabled=false")),
+    # gh pr merge enqueues or enables auto-merge on a merge-queue branch; neither author is documented.
+    identity_case("identity merge queue enabled", 2, ("FIXTURE_MERGE_QUEUE", "true"),
+                  stderr=("identity: indeterminate=merge-queue-enabled", "no gated path exists")),
+    identity_case("identity PR in merge queue", 2, ("FIXTURE_IN_QUEUE", "true"),
+                  stderr=("identity: indeterminate=pr-in-merge-queue", "no gated path exists")),
+    identity_case("identity auto-merge enabled", 2, ("FIXTURE_AUTO_MERGE", "true"),
+                  stderr=("identity: indeterminate=auto-merge-enabled", "no gated path exists")),
+    identity_case("identity merge path null", 2, ("FIXTURE_MERGE_PATH_SHAPE", "null"), stderr="merge-path response"),
+    identity_case("identity merge queue flag not boolean", 2, ("FIXTURE_MERGE_PATH_SHAPE", json.dumps(
+                  {"isMergeQueueEnabled": "false", "isInMergeQueue": False, "autoMergeRequest": None})),
+                  stderr="merge-path response"),
+    identity_case("identity in-queue flag missing", 2, ("FIXTURE_MERGE_PATH_SHAPE", json.dumps(
+                  {"isMergeQueueEnabled": False, "autoMergeRequest": None})), stderr="merge-path response"),
+    # An absent auto-merge request is not a null one.
+    identity_case("identity auto-merge request missing", 2, ("FIXTURE_MERGE_PATH_SHAPE", json.dumps(
+                  {"isMergeQueueEnabled": False, "isInMergeQueue": False})), stderr="merge-path response"),
+    identity_case("identity auto-merge request not an object", 2, ("FIXTURE_MERGE_PATH_SHAPE", json.dumps(
+                  {"isMergeQueueEnabled": False, "isInMergeQueue": False, "autoMergeRequest": True})),
+                  stderr="merge-path response"),
     # A verified local author never covers the server-generated squash author.
     identity_case("identity verified local author with profile alias", 1, *VERIFIED_LOCAL_AUTHOR,
                   ("FIXTURE_PROFILE_NAME", "Fixture Alias"), setup="local_author_verified",

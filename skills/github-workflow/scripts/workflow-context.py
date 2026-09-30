@@ -955,8 +955,12 @@ NOREPLY_CUTOFF = datetime.date(2017, 7, 18)
 NOREPLY_HOST = 'github.com'
 # published reads one merge commit, so a rebase merge, which re-creates every PR commit, has no gated path.
 MERGE_METHODS = ('squash', 'merge')
-COMMIT_EMAILS = ('query($owner:String!,$name:String!){repository(owner:$owner,name:$name)'
-                 '{viewerPossibleCommitEmails viewerDefaultCommitEmail}}')
+# One query reads the commit emails and the PR's server merge path: on a merge-queue branch gh pr merge
+# enables auto-merge or enqueues instead of merging, and an existing auto-merge request merges later.
+MERGE_EVIDENCE = ('query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name)'
+                  '{viewerPossibleCommitEmails viewerDefaultCommitEmail pullRequest(number:$number)'
+                  '{isMergeQueueEnabled isInMergeQueue autoMergeRequest{enabledAt}}}}')
+MERGE_PATH_KEYS = ('merge-queue-enabled', 'pr-in-merge-queue', 'auto-merge-enabled')
 
 
 def api_json(host, endpoint, label):
@@ -1022,11 +1026,12 @@ def noreply(account):
     return '{}+{}@users.noreply.github.com'.format(account['id'], account['login'])
 
 
-def commit_emails(host, full):
+def merge_evidence(host, full, number):
+    """Possible and default commit emails, then the queue and auto-merge facts of the PR."""
     owner, name = full.split('/')
     try:
         value = json.loads(command('gh', 'api', '--hostname', host, 'graphql', '-f', 'owner=' + owner,
-                                   '-f', 'name=' + name, '-f', 'query=' + COMMIT_EMAILS))
+                                   '-f', 'name=' + name, '-F', 'number=' + number, '-f', 'query=' + MERGE_EVIDENCE))
     except ValueError as error:
         raise EvidenceError('Unreadable commit-email response') from error
     if not isinstance(value, dict) or value.get('errors'):
@@ -1039,7 +1044,14 @@ def commit_emails(host, full):
     default = repository.get('viewerDefaultCommitEmail')
     if possible is not None and not (isinstance(possible, list) and all(isinstance(e, str) for e in possible)):
         raise EvidenceError('Unexpected commit-email response')
-    return possible, default if isinstance(default, str) else None
+    pull = repository.get('pullRequest')
+    auto = pull.get('autoMergeRequest', False) if isinstance(pull, dict) else False
+    # Absent, null or mistyped queue facts are not evidence of a direct merge.
+    if auto is not None and not isinstance(auto, dict):
+        raise EvidenceError('Unexpected merge-path response')
+    path = (field(pull, 'isMergeQueueEnabled', bool, 'merge-path'), field(pull, 'isInMergeQueue', bool, 'merge-path'),
+            auto is not None)
+    return possible, default if isinstance(default, str) else None, path
 
 
 def report(mode, facts, findings):
@@ -1063,7 +1075,7 @@ def identity_mode(args):
     author_id = field(pull.get('user'), 'id', int, 'pull request')
     state = field(pull, 'state', str, 'pull request')
     merged = field(pull, 'merged', bool, 'pull request')
-    possible, default = commit_emails(host, full)
+    possible, default, path = merge_evidence(host, full, number)
     address = noreply(account)
     # The squash author name is the merging account's own profile name; the public users/<handle> record may lag.
     name = viewer.get('name')
@@ -1099,6 +1111,10 @@ def identity_mode(args):
     if not is_default:
         # Neutralized by the pinned --author-email; reported for transparency.
         findings.append(('warning', 'default-commit-email'))
+    # Exit 0 covers only a direct merge by the next command; a queued or auto merge has an undocumented author.
+    merge_path = list(zip(MERGE_PATH_KEYS, path))
+    facts.extend(merge_path)
+    findings.extend(('indeterminate', key) for key, value in merge_path if value)
     code = report('identity', facts, findings)
     if ('blocker', 'profile-name') in findings:
         print('identity: decision required: the server-generated merge author name follows the profile display '
@@ -1106,6 +1122,9 @@ def identity_mode(args):
               'author name has a gated merge path, so the merge stays blocked.', file=sys.stderr)
     if not possible:
         print('identity: possible commit emails are unreadable or empty; check the token scope.', file=sys.stderr)
+    if any(path):
+        print('identity: a merge queue or auto-merge would merge this PR instead of the gated command, with an '
+              'undocumented author; no gated path exists while either applies.', file=sys.stderr)
     if code == 0:
         print(address)
     return code

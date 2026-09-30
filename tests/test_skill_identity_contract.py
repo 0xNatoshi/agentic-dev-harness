@@ -11,7 +11,7 @@ GUARDED_EMAIL = '--author-email "${workflow_author_email:?'
 PREFLIGHT = "workflow_author_email=$(bash <skill-dir>/scripts/merge-preflight.sh identity "
 # Any documented way to merge a PR or its branch: the gh command, the REST endpoints or the GraphQL mutations.
 MERGE_SURFACE = re.compile(r"gh\s+pr\s+merge\b[^`\n]*|pulls/[^/\s`]+/merge\b|repos/[^\s`]+/merges\b"
-                           r"|mergePullRequest|mergeBranch|enqueuePullRequest")
+                           r"|mergePullRequest|mergeBranch|enqueuePullRequest|enablePullRequestAutoMerge")
 IDENTITY_CALL = re.compile(r"identity \S+ \S+ (\S+) \S+ (\S+)\) \|\| exit")
 MERGE_PR = re.compile(r"gh pr merge --repo \S+ (\S+) ")
 
