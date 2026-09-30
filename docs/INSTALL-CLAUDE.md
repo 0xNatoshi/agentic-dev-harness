@@ -37,7 +37,7 @@ Report the outcome per checkpoint; do not collapse them into one verdict.
 4. **Claude imports and registration** — confirm the imports that load in the effective profile and that `/github-workflow` resolves. `agents/openai.yaml` and the Codex role TOMLs do not configure Claude subagents.
 5. **Loading** — in a new local Code session, `/context` must show the effective CLAUDE.md and establish the imported AGENTS.md. File presence or import text does not prove loading.
 
-When every checkpoint is `current`, the installation already matches the package: report that, change nothing and skip the remaining sections. Otherwise the `personalized` and `outdated` checkpoints are the exact edit list for those sections, and the backup below covers exactly those targets.
+When every checkpoint is `current` or `personalized`, no package update is needed: report any deliberate local differences, change nothing and skip the remaining sections. Otherwise record only the `outdated` checkpoints as update candidates, preserving local customizations. A `blocked` checkpoint needs its missing evidence or ownership resolved before changing that target; a blocked package check stops the whole update. Back up the confirmed edit targets before using the remaining sections.
 
 ## Back up and compare versions
 

@@ -24,7 +24,7 @@ Ask the agent in each targeted application to run this first. It answers "is thi
 4. **Runtime extras** — Codex `[agents]` keys, role TOMLs and `config.toml`; Claude imports and `/github-workflow`; Hermes settings and SOUL sections outside the development section.
 5. **Loading** — a new session in each targeted application. File presence does not prove loading.
 
-When every checkpoint is `current`, that application already matches the package: report it and change nothing there. [INSTALL-CLAUDE.md](INSTALL-CLAUDE.md) and [INSTALL-CODEX.md](INSTALL-CODEX.md) state the per-checkpoint evidence, destinations and rollback for their application.
+When every checkpoint is `current` or `personalized`, no package update is needed for that application: report any deliberate local differences and change nothing there. Only `outdated` checkpoints become update candidates; resolve a `blocked` checkpoint before changing its target, and stop the whole update if package verification is blocked. [INSTALL-CLAUDE.md](INSTALL-CLAUDE.md) and [INSTALL-CODEX.md](INSTALL-CODEX.md) state the per-checkpoint evidence, destinations and rollback for their application.
 
 ## Version and recovery
 
