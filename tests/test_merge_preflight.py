@@ -995,6 +995,43 @@ for number, fixture in enumerate(ALL_CASES, 1):
 
 
 class ScanTimeTests(unittest.TestCase):
+    def test_repeated_classification_work_is_bounded_per_scan(self) -> None:
+        spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        searches = []
+        free = module.FREE
+
+        class Counted:
+            def search(self, text):
+                searches.append(text)
+                return free.search(text)
+
+        module.FREE = Counted()
+        # Count real regex work, including False results, with a fresh cache per scan.
+        for scan in range(2):
+            with self.subTest(scan=scan):
+                searches.clear()
+                self.assertEqual(module.scan_text("- merge\n- go\n" * 40), 0)
+                self.assertEqual(len(searches), 2)
+
+    def test_repeated_classifications_keep_context_and_state(self) -> None:
+        rule = "No rebase merges; use squash merges."
+        cases = (
+            ("different context", "- merge\n- go\n" * 8 + "\n## Never\n\n- merge\n"),
+            ("same joined text", rule + "\n\nNo rebase\n\nmerges; use squash merges."),
+            ("repeated section", "## Rules\n\n" + rule + "\n\n## Rules\n\n" + rule
+             + "\n\nEach one is manual."),
+            ("many distinct units", "\n\n".join("Entry %d." % n for n in range(160))
+             + "\n\nDo not merge pull requests."),
+        )
+        for name, text in cases:
+            with self.subTest(case=name):
+                spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                self.assertEqual(module.scan_text(text), 2)
+
     def test_each_distinct_normalized_reading_is_scanned_once(self) -> None:
         cases = (
             ("- merge\n- go\n", 0, 1),

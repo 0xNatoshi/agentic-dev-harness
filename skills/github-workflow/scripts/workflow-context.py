@@ -2,6 +2,7 @@
 """Read-only origin binding and conservative suspension checks (Python 3.8+)."""
 import collections
 import datetime
+import functools
 import json
 import re
 import subprocess
@@ -1050,16 +1051,19 @@ def scan_normalized(text):
     cleared, follows, held, headings = False, False, [], []
     mechanics, gate_follows = False, False  # a git-mechanics rule; a hold beside a gate's own words
     level, section = 0, None  # current heading level; level of the cleared rule's section
+    # Cache only pure classification; every unit still updates the scan state.
+    restriction = functools.lru_cache(maxsize=128)(free_restriction)
     for context, unit in units(outside, lambda: held.append(True), headings.append):
         if headings:
             level = headings.pop()
             if section is not None and level <= section:
                 section = None  # a sibling or parent heading ends the cleared rule's section
         unit = strip_markers(unit)
-        result = free_restriction(strip_markers(context), unit)
+        context = strip_markers(context)
+        result = restriction(context, unit)
         if result is True:
             return 2
-        if result in ('cleared', 'gate') and FOLLOW_HOLD.search(strip_markers(context)):
+        if result in ('cleared', 'gate') and FOLLOW_HOLD.search(context):
             return 2  # a heading, lead-in or parent item conditions the rule
         if section is not None and NEXT_HOLD.search(unit):
             return 2  # a later unit of the section qualifies the cleared rule
