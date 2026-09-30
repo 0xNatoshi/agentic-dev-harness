@@ -995,6 +995,29 @@ for number, fixture in enumerate(ALL_CASES, 1):
 
 
 class ScanTimeTests(unittest.TestCase):
+    def test_each_distinct_normalized_reading_is_scanned_once(self) -> None:
+        cases = (
+            ("- merge\n- go\n", 0, 1),
+            ("Autonomous merge sus\u200bpended — request dated 2026-09-27", 1, 2),
+            ("Autonomous\u200bmerge suspended — request dated 2026-09-27", 1, 2),
+            ("Autonomous\u200bmerge sus\u200bpended — request dated 2026-09-27", 2, 2),
+        )
+        for text, expected, reading_count in cases:
+            with self.subTest(text=text):
+                spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                calls = []
+                scan_normalized = module.scan_normalized
+
+                def counted(reading):
+                    calls.append(reading)
+                    return scan_normalized(reading)
+
+                module.scan_normalized = counted
+                self.assertEqual(module.scan_text(text), expected)
+                self.assertEqual(len(calls), reading_count)
+
     def test_long_invisible_run_stays_linear(self) -> None:
         # A quadratic hidden-split scan took over 10 s on this input; linear takes milliseconds.
         spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))

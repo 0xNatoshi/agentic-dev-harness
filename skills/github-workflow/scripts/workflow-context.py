@@ -1130,8 +1130,9 @@ def scan_text(text):
     """0 clear, 1 dated canonical veto, 2 ambiguous/malformed evidence."""
     if len(text) > MAX_SCAN_CHARS:
         return 2
-    # Invisible characters may split a word or separate two words: check both readings.
-    results = [scan_normalized(normalize(text, joiner)) for joiner in ('', ' ')]
+    # Invisible characters may split a word or separate two words: check each distinct reading.
+    readings = dict.fromkeys(normalize(text, joiner) for joiner in ('', ' '))
+    results = [scan_normalized(reading) for reading in readings]
     if hidden_splits(outside_managed(text)) > 1:
         # Two readings cannot cover several invisible splits that need different choices.
         results.append(2)
