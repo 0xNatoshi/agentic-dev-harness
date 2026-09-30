@@ -14,6 +14,7 @@ MERGE_SURFACE = re.compile(r"gh\s+pr\s+merge\b[^`\n]*|pulls/[^/\s`]+/merge\b|rep
                            r"|mergePullRequest|mergeBranch|enqueuePullRequest|enablePullRequestAutoMerge")
 IDENTITY_CALL = re.compile(r"identity \S+ \S+ (\S+) \S+ (\S+)\) \|\| exit")
 MERGE_PR = re.compile(r"gh pr merge --repo \S+ (\S+) ")
+SELECTOR_CALL = re.compile(r"merge-preflight\.sh (?:identity|published) \S+ \S+ (\S+)")
 
 
 def section(text: str, heading: str) -> str:
@@ -75,6 +76,27 @@ class SkillIdentityContractTests(unittest.TestCase):
                     self.assertEqual(MERGE_PR.match(command).group(1), identity.group(1))
                     self.assertIn(" --" + identity.group(2) + " ", command)
         self.assertGreaterEqual(len(commands), 2)
+
+    def test_identity_selector_is_a_pr_number(self) -> None:
+        # identity and published accept a decimal PR number only; workflow_pr holds the PR URL.
+        calls = 0
+        for path in sorted(SKILL_DIR.rglob("*.md")):
+            if "templates" in path.relative_to(SKILL_DIR).parts:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for found in SELECTOR_CALL.finditer(text):
+                calls += 1
+                selector = found.group(1)
+                with self.subTest(path=path.name, call=found.group()):
+                    if selector == "<pr>":
+                        continue
+                    variable = re.fullmatch(r'"\$(\w+)"', selector)
+                    self.assertIsNotNone(variable, selector)
+                    # The variable is derived from the verified PR's number, not its URL.
+                    assignment = re.search(variable.group(1) + r"=\$\(gh pr view --repo \S+ \S+ --json number --jq \.number\) \|\| exit",
+                                           text[:found.start()])
+                    self.assertIsNotNone(assignment, variable.group(1))
+        self.assertGreaterEqual(calls, 3)
 
     def test_identity_exit_codes_block_merge(self) -> None:
         merge = section(self.text, "### `merge <pr>`")
