@@ -1033,13 +1033,13 @@ def merge_evidence(host, full, number):
         value = json.loads(command('gh', 'api', '--hostname', host, 'graphql', '-f', 'owner=' + owner,
                                    '-f', 'name=' + name, '-F', 'number=' + number, '-f', 'query=' + MERGE_EVIDENCE))
     except ValueError as error:
-        raise EvidenceError('Unreadable commit-email response') from error
+        raise EvidenceError('Unreadable commit-email and merge-path response') from error
     if not isinstance(value, dict) or value.get('errors'):
-        raise EvidenceError('Unexpected commit-email response')
+        raise EvidenceError('Unexpected commit-email and merge-path response')
     data = value.get('data')
     repository = data.get('repository') if isinstance(data, dict) else None
     if not isinstance(repository, dict):
-        raise EvidenceError('Unexpected commit-email response')
+        raise EvidenceError('Unexpected commit-email and merge-path response')
     possible = repository.get('viewerPossibleCommitEmails')
     default = repository.get('viewerDefaultCommitEmail')
     if possible is not None and not (isinstance(possible, list) and all(isinstance(e, str) for e in possible)):
