@@ -1029,6 +1029,17 @@ TEXT_CASES = (
     Case("caught PRs blocked by owner's failure to decide", 2, "PRs are blocked by the owner's failure to decide."),
     Case("caught PRs blocked by owner's final decision gate", 2, "PRs are blocked by the owner's final decision gate."),
     Case("caught PRs blocked by owner's manual review gate", 2, "PRs are blocked by the owner's manual review gate."),
+    Case("caught PRs blocked by owner's manual approval", 2, "PRs are blocked by the owner's manual approval."),
+    Case("caught PRs blocked by maintainer's manual gate", 2, "PRs are blocked by the maintainer's manual gate."),
+    Case("cleared PRs blocked by team's manual QA tests", 0, "PRs are blocked by the team's manual QA tests."),
+    Case("cleared PRs blocked by team's requirements to pass CI", 0,
+         "PRs are blocked by the team's requirements to pass CI."),
+    Case("caught PRs blocked by owner's requirement to approve", 2,
+         "PRs are blocked by the owner's requirement to approve."),
+    Case("caught PRs blocked by owner notwithstanding green CI", 2,
+         "PRs are blocked by the owner notwithstanding green CI."),
+    Case("caught PRs blocked by owner albeit CI is green", 2, "PRs are blocked by the owner albeit CI is green."),
+    Case("caught PRs blocked by owner however CI is green", 2, "PRs are blocked by the owner however CI is green."),
     Case("caught PRs blocked by owner's code-freeze gate", 2, "PRs are blocked by the owner's code-freeze gate."),
     Case("caught PRs blocked by owner's hold-period gate", 2, "PRs are blocked by the owner's hold-period gate."),
     Case("caught PRs blocked by owner's freeze-gate", 2, "PRs are blocked by the owner's freeze-gate."),
@@ -1225,8 +1236,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 954 or len({case.name for case in ALL_CASES}) != 954:
-    raise RuntimeError("Merge fixture inventory must contain 954 unique cases")
+if len(ALL_CASES) != 962 or len({case.name for case in ALL_CASES}) != 962:
+    raise RuntimeError("Merge fixture inventory must contain 962 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
@@ -1371,7 +1382,11 @@ class ScanTimeTests(unittest.TestCase):
             ("Autonomous\u200bmerge suspended — request dated 2026-09-27", 1, 2),
             ("Autonomous\u200bmerge sus\u200bpended — request dated 2026-09-27", 2, 2),
             # Only an unspaced em dash adds the hyphen reading; the marker's spaced dash does not.
-            ("Laisse—moi fusionner.", 2, 2),
+            # The hyphen reading is scanned first and a hold ends the scan.
+            ("Laisse—moi fusionner.", 2, 1),
+            # The spaced reading costs a second scan only when a dash sentence reads as a PR hold.
+            ("- merge\n- go\n" * 40 + "a—b", 0, 1),
+            ("PRs are blocked by the owner—CI is green.", 2, 2),
         )
         for text, expected, reading_count in cases:
             with self.subTest(text=text):

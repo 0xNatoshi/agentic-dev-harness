@@ -129,7 +129,7 @@ def reading_choices(text):
     return [(joiner, em_dash) for joiner in ('', ' ') for em_dash in em_dashes]
 
 
-START =re.compile(r'^\s*<!--\s*github-workflow:start\b(?:(?!-->).)*-->\s*$')
+START = re.compile(r'^\s*<!--\s*github-workflow:start\b(?:(?!-->).)*-->\s*$')
 END = re.compile(r'^\s*<!--\s*github-workflow:end\s*-->\s*$')
 PREFIX = r'(?:autonomous\s+merge\s+suspended\s*-\s*(?:request\s+dated|requested\s+on|asked\s+on)|merge\s+autonome\s+suspendu\s*-\s*(?:demande\s+du|demandé\s+le))'
 EXAMPLE = re.compile(PREFIX + r'\s*<date>(?!\s*\d)')
@@ -253,11 +253,11 @@ PR_BLOCKER_PERSON = (r'(?:(?:la\s+)?(?:décision|validation|approbation|relectur
 PR_BLOCKER_MINE = r'(?:my|our|mon|ma|notre|nos|mes)\s+(?:decisions?|call|say-so|word|go-ahead|approval|décisions?|validation|accord)\b'
 PR_BLOCKER_GATE = (r'(?:ci|checks?|checkers?|tests?|builds?|lint\w*|pipelines?|jobs?|workflows?|polic(?:y|ies)|gates?'
                    r'|failures?(?!\s+to\b)|outages?|runners?|timeouts?|scans?|coverage|(?<=github\s)actions|rules?|status|runs?|vérifications?|règles?|protection'
-                   r'|requirements?(?!\s+to\b)|enforce\w*|counts?|notifications?)')
+                   r'|requirements?|enforce\w*|counts?|notifications?)')
 # Words that end the noun phrase after a person: a condition, relative, preposition,
 # concession, coordination, determiner, verb or time adverb. 'the reviewer until checks pass' and
-# 'the owner although CI is green' never reach the gate word.
-PR_PHRASE_END = (r'(?:until|till|unless|if|while|when\w*|although|though|even|despite|whereas|except|once|yet|wh(?:o|om|ose|ich)|that|pending|for|since|because|and|or|but|nor|so'
+# 'the owner although (albeit, notwithstanding) CI is green' never reach the gate word.
+PR_PHRASE_END = (r'(?:until|till|unless|if|while|when\w*|although|though|albeit|notwithstanding|however|regardless|even|despite|whereas|except|once|yet|wh(?:o|om|ose|ich)|that|pending|for|since|because|and|or|but|nor|so'
                  r'|as|on|in|at|to|with\w*|after|before|via|per|from|of|about|than|by|is|are|was|were|be|been|has|have|had'
                  r'|will|may|can|must|should|would|could|the|a|an|this|these|those|some|any|all|every|each|no'
                  r'|today|tonight|now|again|still|right|currently'
@@ -267,9 +267,10 @@ FREEZE_NOUN = r'(?:freezes?|holds?|embargo(?:es)?|gels?)'
 # A modifier is one word; a hyphenated compound ('end-to-end') is one word, so a phrase end inside
 # it ends nothing. A freeze, hold or human-decision word, alone or in a compound, is never a
 # modifier: 'the team's freeze rules', 'the owner's code-freeze gate' and 'the owner's final
-# decision gate' name the freeze or the person, not a gate. So does a failure or requirement
-# to act: 'the owner's failure to review'.
-HUMAN_DECISION = r'(?:decisions?|approvals?|manual|consent|permissions?)'
+# decision gate' name the freeze or the person, not a gate. So does a failure to act: 'the
+# owner's failure to review'. 'Manual' vetoes only a manual gate, review or approval ('the
+# maintainer's manual gate'); 'the team's manual QA tests' are an ordinary gate.
+HUMAN_DECISION = r'(?:decisions?|approvals?|manual(?=[\s-]+(?:gates?|reviews?|approvals?|sign-?offs?)\b)|consent|permissions?)'
 PR_VETO = r'(?!(?:' + FREEZE_NOUN + r'|' + HUMAN_DECISION + r')\b)'
 PR_MODIFIER = r'(?!' + PR_PHRASE_END + r'(?!-))' + PR_VETO + r'\w+(?:-' + PR_VETO + r'\w+)*'
 # The phrase's head (its last word before a phrase end or punctuation) decides: a gate or tool
@@ -1215,18 +1216,43 @@ def hidden_splits(text):
     return count
 
 
+def dash_separates_hold(text, joiner):
+    """Whether a sentence or line holding an em dash reads as a PR hold when the dash separates words.
+
+    This only selects the full spaced-reading scan, so it may over-select. It reads whole sentences
+    and single lines, as free_restriction tests PR_HELD per sentence and a line may open an imperative.
+    """
+    # normalize() maps source control characters to joiner, so U+0000 here marks only an em dash.
+    marked = normalize(text, joiner, ' \x00 ')
+    parts = re.split(r'[.!?]', marked) + re.split(r'[.!?\n]', marked)
+    return any(PR_HELD.search(strip_markers(part.replace('\x00', '-'))) for part in parts if '\x00' in part)
+
+
 def scan_text(text):
     """0 clear, 1 dated canonical veto, 2 ambiguous/malformed evidence."""
     if len(text) > MAX_SCAN_CHARS:
         return 2
     # Invisible characters may split a word or separate two words, and an em dash may separate words or
     # join them: check each distinct reading. Text without them has a single reading.
-    readings = dict.fromkeys(normalize(text, joiner, em_dash) for joiner, em_dash in reading_choices(text))
-    results = [scan_normalized(reading) for reading in readings]
+    choices = reading_choices(text)
+    readings = dict.fromkeys(normalize(text, joiner, em_dash) for joiner, em_dash in choices if em_dash == '-')
+    spaced = [joiner for joiner, em_dash in choices if em_dash != '-']
+    if readings:
+        # Text with an unspaced em dash: every dash is first read as a hyphen, as before the spaced
+        # reading existed ('Laisse—moi fusionner'). A full second scan doubles the cost of any file
+        # with one such dash, so the spaced reading is scanned only when a sentence holding a dash
+        # reads as a PR hold once the dash separates words ('PRs are blocked by the owner—CI is green').
+        spaced = [joiner for joiner in spaced if dash_separates_hold(text, joiner)]
+    readings.update(dict.fromkeys(normalize(text, joiner) for joiner in spaced))
+    results = []
+    for reading in readings:
+        results.append(scan_normalized(reading))
+        if results[-1] == 2:
+            return 2
     if hidden_splits(outside_managed(text)) > 1:
         # Two readings cannot cover several invisible splits that need different choices.
-        results.append(2)
-    return 2 if 2 in results else 1 if 1 in results else 0
+        return 2
+    return 1 if 1 in results else 0
 
 
 def published_instructions(branch):
