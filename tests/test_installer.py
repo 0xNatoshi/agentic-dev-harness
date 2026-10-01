@@ -66,6 +66,22 @@ def visible_copies(*roots: Path) -> list:
     return found
 
 
+def link_directory(link: Path, target: Path) -> None:
+    """A directory link: a junction on Windows, which needs no symlink privilege."""
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True, capture_output=True)
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def unlink_directory(link: Path) -> None:
+    """Remove a directory link without touching its target; a Windows junction is removed as a directory."""
+    if os.name == "nt":
+        os.rmdir(link)
+    else:
+        os.unlink(link)
+
+
 class InstallerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1173,36 +1189,95 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         receipt_path = Path(json.loads(result.stdout)["receipt"])
         receipt = receipt_path.read_bytes()
+        retired_from = json.loads(receipt)["duplicates"][0]["resolved"]
         after = snapshot(target)
         # The emptied folder is replaced by a link to a directory outside every skill root.
         elsewhere = self.base / "elsewhere"
         elsewhere.mkdir()
         vendor.rmdir()
-        if os.name == "nt":
-            # A junction needs no symlink privilege.
-            subprocess.run(["cmd", "/c", "mklink", "/J", str(vendor), str(elsewhere)], check=True, capture_output=True)
-        else:
-            os.symlink(elsewhere, vendor, target_is_directory=True)
+        link_directory(vendor, elsewhere)
         try:
-            rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
-            self.assert_refused(rollback, 2)
-            self.assertIn(f"{vendor} is a link or junction, so the retired duplicate {legacy} could be restored outside "
-                          f"{vendor.parent}; replace it with a directory or remove it, then run rollback again",
-                          json.loads(rollback.stderr)["error"])
-            self.assertEqual(list(elsewhere.iterdir()), [])
+            for older in (False, True):
+                with self.subTest(older_receipt=older):
+                    if older:
+                        # A receipt without the resolved path: the link below the root still blocks.
+                        recorded = json.loads(receipt)
+                        del recorded["duplicates"][0]["resolved"]
+                        receipt_path.write_text(json.dumps(recorded), encoding="utf-8")
+                    content = receipt_path.read_bytes()
+                    rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                    self.assert_refused(rollback, 2)
+                    error = json.loads(rollback.stderr)
+                    self.assertIn(f"The retired duplicate {legacy} would be restored to ", error["error"])
+                    self.assertIn("a link or junction on the way was added or retargeted after apply; restore that "
+                                  "folder, then run rollback again", error["error"])
+                    self.assertEqual(error["details"]["resolves_to"], str(Path(os.path.realpath(elsewhere)) / legacy.name))
+                    self.assertEqual(error["details"]["retired_from"], retired_from)
+                    self.assertEqual(list(elsewhere.iterdir()), [])
+                    self.assertEqual(receipt_path.read_bytes(), content)
+                    self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+                    self.assertEqual(snapshot(target), after)
         finally:
-            # A Windows junction is removed as a directory, without touching its target.
-            if os.name == "nt":
-                os.rmdir(vendor)
-            else:
-                os.unlink(vendor)
-        self.assertEqual(receipt_path.read_bytes(), receipt)
-        self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
-        self.assertEqual(snapshot(target), after)
+            unlink_directory(vendor)
         vendor.mkdir()
         rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
         self.assertEqual(rollback.returncode, 0, rollback.stderr)
         self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+
+    def test_rollback_blocks_a_secondary_root_or_its_config_root_replaced_by_a_link(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        for folder in (legacy.parent, legacy.parent.parent):
+            with self.subTest(folder=folder.name):
+                result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                receipt_path = Path(json.loads(result.stdout)["receipt"])
+                receipt = receipt_path.read_bytes()
+                after = snapshot(target)
+                # The folder moves outside the home and is replaced by a link to it there.
+                elsewhere = self.base / ("elsewhere" + folder.name)
+                shutil.move(str(folder), str(elsewhere))
+                link_directory(folder, elsewhere)
+                try:
+                    rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                    self.assert_refused(rollback, 2)
+                    error = json.loads(rollback.stderr)
+                    self.assertIn(f"The retired duplicate {legacy} would be restored to ", error["error"])
+                    self.assertEqual(error["details"]["retired_from"], json.loads(receipt)["duplicates"][0]["resolved"])
+                    self.assertFalse(legacy.exists())
+                finally:
+                    unlink_directory(folder)
+                    shutil.move(str(elsewhere), str(folder))
+                self.assertEqual(receipt_path.read_bytes(), receipt)
+                self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+                self.assertEqual(snapshot(target), after)
+                rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assertEqual(rollback.returncode, 0, rollback.stderr)
+                self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+
+    def test_rollback_restores_a_retired_duplicate_through_a_config_root_link_unchanged_since_apply(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        # A config root kept elsewhere and linked into the home, as dotfile managers do.
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        dotfiles = self.base / "dotfiles" / "codex"
+        legacy_source = dotfiles / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy_source)
+        link_directory(self.home / ".codex", dotfiles)
+        try:
+            legacy = self.home / ".codex" / "skills" / "github-workflow"
+            result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(legacy_source.exists())
+            rollback = self.run_installer("rollback", "--receipt", json.loads(result.stdout)["receipt"],
+                                          "--maintenance-confirmed")
+            self.assertEqual(rollback.returncode, 0, rollback.stderr)
+            self.assertEqual((snapshot(target), snapshot(legacy_source)), (before, legacy_before))
+        finally:
+            unlink_directory(self.home / ".codex")
 
     def test_rollback_restores_a_retired_duplicate_for_a_receipt_recording_a_root_without_owner_write(self):
         target = self.home / ".agents" / "skills" / "github-workflow"

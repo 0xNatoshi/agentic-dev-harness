@@ -1205,8 +1205,10 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
             fsync_tree(duplicate_backup)
             if differences(duplicate_inventory, inventory(duplicate_backup)):
                 raise Refused(f"The backup copy of {path} does not match its inventory")
+            # Where the copy physically was, so rollback can refuse a link added or retargeted since (#54).
             moves.append({"from": str(path), "to": str(transaction / "duplicates" / str(index) / path.name),
-                          "inventory": duplicate_inventory, "backup": str(duplicate_backup)})
+                          "inventory": duplicate_inventory, "backup": str(duplicate_backup),
+                          "resolved": os.path.realpath(str(path))})
         staged = transaction / "staged" / SKILL
         stage(staged, package_files, locations.target, before or {}, plan["classification"])
         fsync_tree(staged)
@@ -1266,8 +1268,8 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         "dropped_paths": sorted(name for name, kind in classification.items() if kind == "regenerable cache"),
         "preserved_paths": sorted(name for name, kind in classification.items() if kind in PRESERVED),
         "replaced_paths": sorted(name for name, kind in classification.items() if kind == "package"),
-        "duplicates": [{"path": move["from"], "retired_to": move["to"], "backup": move["backup"], "inventory": move["inventory"]}
-                       for move in moves],
+        "duplicates": [{"path": move["from"], "retired_to": move["to"], "backup": move["backup"], "inventory": move["inventory"],
+                        "resolved": move["resolved"]} for move in moves],
         "legacy_commands": plan["legacy_commands"],
         "instruction_files": file_hashes(locations.instructions),
         "maintenance_boundary": boundary,
@@ -1380,18 +1382,21 @@ def command_rollback(options) -> dict:
                 parent = original.parent
             if parent is not None:
                 restoring.append((parent, f"so the retired duplicate {original} cannot be moved back into it"))
-            # Discovery never follows links, so a folder replaced by a link after apply could send the copy
-            # outside its root. check() refuses links only at the selected root and above it.
+            # The copy must go back to the directory it was retired from. A link or junction added or retargeted
+            # on the way since apply (inside the skill root, at a secondary root or at its config root) would
+            # send it elsewhere; a link that still resolves to the same place, as with dotfiles, is accepted.
+            retired_from = duplicate.get("resolved")
             skill_root = next((path for path in locations.roots if path in original.parents), None)
-            if parent is None or skill_root is None:
-                continue
-            for part in [parent, *parent.parents]:
-                if skill_root not in part.parents:
-                    break
-                if is_link(part):
-                    raise Blocked(f"{part} is a link or junction, so the retired duplicate {original} could be restored "
-                                  f"outside {skill_root}; replace it with a directory or remove it, then run rollback again",
-                                  {"path": str(part)})
+            if not isinstance(retired_from, str) and skill_root is not None:
+                # Older receipts: discovery never follows links below a root, so the copy was retired from its
+                # path below the root's resolution.
+                retired_from = os.path.join(os.path.realpath(str(skill_root)), os.path.relpath(str(original), str(skill_root)))
+            resolved = os.path.realpath(str(original))
+            if isinstance(retired_from, str) and os.path.normcase(resolved) != os.path.normcase(retired_from):
+                raise Blocked(f"The retired duplicate {original} would be restored to {resolved}, not {retired_from} where "
+                              "it was retired from: a link or junction on the way was added or retargeted after apply; "
+                              "restore that folder, then run rollback again",
+                              {"path": str(original), "resolves_to": resolved, "retired_from": retired_from})
         locations.require_movable(recorded, "run rollback again", restoring)
         active = inventory(locations.target, "run rollback again")
         origin = receipt["after"]
