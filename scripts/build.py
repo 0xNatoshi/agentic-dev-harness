@@ -57,14 +57,14 @@ def payloads(root=ROOT):
         if base.is_symlink() or not base.is_dir():
             raise ValueError(f"Expected a real source directory: {directory}")
         for source in sorted(base.rglob("*")):
+            relative = source.relative_to(root).as_posix()
             if source.is_symlink():
-                raise ValueError(f"Symlink cannot enter the package: {source.relative_to(root)}")
+                raise ValueError(f"Symlink cannot enter the package: {relative}")
             if "__pycache__" in source.parts or source.suffix == ".pyc" or source.name == ".DS_Store":
                 continue
             if source.is_file():
                 if source.suffix not in {".md", ".txt", ".py", ".sh", ".toml", ".yaml", ".yml"}:
-                    raise ValueError(f"Unexpected source file: {source.relative_to(root)}")
-                relative = source.relative_to(root).as_posix()
+                    raise ValueError(f"Unexpected source file: {relative}")
                 if relative not in mapping:
                     raise ValueError(f"Undeclared source file: {relative}")
     result = {}
