@@ -915,11 +915,12 @@ class Operation:
     def restore_verified(self, backup: Path, expected: dict, copy: Path, destination: Path, label: str) -> None:
         """Copy a verified backup beside the transaction, check it, then rename it into place."""
         if exists(copy):
-            # A copy left by an interrupted restoration; kept aside, never deleted.
+            # A copy left by an interrupted restoration; kept aside, never deleted. The journal names the aside
+            # path before the rename, so a kill right after the rename still leaves it in the final report.
             stale = copy.parent.parent / ("restore-stale-" + uuid.uuid4().hex[:8])
-            os.rename(str(copy.parent), str(stale))
             self.record.setdefault("stale_restore_copies", []).append(str(stale))
             write_json(self.path, self.record)
+            rename(copy.parent, stale, label + ":set-aside")
         copy_tree(backup, copy)
         fsync_tree(copy)
         if differences(expected, inventory(copy)):
@@ -1294,12 +1295,21 @@ def command_recover(options) -> dict:
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check()
+    nothing = {"result": "nothing to recover", "config_root": str(locations.config), "state_root": str(locations.state)}
+    if not (options.plan or options.receipt):
+        # --runtime resolves the config root from this invocation only; a transaction planned under
+        # another root keeps its CURRENT pointer there, so "nothing" here is not "all clear".
+        # Claude keeps its state under the config root; Codex keeps it under the home directory whatever CODEX_HOME says.
+        cause = ("another config root (--home or CLAUDE_CONFIG_DIR)" if locations.runtime == "claude"
+                 else "another home directory (--home)")
+        nothing["hint"] = (f"Only {locations.state} was checked. A transaction started with {cause} is recovered with "
+                           "`recover --plan <plan>` or `recover --receipt <receipt>`, which reuse the recorded directories.")
     if not exists(locations.state):
-        return {"result": "nothing to recover", "state_root": str(locations.state)}
+        return nothing
     with Lock(locations.state):
         current = locations.state / "CURRENT"
         if not exists(current):
-            return {"result": "nothing to recover", "state_root": str(locations.state)}
+            return nothing
         journal = locations.state / current.read_text(encoding="utf-8").strip()
         if not exists(journal):
             # The journal is written durably before the first rename, so nothing was renamed.
@@ -1322,9 +1332,13 @@ def command_recover(options) -> dict:
             raise Incomplete(f"Restoration incomplete: {error}. Recovery data kept in {operation.path.parent}; "
                              "fix the cause and run `recover` again", getattr(error, "details", None))
         result = {"result": "restored", "operation": record["operation"], "journal": str(journal), "target": record["target"]}
-        for key in ("parked_drift", "moved_drift", "stale_restore_copies"):
+        for key in ("parked_drift", "moved_drift"):
             if key in operation.record:
                 result[key] = operation.record[key]
+        # An aside path is recorded before its rename; one whose rename never happened names nothing.
+        stale = [path for path in operation.record.get("stale_restore_copies", ()) if exists(Path(path))]
+        if stale:
+            result["stale_restore_copies"] = stale
         receipt = journal.parent / "receipt.json"
         if record["operation"] == "apply" and exists(receipt):
             value = read_json(receipt)
