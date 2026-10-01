@@ -9,11 +9,15 @@ Exercised platforms and interpreters:
 - CI: Linux (`ubuntu-latest`) with Python 3.11 only.
 - Local runs: macOS with the Python recorded in each PR's evidence.
 - The test suite uses Python 3.10+ syntax (for example `str | None` annotations); contributors need 3.11+, as the README states. Runtime guards claim Python 3.8+, but no run on 3.8 or 3.9 exists, so that compatibility is unverified.
-- Windows: the suite has never run there. It creates symlinks (`tests/_fixture_support.py`, `tests/test_package.py`) and depends on the locale encoding; #12 owns a Windows-runnable gate.
+- Windows: local command-fixture and installer runs now exist, with both passing compositions and failed or skipped checks recorded in local proof artifacts. They do not qualify every branch or the destination profile. #12 owns command-fixture portability; native permissions, symlinks, open-handle behavior and exact-revision suite results need their own evidence. Preserve failed runs and platform skips when reporting a later pass.
 
 The source gate (`scripts/check.py`) rejects home-directory paths, email addresses outside a neutral allowlist (reporting file and line only, #10) and three credential formats: GitHub tokens, `sk-` keys and PEM private keys. It does not detect personal names, other secret formats or other personal data; review still owns those.
 
 The imported v6.3.1 distribution was reportedly checked on macOS, including native offline Codex/Hermes loading and Claude import/link resolution. Its receipts are excluded from the source repository (see its `docs/PROVENANCE.md`), so that claim is not reproducible from repository evidence, and it is not v6.5.0 destination installation evidence. The new common profile is neutral and omits the prior user's display name; destination preferences must be preserved during installation.
+
+Installer receipts cover the skill transaction and record instruction-file hashes; they do not prove that instruction or role merges loaded in an application. The five named v5.2 paths are retired by pathname, even when edited, while verified before-state copies preserve their bytes. Unknown customizations and authentic history are distinct from replaced package paths. The INSTALL guides describe plan review, maintenance, duplicate selection, recovery and exact rollback. Hash verification against supplied checksums establishes integrity, not independent package provenance.
+
+The source remains an unreleased development version during coordinated work. #1 owns final export and destination qualification; an incremental source change does not itself publish a release, deliver a final distribution or update an installed profile.
 
 The v6.5.0 initiative/collaboration rules also need fresh-session loading checks. Source integrity and scenario reviews establish the distributed policy and its consistency, not every future model decision. Record current installation receipts separately from these historical facts.
 
@@ -22,7 +26,7 @@ Context budget (sizes on main 618f8bf): the repository template `skills/github-w
 Still requiring environment-specific verification:
 
 - Windows/Git Bash behavior: #1 (destination qualification) and #12 (local gate).
-- Directory replacement: no installer exists yet, and the prose replacement procedure has never been exercised by a test; #17 owns a tested installer and #1 its qualification.
+- Directory replacement: the package ships `install.py`; `tests/test_installer.py` invokes the extracted installer against disposable homes. Its tests cover package verification, inventory drift, staging/retired copies outside discovery roots, duplicate handling, fault-injected swaps, receipts, recovery and rollback. Read the exact-revision logs for executed cases and skips. Simulated process lists and injected rename failures do not prove a real destination's process probe, Windows open-handle behavior or native filesystem permissions. #17 owns the installer/guide contract; #41/#42/#43 track recovery, permission guidance and named-retirement follow-ups; #1 owns real installation and fresh-session qualification.
 - A new interactive Claude Code session actually loading the imported AGENTS.md: owning session, after installation.
 - Runtime model/role availability and native worktree tools: owning application/session, before use.
 - Live GitHub merges and app-managed archival: the session executing that operation, under the documented gates.

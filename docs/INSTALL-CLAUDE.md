@@ -31,7 +31,20 @@ Run this first. It answers "is this computer already current, and what must chan
 
 Report the outcome per checkpoint; do not collapse them into one verdict.
 
-1. **Package** — verify the extracted ZIP against `SHA256SUMS.txt` and every entry in `MANIFEST.json`, and record the package version. A mismatch is `blocked`, and no later checkpoint is trustworthy.
+Keep the original ZIP and its separately delivered `dev-harness-v6.5.0-SHA256SUMS.txt` beside the extracted package. From the extracted package root, this read-only example uses those actual sibling files; adjust their locations if necessary:
+
+```powershell
+$packageZip = (Resolve-Path '..\dev-harness-v6.5.0-codex-claude.zip' -ErrorAction Stop).Path
+$checksums = (Resolve-Path '..\dev-harness-v6.5.0-SHA256SUMS.txt' -ErrorAction Stop).Path
+py -3 .\install.py verify-package $packageZip --checksums $checksums
+if ($LASTEXITCODE -ne 0) { throw 'Package verification failed; stop the update' }
+py -3 .\install.py verify-package . --checksums $checksums
+if ($LASTEXITCODE -ne 0) { throw 'Extracted package verification failed; stop the update' }
+```
+
+The installer is standard-library Python and declares Python 3.8+ support; interpreter versions actually exercised are listed in STATUS.md. Use the same verified package and checksum file for planning and apply. Keep private plans, receipts and backups outside repositories and every skill discovery root.
+
+1. **Package** — use the shipped `install.py verify-package` commands above with the separately supplied `dev-harness-v6.5.0-SHA256SUMS.txt`. They check the archive and the extracted files against the same manifest digest, sizes and hashes, and reject extra, missing or unsafe paths. ZIP input also checks the archive digest; extracted-directory input reports that the archive digest was not checked in that invocation. Record the package version and that distinction. Hash agreement proves integrity against the supplied expectations, not independent provenance. A mismatch is `blocked`, and no later checkpoint is trustworthy.
 2. **Instruction files** — compare `$claudeHome\CLAUDE.md` with `configurations/claude-desktop/CLAUDE.md`, and `$claudeHome\AGENTS.md` with `configurations/claude-desktop/AGENTS.md`. Keep exactly one relative `@AGENTS.md` import resolving to its neighbor, plus unrelated imports. Preferences merged on purpose are `personalized`.
 3. **`github-workflow` skill** — resolve `$claudeHome\skills\github-workflow`. A real directory is compared file by file with `skills/github-workflow/`. A link or junction is **not** replaced: resolve its canonical directory, record the link target and its owner, and compare there. One canonical directory can serve several applications at once and is then checked once for all of them. Evidence is the file count, every SHA-256 and the three license templates; extra `.bak` or history files are retained customizations.
 4. **Claude imports and registration** — confirm the imports that load in the effective profile and that `/github-workflow` resolves. `agents/openai.yaml` and the Codex role TOMLs do not configure Claude subagents.
@@ -59,25 +72,82 @@ The **personal package is v6.5.0; the active repository template is v6.4**. This
 ## Merge instructions
 
 1. Merge configurations/claude-desktop/AGENTS.md into the personal AGENTS.md and CLAUDE.md into personal CLAUDE.md. Retain one relative `@AGENTS.md` import resolving to its neighbor, plus existing unrelated imports/preferences. A copied AGENTS.md alone does not establish loading. An authorization conflict unresolved by current user direction needs a concrete decision.
-2. Install the full skill using the controlled replacement below, including all scripts, references, license templates and history. Skill agents/openai.yaml and Codex role TOMLs do not configure Claude subagents.
+2. Prepare a skill plan using the installer below only if that checkpoint is outdated. Skill agents/openai.yaml and Codex role TOMLs do not configure Claude subagents.
 3. Explorer/operator/worker/reviewer/architect are responsibilities; use Claude's actual tools/models instead of importing GPT model names/efforts. This package requires no provider, permission or Claude subagent-configuration change.
 
-## Controlled skill replacement
+## Plan the skill update
 
-1. Resolve `$claudeHome\skills\github-workflow`. For a link/junction, record target and owner; preserve the link unchanged. Modify its canonical directory only when that shared source is identified and within authorized installation scope. Otherwise retain the link and mark the skill blocked.
-2. Create a uniquely named staging directory next to the ordinary/canonical destination. Copy every manifest-verified skill file. Reintegrate authentic local v5.1/v5.2 snapshots with hashes/provenance and merge INDEX.md entries in version order. Reapply qualified custom files/restrictions after comparison; resolve conflicting same-path content explicitly.
-3. Compare the full old inventory with package/staging. Classify each old path absent from the package as retained customization, authentic history, or obsolete file owned by this installer. The last category requires a previous receipt, unchanged hash, verified backup and no active session use; omit those proven obsolete files from staging. Without ownership proof preserve the file or block the conflict, naming the reevaluation owner.
-4. Verify staging's exact expected paths/counts: unchanged package files match hashes, intentional merges including INDEX have diffs/final hashes, and retained history/customizations remain exact unless an authorized merge applies. Check imports/references/licenses. Rename the real destination to a unique retired name in the same parent, then staging to the canonical directory name. If the second rename fails, restore the original immediately and report failure. Existing links retain the same path/target. Keep the retired copy privately until post-install verification. Recursive copying over an active directory can leave obsolete files loaded and is not this procedure.
+Use this section only when the skill checkpoint needs an update. A current or deliberately personalized skill does not need replacement merely because an instruction or role file needs a merge. After the read-only check and the backups above, save the plan in the private backup directory:
 
-## Named retirement inventory
+```powershell
+$planPath = Join-Path $backupRoot 'skill-plan.json'
+py -3 .\install.py plan --runtime claude --package $packageZip --checksums $checksums --output $planPath
+if ($LASTEXITCODE -ne 0) { throw 'Planning failed; do not apply' }
+```
 
-| Exact path | Treatment |
+Planning does not modify the installed profile; `--output` writes only the requested plan file. Without `--home`, it uses the current user and effective runtime configuration. `--home DIR` selects an isolated home and ignores runtime configuration environment overrides; it is useful for a disposable test home, not a substitute for locating the active profile. There is no `--state-dir` option.
+
+Review the plan's exact target, all `skill_roots`, package identity, complete `before` inventory (including the `.` root mode), `classification`, `retirements` and `duplicates`. `package` paths are replaced with verified package bytes; they are not merged. Paths classified as `customization` or `authentic history` are preserved. If a required customization occupies a package path, stop the skill update and reconcile it with its owner; the installer cannot preserve that edit automatically. Do not treat an old version marker as proof that a local file is unmodified.
+
+State lives at `$claudeHome\dev-harness-install\`, a sibling of the discovery root, on the target volume and outside every skill root and repository. The installer creates the transaction, backup, staging and retired copies there. Do not create staging or retired siblings under `skills/`. A link or junction target or checked ancestor is blocked, even if the read-only comparison identified its canonical source: this CLI does not accept an arbitrary canonical destination. Preserve the link and record its owner and the action needed to establish a supported destination.
+
+Any other discoverable `github-workflow` copy is listed. Apply blocks unless every planned duplicate is explicitly selected with a repeated `--retire-duplicate PATH` option. Use that option only for an owned copy whose retirement is authorized; its exact inventory is backed up, moved outside the discovery roots, recorded and restored by rollback. Unknown ownership, linked copies or overlapping roots need resolution before applying; do not automatically retire every discovered path.
+
+## Named v5.2 retirement rule
+
+The versioned retirement list uses these exact paths relative to the selected `github-workflow` directory:
+
+| Path | Apply and rollback behavior |
 |---|---|
-| `$claudeHome\CLAUDE.md`, `$claudeHome\AGENTS.md` | Preserve/merge active/imported files. |
-| `$claudeHome\skills\github-workflow\` | Inventory every path, preserve history/qualified customizations, replace the real directory as above and preserve links. |
-| `$claudeHome\commands\github-workflow.md` | Retire this older command only after new skill activation, with prior installer provenance, unchanged hash, verified backup and no session use. Otherwise retain with a reason. |
+| `templates/LICENSE-MIT` | Retire from the active tree; preserve exact bytes for rollback. |
+| `templates/LICENSE-PolyForm-Noncommercial` | Retire from the active tree; preserve exact bytes for rollback. |
+| `templates/LICENSE-proprietary` | Retire from the active tree; preserve exact bytes for rollback. |
+| `readme-guide.md` | Retire from the active tree; preserve exact bytes for rollback. |
+| `templates/README.md` | Retire from the active tree; preserve exact bytes for rollback. |
 
-The receipt lists exact retired paths, including the command if qualified. Avoid keeping a proven obsolete installer file just in case. No wildcard/recursive user-directory deletion, active-link removal or destruction of authentic history. Preserve uncertain ownership/use with owner and reevaluation trigger.
+Retirement is by pathname, including an edited copy, without a prior receipt or historical hash requirement. Review each present file's `path`, `listed_as`, `sha256` and `bytes` in the plan before deciding to apply. The plan gives the state root; its transaction is not allocated yet. Apply output and the receipt give each file's concrete `retired_copy` and `backup` locations and the `rollback_command`. A file absent before installation is not listed as retired. These five names are not a rule for deleting other files.
+
+Unknown files and authentic local history remain active unless they occupy a package path as described above. `__pycache__` and `*.pyc` leave the new active tree and are recorded as dropped there; the private before-state copies retain them for exact rollback. An edited named file may contain useful material even though it is obsolete at that location: its removal from active use is intentional and its preserved locations must be recorded.
+
+## Apply during maintenance
+
+Stop all Claude and Codex sessions that can consume the affected skills, prevent new sessions from starting, and close handles or shells whose working directory is in the target. Run the following from an independent terminal outside every skill root, keeping consumers stopped through verification. An agent running inside a consuming session must hand over the prepared plan rather than run the mutation itself. `--maintenance-confirmed` records the operator's confirmation; it does not stop applications.
+
+```powershell
+$applyOutput = py -3 .\install.py apply --plan $planPath --checksums $checksums --maintenance-confirmed
+if ($LASTEXITCODE -ne 0) { throw 'Apply failed; preserve the JSON error and recovery state' }
+$installed = $applyOutput | ConvertFrom-Json
+$receiptPath = $installed.receipt
+$receiptPath
+```
+
+If authorized duplicates exist, append one `--retire-duplicate` argument with its exact planned path for each. The installer rechecks package, target and duplicate inventories and refuses drift; regenerate and review the plan after any input change. Keep the saved plan unchanged. The local process probe blocks active or unverifiable consumers, but cannot observe remote, container, WSL or web sessions or prevent a new process starting. The operator owns that part of the maintenance boundary. Never use the installer test-hook environment variables against a real profile.
+
+The installer verifies a full backup and staged inventory, records durable recovery state, then replaces the skill using two renames. This is not an atomic or continuously available replacement. After successful apply it verifies exactly one discoverable copy. A failed swap attempts to restore and verify the original; an incomplete restoration retains recovery data and reports failure. Preserve the JSON result and inspect the receipt before restarting consumers.
+
+## Receipt, recovery and skill rollback
+
+The private receipt records versions, package and instruction-file hashes, before/after inventories, modes, preserved/dropped/retired paths, duplicates, transaction state and maintenance evidence. It contains no file contents. The instruction hashes do not mean AGENTS.md, CLAUDE.md, config.toml or role files were merged or backed up by this skill installer; those edits use the separate private backups and diffs above.
+
+The receipt also records the verified installer copy retained under the transaction and an argument-array `rollback_command`, so rollback does not depend on the original extracted directory remaining available. The command intentionally omits `--maintenance-confirmed`; add it only after reestablishing the maintenance boundary. Do not interpret the array as a shell string. For a current receipt, an equivalent PowerShell invocation checks the retained script's hash before running it:
+
+```powershell
+$receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$retainedInstaller = $receipt.installer_copy.path
+if (-not $retainedInstaller) { throw 'Use the verified matching package installer for this older receipt' }
+$actualHash = (Get-FileHash -LiteralPath $retainedInstaller -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+if ($actualHash -ne $receipt.installer_copy.sha256) { throw 'Retained installer hash mismatch; stop' }
+py -3 $retainedInstaller rollback --receipt $receiptPath --maintenance-confirmed
+if ($LASTEXITCODE -ne 0) { throw 'Rollback failed; inspect the JSON error and keep recovery data' }
+```
+
+Use the original receipt path reported by apply. Rollback refuses if the active tree, including its recorded modes, differs from the receipt's after-inventory; preserve and reconcile later edits before retrying. Otherwise it restores the verified before-state, including edited named files, duplicate copies and caches, or returns a previously absent target to absence. A deleted retained installer must be replaced by a separately verified matching package installer; do not reconstruct missing recovery evidence.
+
+For an interrupted apply, retain the original plan and run `py -3 .\install.py recover --plan $planPath --maintenance-confirmed` from the verified package. For an interrupted rollback, use `recover --receipt $receiptPath --maintenance-confirmed` with that verified installer. Reestablish the maintenance boundary first. Prefer the exact plan or receipt over `recover --runtime claude`: the recorded configuration root is reused even when `CLAUDE_CONFIG_DIR` or `--home` changes. The runtime form checks only its currently resolved state directory; `nothing to recover` is limited to the reported root. Read the reported result: recovery may restore the before-state or acknowledge an already committed transaction. Never delete `CURRENT`, the journal or recovery copies to clear an error.
+
+Success is exit 0 with JSON on stdout. Refusals such as drift use exit 1; blocked preconditions such as active consumers or links use exit 2. Exit 3 can indicate an incomplete restoration or an unexpected filesystem error: inspect the JSON and retained state before deciding the recovery action. Failed commands write JSON to stderr. A nonzero result is not a completed installation.
+
+The legacy `$claudeHome\commands\github-workflow.md` is reported by the installer but is not removed. Retire it only under a separate verified ownership and backup decision after skill activation; otherwise record its owner and reevaluation trigger.
 
 ## Verify loading and worktree boundaries
 
@@ -85,12 +155,6 @@ The receipt lists exact retired paths, including the command if qualified. Avoid
 - App-managed Claude Desktop Code worktrees use their owning session's archive action after preservation checks. CLI ExitWorktree applies only after same-session EnterWorktree and ownership/activity/recovery checks. Retain other/unknown managed worktrees and name their owner/trigger. `git worktree remove` is prohibited under the managed root. [Desktop session management](https://code.claude.com/docs/en/desktop).
 - Conversation format follows the loaded personal preference. Give verified progress and the next action together. Record executed checks, version and exact backup path.
 
-## Rollback
+## Restore separately merged instructions
 
-Compare every target against its installed hash. Restore backups or reverse diffs only without overwriting later work; otherwise merge. Remove a newly created file only when it still matches the installed copy and is unused. Reverify imports/instructions/skill after restoration.
-
-## Recover an interrupted installer transaction
-
-After stopping every Claude and Codex session, run recovery from a separate terminal in the verified extracted package. For an interrupted `install.py apply`, prefer `py -3 .\install.py recover --plan "<saved-plan.json>" --maintenance-confirmed`. For an interrupted `install.py rollback`, use `py -3 .\install.py recover --receipt "<saved-receipt.json>" --maintenance-confirmed`. Keep the saved plan, receipt and transaction data. The installer checks for active consumers and blocks when their state cannot be established.
-
-The plan or receipt reuses the recorded configuration root even when `CLAUDE_CONFIG_DIR` or `--home` has changed. `recover --runtime claude` resolves the current locations; its `nothing to recover` result covers only the state directory reported by that invocation. Recovery restores the before-state of an interrupted installer transaction. Profile and skill edits made manually still use the verified backups above.
+Skill rollback uses the receipt procedure above. For separately merged CLAUDE.md and AGENTS.md, compare each file with its recorded installed hash before restoring a private backup or reversing a diff. Preserve later edits; reconcile a changed file instead of overwriting it. Remove a newly created instruction file only if it is unchanged and unused. Reverify imported instructions and skill loading in a fresh session after restoration.
