@@ -1016,13 +1016,17 @@ class ScanTimeTests(unittest.TestCase):
                 self.assertEqual(len(searches), 2)
 
     def test_repeated_run_items_add_no_per_item_work(self) -> None:
-        # The CI-list input repeats two items 10000 times; per-item stripping and
-        # run matching made it the slowest gated scan (#50).
+        # test_alternating_list_run_stays_bounded repeats these two items 10000 times;
+        # per-item stripping and run matching made it the slowest gated scan (#13).
+        item = "- merge\n- go\n"
         work = []
-        for repeats in (40, 80):
+        for factor in (1, 2):
             spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
+            # Every item adds at least one character, so both scans fill the run
+            # window and the counts compare full windows.
+            repeats = factor * (module.RUN_WINDOW + 1)
             calls = []
             strip_markers = module.strip_markers
 
@@ -1037,7 +1041,7 @@ class ScanTimeTests(unittest.TestCase):
             module.strip_markers = lambda value: calls.append(value) or strip_markers(value)
             module.RUN_WORDS = {key: Counted(pattern) for key, pattern in module.RUN_WORDS.items()}
             module.RUN_BRANCHES = tuple((Counted(pattern), *rest) for pattern, *rest in module.RUN_BRANCHES)
-            self.assertEqual(module.scan_text("- merge\n- go\n" * repeats), 0)
+            self.assertEqual(module.scan_text(item * repeats), 0)
             work.append(len(calls))
         self.assertEqual(work[0], work[1])
 
