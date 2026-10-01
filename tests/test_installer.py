@@ -979,6 +979,52 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(rollback.returncode, 0, rollback.stderr)
         self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
 
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_rollback_blocks_a_linked_duplicate_root_whose_target_has_no_owner_write(self):
+        if not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        # The secondary root is a link unchanged since apply; its own mode (0777) is not where the rename writes.
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        physical = Path(os.path.realpath(self.base / "codex-skills"))
+        before, legacy_before = self.v52_layout(target), self.v52_layout(physical / "github-workflow")
+        (self.home / ".codex").mkdir()
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        link_directory(legacy.parent, physical)
+        # plan, and the plan apply repeats, check the same physical parent before the duplicate leaves it.
+        physical.chmod(0o555)
+        try:
+            output = self.base / "blocked-plan.json"
+            result = self.run_installer("plan", "--runtime", "codex", "--home", self.home, "--checksums",
+                                        self.checksums, "--output", output)
+            self.assert_refused(result, 2)
+            self.assertIn(f"{legacy.parent} leads to {physical}, which has no owner write permission (mode 0555), so the "
+                          f"duplicate {legacy} cannot be moved out of it; add owner write permission to {physical}, then "
+                          "plan again", json.loads(result.stderr)["error"])
+            self.assertFalse(output.exists())
+        finally:
+            physical.chmod(0o755)
+        result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt_path = Path(json.loads(result.stdout)["receipt"])
+        receipt, after = receipt_path.read_bytes(), snapshot(target)
+        physical.chmod(0o555)
+        self.addCleanup(physical.chmod, 0o755)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(rollback, 2)
+        error = json.loads(rollback.stderr)
+        self.assertIn(f"{legacy.parent} leads to {physical}, which has no owner write permission (mode 0555), so the "
+                      f"retired duplicate {legacy} cannot be moved back into it; add owner write permission to {physical}, "
+                      "then run rollback again", error["error"])
+        self.assertEqual(error["details"], {"path": str(legacy.parent), "mode": "0555", "physical": str(physical)})
+        self.assertEqual(receipt_path.read_bytes(), receipt)
+        self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+        self.assertEqual(snapshot(target), after)
+        self.assertFalse((physical / "github-workflow").exists())
+        physical.chmod(0o755)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual((snapshot(target), snapshot(physical / "github-workflow")), (before, legacy_before))
+
     # The OS enforces these modes only for an unprivileged user; root reads and searches any directory.
     @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
     def test_a_directory_that_cannot_be_searched_or_listed_blocks_with_its_fix(self):

@@ -578,16 +578,32 @@ class Locations:
             return
         for path, reason in ((self.skills, f"so {SKILL} cannot be moved in or out of it"),
                              (self.target, "so it cannot be moved to another directory"), *moves):
-            if exists(path) and not os.lstat(str(path)).st_mode & stat.S_IWUSR:
-                mode = stat.S_IMODE(os.lstat(str(path)).st_mode)
-                hint = f"add owner write permission to {path}"
+            if not exists(path):
+                continue
+            # A rename writes to the physical directory, so a link the location checks accept (a secondary root
+            # linked since apply) is followed: the link's own mode, often 0777, says nothing about its target.
+            # Links above path are already followed by lstat.
+            physical = Path(os.path.realpath(str(path))) if is_link(path) else path
+            try:
+                status = os.stat(str(path))
+            except FileNotFoundError:
+                continue  # A dangling link: the location and restoration checks own that refusal.
+            except PermissionError:
+                raise inaccessible(physical.parent, "searched", retry) from None
+            if not status.st_mode & stat.S_IWUSR:
+                mode = stat.S_IMODE(status.st_mode)
+                hint = f"add owner write permission to {physical}"
                 if path == self.target and recorded_mode is not None:
                     hint += f" (the receipt records mode {recorded_mode:04o}"
                     if not recorded_mode & stat.S_IWUSR:
                         hint += f"; rollback also accepts {recorded_mode | stat.S_IWUSR:04o}"
                     hint += ")"
-                raise Blocked(f"{path} has no owner write permission (mode {mode:04o}), {reason}; {hint}, then {retry}",
-                              {"path": str(path), "mode": f"{mode:04o}"})
+                named = str(path) if physical == path else f"{path} leads to {physical}, which"
+                details = {"path": str(path), "mode": f"{mode:04o}"}
+                if physical != path:
+                    details["physical"] = str(physical)
+                raise Blocked(f"{named} has no owner write permission (mode {mode:04o}), {reason}; {hint}, then {retry}",
+                              details)
 
     def describe(self) -> dict:
         return {
