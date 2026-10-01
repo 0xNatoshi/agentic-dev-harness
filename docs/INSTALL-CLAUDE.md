@@ -16,7 +16,7 @@ $claudeHome = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join
 $claudeHome
 ```
 
-Confirm actual loading with `/context` in a local Code session and record the Claude Code version. WSL/SSH have separate profiles. In the effective profile, CLAUDE.md imports adjacent AGENTS.md through `@AGENTS.md`; the skill lives at `skills\github-workflow\`. Preserve other imports. Keep settings.json, ~/.claude.json, providers, models, permissions and MCP settings intact. [Configuration directories](https://code.claude.com/docs/en/settings).
+Confirm actual loading with `/context` in a local Code session and record the Claude Code version. WSL/SSH have separate profiles. In the effective profile, CLAUDE.md imports adjacent AGENTS.md through @AGENTS.md; the skill lives at `skills\github-workflow\`. Preserve other imports. Keep settings.json, ~/.claude.json, providers, models, permissions and MCP settings intact. [Configuration directories](https://code.claude.com/docs/en/settings).
 
 The preflight requires Git, gh, Git Bash/Bash, awk/grep/mktemp and **Python 3.8+ standard library**. Verify python3, py -3 or python launches that version; the script tries them in this order. Missing Python leaves installation unqualified: use the [official Windows distribution](https://www.python.org/downloads/windows/), then check again. No external jq is required.
 
@@ -69,7 +69,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Extracted package verification failed; stop th
 The installer is standard-library Python and declares Python 3.8+ support; interpreter versions actually exercised are listed in STATUS.md. Use the same verified package and checksum file for planning and apply. Keep private plans, receipts and backups outside repositories and every skill discovery root.
 
 1. **Package** — use the shipped `install.py verify-package` commands above with the separately supplied `dev-harness-v6.5.0-SHA256SUMS.txt`. They check the archive and the extracted files against the same manifest digest, sizes and hashes, and reject extra, missing or unsafe paths. ZIP input also checks the archive digest; extracted-directory input reports that the archive digest was not checked in that invocation. Record the package version and that distinction. Hash agreement proves integrity against the supplied expectations, not independent provenance. A mismatch is `blocked`, and no later checkpoint is trustworthy.
-2. **Instruction files** — compare `$claudeHome\CLAUDE.md` with `configurations/claude-desktop/CLAUDE.md`, and `$claudeHome\AGENTS.md` with `configurations/claude-desktop/AGENTS.md`. Keep exactly one relative `@AGENTS.md` import resolving to its neighbor, plus unrelated imports. Preferences merged on purpose are `personalized`.
+2. **Instruction files** — compare `$claudeHome\CLAUDE.md` with `configurations/claude-desktop/CLAUDE.md`, and `$claudeHome\AGENTS.md` with `configurations/claude-desktop/AGENTS.md`. Keep exactly one relative @AGENTS.md import resolving to its neighbor, plus unrelated imports. Preferences merged on purpose are `personalized`.
 3. **`github-workflow` skill** — resolve `$claudeHome\skills\github-workflow`. A real directory is compared file by file with `skills/github-workflow/`. A link or junction is **not** replaced: resolve its canonical directory, record the link target and its owner, and compare there. One canonical directory can serve several applications at once and is then checked once for all of them. Evidence is the file count, every SHA-256 and the three license templates; extra `.bak` or history files are retained customizations.
 4. **Claude imports and registration** — confirm the imports that load in the effective profile and that `/github-workflow` resolves. `agents/openai.yaml` and the Codex role TOMLs do not configure Claude subagents.
 5. **Loading** — in a new local Code session, `/context` must show the effective CLAUDE.md and establish the imported AGENTS.md. File presence or import text does not prove loading.
@@ -95,7 +95,7 @@ The **personal package is v6.5.0; the active repository template is v6.4**. This
 
 ## Merge instructions
 
-1. Merge configurations/claude-desktop/AGENTS.md into the personal AGENTS.md and CLAUDE.md into personal CLAUDE.md. Retain one relative `@AGENTS.md` import resolving to its neighbor, plus existing unrelated imports/preferences. A copied AGENTS.md alone does not establish loading. An authorization conflict unresolved by current user direction needs a concrete decision.
+1. Merge configurations/claude-desktop/AGENTS.md into the personal AGENTS.md and CLAUDE.md into personal CLAUDE.md. Retain one relative @AGENTS.md import resolving to its neighbor, plus existing unrelated imports/preferences. A copied AGENTS.md alone does not establish loading. An authorization conflict unresolved by current user direction needs a concrete decision.
 2. Prepare a skill plan using the installer below only if that checkpoint is outdated. Skill agents/openai.yaml and Codex role TOMLs do not configure Claude subagents.
 3. Explorer/operator/worker/reviewer/architect are responsibilities; use Claude's actual tools/models instead of importing GPT model names/efforts. This package requires no provider, permission or Claude subagent-configuration change.
 
