@@ -600,6 +600,9 @@ NEXT_HOLD = re.compile(
 STRONG_PAUSE = r'\b(?:suspend\w*|paused?|on\s+hold|en\s+attente)\b'
 CROSS_PAUSE = re.compile(
     MERGE_WORD + r'[^.!?]{0,120}' + STRONG_PAUSE + r'|' + STRONG_PAUSE + r'[^.!?]{0,120}' + MERGE_WORD)
+# Every CROSS_PAUSE match holds a STRONG_PAUSE word, which most files lack; without one, the
+# bounded search after each merge word is skipped.
+STRONG_PAUSE_CUE = re.compile(STRONG_PAUSE)
 # An upstream-sync rule names an upstream remote as the single source that ends its clause.
 UPSTREAM_SOURCE = re.compile(
     r'\b(?:from|depuis|du|de)\s+(?:the\s+|le\s+|la\s+|l[’\x27]\s*)?'
@@ -1176,7 +1179,7 @@ def scan_normalized(text, restriction, strip):
     joined = DATED.sub(take_date, joined)
     if invalid_date or re.search(r'autonomous\s+merge\s+suspended|merge\s+autonome\s+suspendu', joined):
         return 2
-    if CROSS_PAUSE.search(joined):
+    if STRONG_PAUSE_CUE.search(joined) and CROSS_PAUSE.search(joined):
         return 2
 
     # Free-form restrictions are read per Markdown unit so that sibling list

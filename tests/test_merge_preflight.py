@@ -1,5 +1,6 @@
 """Merge routing, suspension and Pages fixtures against the source skill."""
 
+import collections
 from dataclasses import dataclass
 import importlib.util
 import json
@@ -1467,6 +1468,31 @@ class ScanTimeTests(unittest.TestCase):
             with self.subTest(step=step):
                 self.assertEqual(list(lead.blocks), kept)
                 self.assertEqual(lead.tail(extra), tail(kept, extra))
+
+    def test_pause_cue_keeps_every_cross_pause_match(self) -> None:
+        # scan_normalized reads CROSS_PAUSE only when a STRONG_PAUSE word, which every match holds,
+        # is present (#62). The guarded search must match exactly when CROSS_PAUSE does, so a cue
+        # that misses one pause word fails here.
+        spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        merges = ("merge", "merges", "merged", "merging", "fusionne", "automerge", "integrate", "")
+        pauses = ("", "suspended", "suspendu", "paused", "pause", "on hold", "on\nhold", "en  attente", "attente", "hold")
+        separators = (" ", "  ", "\n", ", ", ". ", "; ", "! ")
+        rng = random.Random(62)
+        found = collections.Counter()
+        for step in range(4000):
+            # Fillers longer than CROSS_PAUSE's 120-character span, or a sentence end, keep the words apart.
+            words = [rng.choice(merges), "x " * rng.choice((0, 5, 40, 70)), rng.choice(pauses)]
+            if rng.random() < 0.5:
+                words.reverse()
+            text = "".join(word + rng.choice(separators) for word in words)
+            cross = bool(module.CROSS_PAUSE.search(text))
+            found[cross] += 1
+            with self.subTest(step=step, text=text):
+                self.assertEqual(bool(module.STRONG_PAUSE_CUE.search(text) and module.CROSS_PAUSE.search(text)), cross)
+        # The guarded search both matches and fails often enough for the comparison to mean something.
+        self.assertGreater(min(found.values()), 300, found)
 
     def test_repeated_classifications_keep_context_and_state(self) -> None:
         rule = "No rebase merges; use squash merges."
