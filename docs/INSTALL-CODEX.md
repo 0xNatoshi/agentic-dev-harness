@@ -1,4 +1,4 @@
-# Personal Codex Desktop installation on Windows — v6.5.0
+# Personal Codex Desktop installation on Windows — v6.6.0
 
 Use these steps from the extracted ZIP produced by `python3 scripts/build.py`. Paths below are relative to that package root, not this guide's source location in the repository.
 
@@ -54,11 +54,11 @@ Run this first. It answers "is this computer already current, and what must chan
 
 Report the outcome per checkpoint; do not collapse them into one verdict.
 
-Keep the original ZIP and its separately delivered `dev-harness-v6.5.0-SHA256SUMS.txt` beside the extracted package. From the extracted package root, this read-only example uses those actual sibling files; adjust their locations if necessary:
+Keep the original ZIP and its separately delivered `dev-harness-v6.6.0-SHA256SUMS.txt` beside the extracted package. From the extracted package root, this read-only example uses those actual sibling files; adjust their locations if necessary:
 
 ```powershell
-$packageZip = (Resolve-Path '..\dev-harness-v6.5.0-codex-claude.zip' -ErrorAction Stop).Path
-$checksums = (Resolve-Path '..\dev-harness-v6.5.0-SHA256SUMS.txt' -ErrorAction Stop).Path
+$packageZip = (Resolve-Path '..\dev-harness-v6.6.0-codex-claude.zip' -ErrorAction Stop).Path
+$checksums = (Resolve-Path '..\dev-harness-v6.6.0-SHA256SUMS.txt' -ErrorAction Stop).Path
 & $installerPython @installerPythonArgs .\install.py verify-package $packageZip --checksums $checksums
 if ($LASTEXITCODE -ne 0) { throw 'Package verification failed; stop the update' }
 & $installerPython @installerPythonArgs .\install.py verify-package . --checksums $checksums
@@ -67,7 +67,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Extracted package verification failed; stop th
 
 The installer is standard-library Python and declares Python 3.8+ support; interpreter versions actually exercised are listed in STATUS.md. Use the same verified package and checksum file for planning and apply. Keep private plans, receipts and backups outside repositories and every skill discovery root.
 
-1. **Package** — use the shipped `install.py verify-package` commands above with the separately supplied `dev-harness-v6.5.0-SHA256SUMS.txt`. They check the archive and the extracted files against the same manifest digest, sizes and hashes, and reject extra, missing or unsafe paths. ZIP input also checks the archive digest; extracted-directory input reports that the archive digest was not checked in that invocation. Record the package version and that distinction. Hash agreement proves integrity against the supplied expectations, not independent provenance. A mismatch is `blocked`, and no later checkpoint is trustworthy.
+1. **Package** — use the shipped `install.py verify-package` commands above with the separately supplied `dev-harness-v6.6.0-SHA256SUMS.txt`. They check the archive and the extracted files against the same manifest digest, sizes and hashes, and reject extra, missing or unsafe paths. ZIP input also checks the archive digest; extracted-directory input reports that the archive digest was not checked in that invocation. Record the package version and that distinction. Hash agreement proves integrity against the supplied expectations, not independent provenance. A mismatch is `blocked`, and no later checkpoint is trustworthy.
 2. **Active instruction file** — establish which file Codex loads: a nonempty `$codexHome\AGENTS.override.md` takes precedence over `$codexHome\AGENTS.md`. Compare the loaded one with `configurations/codex/AGENTS.md`; compare the masked one only to keep the pair consistent. Record the loaded file as the target for any later required merge; do not edit either file during this check.
 3. **`github-workflow` skill** — resolve `$skillsHome\github-workflow`. A real directory is compared file by file with `skills/github-workflow/`. A link or junction is **not** replaced: resolve its canonical directory, record the link target and its owner, and compare there. One canonical directory can serve several applications at once and is then checked once for all of them. Also resolve `$codexHome\skills\github-workflow` as a possible older separate copy. Evidence is the file count, every SHA-256 and the three license templates.
 4. **Roles and configuration** — compare the `[agents]` keys in the active `config.toml` with `configurations/codex/agents-config.toml`, and the five role TOMLs with `configurations/codex/agents/`. Preserve other tables, providers, permissions and deliberate disablement. An unavailable model or effort is `personalized`, not `outdated`.
@@ -77,12 +77,12 @@ When every checkpoint is `current` or `personalized`, no package update is neede
 
 ## Back up and compare versions
 
-Before editing, create a new private `%LOCALAPPDATA%\dev-harness\backups\v6.5.0-codex-<timestamp>` directory and record its absolute path:
+Before editing, create a new private `%LOCALAPPDATA%\dev-harness\backups\v6.6.0-codex-<timestamp>` directory and record its absolute path:
 
 ```powershell
 $backupParent = Join-Path $env:LOCALAPPDATA 'dev-harness\backups'
 New-Item -ItemType Directory -Path $backupParent -Force -ErrorAction Stop | Out-Null
-$backupRoot = Join-Path $backupParent ('v6.5.0-codex-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
+$backupRoot = Join-Path $backupParent ('v6.6.0-codex-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
 if (Test-Path -LiteralPath $backupRoot) { throw 'Backup path already exists' }
 New-Item -ItemType Directory -Path $backupRoot -ErrorAction Stop | Out-Null
 $backupRoot
@@ -90,7 +90,7 @@ $backupRoot
 
 Copy every file/link that will change, preserving type/tree: active instructions, adjacent AGENTS.md, config.toml, targeted role files and the complete skill/history. Inventory paths/types/link targets/SHA-256/file counts and verify the backup by readback. The local receipt records absolute paths, before/after hashes, recognized provenance/version, created/retired files and merge diffs. Keep authentication, secrets and unrelated profile content out of the export. Preserve earlier backups.
 
-The **personal package is v6.5.0; the active repository template is v6.4**. This package includes initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill; project adoption remains a separate PR after its current task. Compare marker and actual bytes against authentic sources; a version number alone is insufficient. Preserve newer/unknown local policy and merge only compatible additions. For v6.4.0 or older with a verified base, use a three-way comparison: exact historical base / local file / package file, individually for instructions, skill and roles. Preserve local customizations, restrictions and imports. Without an authentic base, capture local files and compare manually; invent no history. Keep authentic local v5.1/v5.2 snapshots, which are not shipped here.
+The **personal package is v6.6.0; the active repository template is v6.4**. This package includes initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill; project adoption remains a separate PR after its current task. Compare marker and actual bytes against authentic sources; a version number alone is insufficient. Preserve newer/unknown local policy and merge only compatible additions. For v6.4.0 or older with a verified base, use a three-way comparison: exact historical base / local file / package file, individually for instructions, skill and roles. Preserve local customizations, restrictions and imports. Without an authentic base, capture local files and compare manually; invent no history. Keep authentic local v5.1/v5.2 snapshots, which are not shipped here.
 
 ## Install targeted files
 

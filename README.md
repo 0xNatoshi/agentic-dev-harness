@@ -2,7 +2,7 @@
 
 Versioned development workflow, agent profiles and safe delivery tooling for Codex, Claude Code and Hermes
 
-This private repository is the shared source for harness changes, review and handoff between coding agents. It started from the verified v6.3.1 distribution; v6.4.0 established repository maintenance and reproducible packaging. **v6.5.0** adds proactive technical initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance. The current project template is v6.4.
+This private repository is the shared source for harness changes, review and handoff between coding agents. It started from the verified v6.3.1 distribution; v6.4.0 established repository maintenance and reproducible packaging. **v6.5.0** adds proactive technical initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance. The current development package is **v6.6.0 (unreleased)**; published v6.5.0 assets remain unchanged. The current project template is v6.4.
 
 ## Work with another agent
 
