@@ -25,11 +25,14 @@ import uuid
 import zipfile
 import zlib
 
-INSTALLER_VERSION = "1.0.0"
+INSTALLER_VERSION = "1.1.0"
 SKILL = "github-workflow"
 SKILL_PREFIX = "skills/" + SKILL + "/"
+# The installer's own path in the package; apply keeps a verified copy of it with each receipt.
+PACKAGE_INSTALLER = "install.py"
 # Obsolete v5.2 files owned by earlier installations. They leave the active tree but stay in the
-# retired and backup copies, so rollback restores them.
+# retired and backup copies, so rollback restores them. Retirement is by pathname, without a hash
+# check, so an edited copy is retired too; the plan, apply output and receipt name each one (#43).
 RETIREMENT_LIST = {
     "version": 1,
     "paths": {
@@ -591,6 +594,19 @@ def classify(name: str, entry: dict, package_files: dict) -> str:
     return "customization"
 
 
+def retirements(classification: dict, before: dict | None, backup: Path | None = None, retired: Path | None = None) -> list:
+    """Each named obsolete file with its hash; with the transaction copies, where its exact bytes are kept."""
+    entries = []
+    for name in sorted(name for name, kind in classification.items() if kind == "named obsolete"):
+        entry = {"path": name, "listed_as": RETIREMENT_LIST["paths"][name], "sha256": before[name]["sha256"],
+                 "bytes": before[name]["bytes"]}
+        if retired is not None and backup is not None:
+            parts = PurePosixPath(name).parts
+            entry.update(retired_copy=str(retired.joinpath(*parts)), backup=str(backup.joinpath(*parts)))
+        entries.append(entry)
+    return entries
+
+
 def make_plan(runtime: str, home: str | None, config: str | None, package_source: Path, checksums: Path):
     """Return the plan and the verified package it describes."""
     locations = Locations(runtime, home, config)
@@ -632,6 +648,13 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
         "retirement_list": RETIREMENT_LIST,
         "before": before,
         "classification": classification,
+        # Derived from before and classification, but still drift keys: the operator approves this preview,
+        # and apply retires from a fresh plan, so an edited or truncated preview must stop apply (#43).
+        "retirements": retirements(classification, before),
+        "retirement_copies": {"state_root": str(locations.state), "transaction": None,
+                              "note": "The transaction directory is allocated at apply; the apply output and receipt "
+                                      "give each retired file's retired_copy and backup location, and a rollback_command "
+                                      "that runs the package installer's verified copy kept in that directory"},
         "duplicates": duplicates,
         "duplicate_inventories": {path: inventory(Path(path)) for path in duplicates},
         "legacy_commands": [str(path) for path in locations.legacy if exists(path)],
@@ -640,8 +663,8 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
     return plan, package
 
 
-DRIFT_KEYS = ("installer_version", "runtime", "home", "config_root", "target", "skill_roots", "state_root", "package", "before", "classification", "duplicates",
-              "duplicate_inventories")
+DRIFT_KEYS = ("installer_version", "runtime", "home", "config_root", "target", "skill_roots", "state_root", "package", "retirement_list",
+              "before", "classification", "retirements", "retirement_copies", "duplicates", "duplicate_inventories")
 
 
 def drift(plan: dict, fresh: dict) -> list:
@@ -891,11 +914,12 @@ class Operation:
     def restore_verified(self, backup: Path, expected: dict, copy: Path, destination: Path, label: str) -> None:
         """Copy a verified backup beside the transaction, check it, then rename it into place."""
         if exists(copy):
-            # A copy left by an interrupted restoration; kept aside, never deleted.
+            # A copy left by an interrupted restoration; kept aside, never deleted. The journal names the aside
+            # path before the rename, so a kill right after the rename still leaves it in the final report.
             stale = copy.parent.parent / ("restore-stale-" + uuid.uuid4().hex[:8])
-            os.rename(str(copy.parent), str(stale))
             self.record.setdefault("stale_restore_copies", []).append(str(stale))
             write_json(self.path, self.record)
+            rename(copy.parent, stale, label + ":set-aside")
         copy_tree(backup, copy)
         fsync_tree(copy)
         if differences(expected, inventory(copy)):
@@ -984,7 +1008,8 @@ def command_apply(options) -> dict:
                                    Path(options.checksums))
         changed = drift(plan, fresh)
         if changed:
-            raise Refused("The package, target or duplicates changed since the plan; plan again", changed)
+            raise Refused("The package, target, duplicates or the plan's retirement preview changed since the plan; "
+                          "plan again", changed)
         if fresh["interrupted"]:
             raise Blocked(f"An interrupted transaction is recorded in {fresh['interrupted']}; run `recover` first")
         requested = [os.path.abspath(path) for path in options.retire_duplicate]
@@ -998,6 +1023,21 @@ def command_apply(options) -> dict:
         return install(fresh, package, locations, boundary)
 
 
+def keep_installer(package: Package, transaction: Path) -> dict:
+    """Keep the verified package's installer in the transaction, so the receipt's rollback command does
+    not depend on the extracted package, which the operator may delete or replace with another build."""
+    listed = package.manifest["files"].get(PACKAGE_INSTALLER)
+    data = package.files.get(PACKAGE_INSTALLER)
+    if data is None or not isinstance(listed, dict) or listed.get("sha256") != digest(data):
+        raise Refused(f"The verified package holds no {PACKAGE_INSTALLER} matching its manifest")
+    # Named like the original: the maintenance boundary recognizes this installer's launchers by that name.
+    path = transaction / "installer" / PACKAGE_INSTALLER
+    write_durable(path, data)
+    if digest(path.read_bytes()) != listed["sha256"]:
+        raise Refused(f"The installer copy {path} does not match the package manifest")
+    return {"path": str(path), "sha256": listed["sha256"]}
+
+
 def install(plan: dict, package: Package, locations: Locations, boundary: dict) -> dict:
     # The package bytes verified by the fresh plan, not a second read of the source.
     package_files = package.skill_files()
@@ -1007,6 +1047,7 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
     transaction.mkdir(parents=True)
     begin(locations.state, journal)
     try:
+        installer = keep_installer(package, transaction)
         backup = transaction / "backup" / SKILL
         if before is not None:
             copy_tree(locations.target, backup)
@@ -1060,6 +1101,7 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         finish(locations.state)
         raise Refused("Exactly one discoverable copy was not established; the original state was restored", discovered)
     classification = plan["classification"]
+    receipt_path = transaction / "receipt.json"
     receipt = {
         "receipt_format": 1,
         "installer_version": INSTALLER_VERSION,
@@ -1073,6 +1115,7 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         "before": before,
         "after": after,
         "retired_paths": sorted(name for name, kind in classification.items() if kind == "named obsolete"),
+        "retirements": retirements(classification, before, backup, retired),
         "dropped_paths": sorted(name for name, kind in classification.items() if kind == "regenerable cache"),
         "preserved_paths": sorted(name for name, kind in classification.items() if kind in PRESERVED),
         "replaced_paths": sorted(name for name, kind in classification.items() if kind == "package"),
@@ -1085,13 +1128,19 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         "discovered_after": discovered,
         "state": "installed",
         "note": "Two renames are not an atomic or continuously available replacement; the maintenance boundary covers the gap.",
+        "installer_copy": installer,
+        # An argument list, not a shell string: quoting differs between PowerShell, cmd and sh. It omits
+        # --maintenance-confirmed, which the operator appends once every consuming session is stopped. It
+        # runs the installer copy kept with the receipt, so it outlives the extracted package.
+        "rollback_command": [sys.executable, installer["path"], "rollback", "--receipt", str(receipt_path)],
     }
-    write_json(transaction / "receipt.json", receipt)
+    write_json(receipt_path, receipt)
     operation.save("committed")
     finish(locations.state)
-    return {"result": "installed", "receipt": str(transaction / "receipt.json"), "target": str(locations.target),
-            "retired_paths": receipt["retired_paths"], "dropped_paths": receipt["dropped_paths"],
-            "preserved_paths": receipt["preserved_paths"], "duplicates_retired": [move["from"] for move in moves]}
+    return {"result": "installed", "receipt": str(receipt_path), "target": str(locations.target),
+            "retired_paths": receipt["retired_paths"], "retirements": receipt["retirements"],
+            "dropped_paths": receipt["dropped_paths"], "preserved_paths": receipt["preserved_paths"],
+            "duplicates_retired": [move["from"] for move in moves], "rollback_command": receipt["rollback_command"]}
 
 
 def stage(staged: Path, package_files: dict, target: Path, before: dict, classification: dict) -> None:
@@ -1258,12 +1307,21 @@ def command_recover(options) -> dict:
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check()
+    nothing = {"result": "nothing to recover", "config_root": str(locations.config), "state_root": str(locations.state)}
+    if not (options.plan or options.receipt):
+        # --runtime resolves the config root from this invocation only; a transaction planned under
+        # another root keeps its CURRENT pointer there, so "nothing" here is not "all clear".
+        # Claude keeps its state under the config root; Codex keeps it under the home directory whatever CODEX_HOME says.
+        cause = ("another config root (--home or CLAUDE_CONFIG_DIR)" if locations.runtime == "claude"
+                 else "another home directory (--home)")
+        nothing["hint"] = (f"Only {locations.state} was checked. A transaction started with {cause} is recovered with "
+                           "`recover --plan <plan>` or `recover --receipt <receipt>`, which reuse the recorded directories.")
     if not exists(locations.state):
-        return {"result": "nothing to recover", "state_root": str(locations.state)}
+        return nothing
     with Lock(locations.state):
         current = locations.state / "CURRENT"
         if not exists(current):
-            return {"result": "nothing to recover", "state_root": str(locations.state)}
+            return nothing
         journal = locations.state / current.read_text(encoding="utf-8").strip()
         if not exists(journal):
             # The journal is written durably before the first rename, so nothing was renamed.
@@ -1275,6 +1333,16 @@ def command_recover(options) -> dict:
             result = {"result": "already committed", "journal": str(journal)}
             if record["operation"] == "rollback" and not mark_rolled_back(record, tolerant=True):
                 result["receipt_not_updated"] = record["receipt"]
+            if record["operation"] == "apply":
+                # The apply output may never have been printed: name the receipt and what it retired.
+                receipt = journal.parent / "receipt.json"
+                result["receipt"] = str(receipt)
+                try:
+                    value = read_json(receipt)
+                except Refused as error:
+                    result["receipt_unreadable"] = str(error)
+                else:
+                    result.update({key: value[key] for key in ("retirements", "rollback_command") if key in value})
             finish(locations.state)
             return result
         operation.record["recovery_boundary"] = boundary
@@ -1286,9 +1354,13 @@ def command_recover(options) -> dict:
             raise Incomplete(f"Restoration incomplete: {error}. Recovery data kept in {operation.path.parent}; "
                              "fix the cause and run `recover` again", getattr(error, "details", None))
         result = {"result": "restored", "operation": record["operation"], "journal": str(journal), "target": record["target"]}
-        for key in ("parked_drift", "moved_drift", "stale_restore_copies"):
+        for key in ("parked_drift", "moved_drift"):
             if key in operation.record:
                 result[key] = operation.record[key]
+        # An aside path is recorded before its rename; one whose rename never happened names nothing.
+        stale = [path for path in operation.record.get("stale_restore_copies", ()) if exists(Path(path))]
+        if stale:
+            result["stale_restore_copies"] = stale
         receipt = journal.parent / "receipt.json"
         if record["operation"] == "apply" and exists(receipt):
             value = read_json(receipt)

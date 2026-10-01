@@ -19,6 +19,25 @@ Check Desktop version or `codex --version`, active config.toml, custom-role supp
 
 The preflight requires Git, gh, Git Bash/Bash with awk/grep/mktemp and **Python 3.8+ standard library**. Verify a real working python3, py -3 or python, in that detection order. If absent, installation remains unqualified until Python is installed from the [official Windows distribution](https://www.python.org/downloads/windows/) and checked again. No external jq is needed.
 
+## Update check — read-only, before any backup or edit
+
+Run this first. It answers "is this computer already current, and what must change?" and modifies nothing. Record one outcome per checkpoint, using these four words:
+
+- **current** — matches the package.
+- **personalized** — matches, plus deliberate local additions or preferences.
+- **outdated** — a package rule is absent, older or altered.
+- **blocked** — unreadable, or not safely ownable.
+
+Report the outcome per checkpoint; do not collapse them into one verdict.
+
+1. **Package** — verify the extracted ZIP against `SHA256SUMS.txt` and every entry in `MANIFEST.json`, and record the package version. A mismatch is `blocked`, and no later checkpoint is trustworthy.
+2. **Active instruction file** — establish which file Codex loads: a nonempty `$codexHome\AGENTS.override.md` takes precedence over `$codexHome\AGENTS.md`. Compare the loaded one with `configurations/codex/AGENTS.md`; compare the masked one only to keep the pair consistent. Record the loaded file as the target for any later required merge; do not edit either file during this check.
+3. **`github-workflow` skill** — resolve `$skillsHome\github-workflow`. A real directory is compared file by file with `skills/github-workflow/`. A link or junction is **not** replaced: resolve its canonical directory, record the link target and its owner, and compare there. One canonical directory can serve several applications at once and is then checked once for all of them. Also resolve `$codexHome\skills\github-workflow` as a possible older separate copy. Evidence is the file count, every SHA-256 and the three license templates.
+4. **Roles and configuration** — compare the `[agents]` keys in the active `config.toml` with `configurations/codex/agents-config.toml`, and the five role TOMLs with `configurations/codex/agents/`. Preserve other tables, providers, permissions and deliberate disablement. An unavailable model or effort is `personalized`, not `outdated`.
+5. **Loading** — in a new read-only Codex session, confirm the loaded instruction source, the skill and the roles actually exposed. File presence or TOML syntax does not prove loading.
+
+When every checkpoint is `current` or `personalized`, no package update is needed: report any deliberate local differences, change nothing and skip the remaining sections. Otherwise record only the `outdated` checkpoints as update candidates, preserving local customizations. A `blocked` checkpoint needs its missing evidence or ownership resolved before changing that target; a blocked package check stops the whole update. Back up the confirmed edit targets before using the remaining sections.
+
 ## Back up and compare versions
 
 Before editing, create a new private `%LOCALAPPDATA%\dev-harness\backups\v6.5.0-codex-<timestamp>` directory and record its absolute path:
@@ -64,3 +83,9 @@ Record any other obsolete candidate by exact path in the receipt. No wildcard de
 - Check package/copy hashes or intentional merge diffs, TOML syntax, five relative role references, instruction imports and three license templates. In a new read-only Codex session confirm loaded sources, skill and actually exposed roles. File presence alone does not prove loading. State an unavailable/unstarted runtime explicitly.
 - Conversation headings follow the actually loaded personal preference. Put verified progress and the next action together. Record executed checks, runtime version, exposed roles and exact backup path.
 - Compare each target with its installed hash before rollback. Restore a backup/reverse a diff only without losing later edits; otherwise merge. Remove a newly created file only if unchanged and unused. Recheck instruction/skill/TOML loading. Restoring an entire config.toml blindly is not a rollback plan.
+
+## Recover an interrupted installer transaction
+
+After stopping every Claude and Codex session, run recovery from a separate terminal in the verified extracted package. For an interrupted `install.py apply`, prefer `py -3 .\install.py recover --plan "<saved-plan.json>" --maintenance-confirmed`. For an interrupted `install.py rollback`, use `py -3 .\install.py recover --receipt "<saved-receipt.json>" --maintenance-confirmed`. Keep the saved plan, receipt and transaction data. The installer checks for active consumers and blocks when their state cannot be established.
+
+The plan or receipt reuses the recorded configuration root even when `CODEX_HOME` or `--home` has changed. `recover --runtime codex` resolves the current locations; its `nothing to recover` result covers only the state directory reported by that invocation. Recovery restores the before-state of an interrupted installer transaction. Profile and role edits made manually still use the verified backups above.
