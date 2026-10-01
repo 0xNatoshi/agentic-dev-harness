@@ -100,33 +100,34 @@ def invisible(c):
     return category == 'Cf' or (category == 'Cc' and c not in '\t\n\r') or bool(IGNORABLE.match(c))
 
 
-def normalize(text, joiner='', em_dash=' - '):
-    """Casefold and map dashes; replace invisible characters with joiner and an em dash with em_dash."""
-    # A spaced soft hyphen is read as a dash; elsewhere it is invisible.
-    text = re.sub('(?<=\\s)\u00ad|\u00ad(?=\\s)', '-', text)
-    text = unicodedata.normalize('NFKC', text)
-    table = {}
-    for c in set(text):
-        if invisible(c):
-            table[ord(c)] = joiner
-        elif c in '\u2014\u2015':
-            # An em dash or horizontal bar usually separates words even unspaced, unlike a hyphen that
-            # joins them; scan_text also reads it as a hyphen ('Laisse—moi fusionner').
-            table[ord(c)] = em_dash
-        elif unicodedata.category(c) == 'Pd' or c == '\u2212':
-            table[ord(c)] = '-'
-    return text.translate(table).replace('\r\n', '\n').replace('\r', '\n').casefold()
-
-
 # Only an unspaced em dash can stand for a hyphen, so only text with one gets the hyphen reading:
 # the spaced dash of the canonical marker costs no extra scan.
 UNSPACED_EM_DASH = re.compile('\\S[\u2014\u2015]|[\u2014\u2015]\\S')
 
 
-def reading_choices(text):
-    """The (joiner, em_dash) pairs for normalize() whose readings scan_text must check."""
-    em_dashes = (' - ', '-') if UNSPACED_EM_DASH.search(unicodedata.normalize('NFKC', text)) else (' - ',)
-    return [(joiner, em_dash) for joiner in ('', ' ') for em_dash in em_dashes]
+def readings(text):
+    """Each distinct casefolded reading of text that scan_text must check, dashes read as hyphens.
+
+    Invisible characters may split a word or separate two words: text with one is read with them
+    removed and with them spaced. An em dash or horizontal bar usually separates words even unspaced,
+    unlike a hyphen that joins them, so it reads as ' - '; an unspaced one may also stand for a hyphen
+    ('Laisse—moi fusionner'), and that reading comes first. Text without either has one reading.
+    """
+    # A spaced soft hyphen is read as a dash; elsewhere it is invisible.
+    text = unicodedata.normalize('NFKC', re.sub('(?<=\\s)\u00ad|\u00ad(?=\\s)', '-', text))
+    chars = set(text)
+    hidden = [c for c in chars if invisible(c)]
+    table = {ord(c): '-' for c in chars
+             if c not in '\u2014\u2015' and (unicodedata.category(c) == 'Pd' or c == '\u2212')}
+    folded = []
+    for joiner in ('', ' ') if hidden else ('',):
+        table.update(dict.fromkeys(map(ord, hidden), joiner))
+        folded.append(text.translate(table).replace('\r\n', '\n').replace('\r', '\n').casefold())
+    # Translation, line endings and casefolding leave em dashes in place, so the NFKC pass and each
+    # translation serve both dash readings.
+    em_dashes = ('-', ' - ') if UNSPACED_EM_DASH.search(text) else (' - ',)
+    return list(dict.fromkeys(reading.replace('\u2014', em_dash).replace('\u2015', em_dash)
+                              for em_dash in em_dashes for reading in folded))
 
 
 START = re.compile(r'^\s*<!--\s*github-workflow:start\b(?:(?!-->).)*-->\s*$')
@@ -277,7 +278,7 @@ PR_MODIFIER = r'(?!' + PR_PHRASE_END + r'(?!-))' + PR_VETO + r'\w+(?:-' + PR_VET
 # head names a thing ('team unit tests', 'reviewer assignment queue', 'the owner's CI'); any other
 # head names the person ('the owner's final decision'). An unclassified phrase stays a hold.
 # There is no word cap: each modifier is one whitespace-separated word, so matching stays linear.
-# A hyphen joins words; a comma ends the phrase, and so does an em dash in the reading where normalize() spaces it.
+# A hyphen joins words; a comma ends the phrase, and so does an em dash in the reading where readings() spaces it.
 PR_GATE_HEAD = (r'(?:\s+|-)(?:' + PR_MODIFIER + r'\s+)*(?:' + PR_VETO + r'\w+-)*(?:' + PR_BLOCKER_GATE + r'|' + TOOL_WORD + r')\b'
                 r'(?![’\x27-])(?=\s*(?:$|[^\w\s])|\s+' + PR_PHRASE_END + r')')
 # Determiners, including quantifiers ('both maintainers', 'the other maintainers').
@@ -1091,34 +1092,27 @@ def free_restriction(context, unit):
     return 'cleared' if mechanics_only(unit) else True
 
 
-def unmanaged_lines(text):
-    """Unquoted lines outside the managed block, '' for each delimiter, or None for a malformed block."""
+def scan_normalized(text, restriction, strip):
     outside = []
     managed = False
     # Only newlines end Markdown lines; str.splitlines would also split on U+2028 or \x1e.
     for line in text.split('\n'):
         if START.match(line):
             if managed:
-                return None
+                return 2
             managed = True
             outside.append('')
         elif END.match(line):
             if not managed:
-                return None
+                return 2
             managed = False
             outside.append('')
         elif not managed:
             outside.append(line)
     if managed:
-        return None
-    return [unquote(line) for line in outside]
-
-
-def scan_normalized(text):
-    outside = unmanaged_lines(text)
-    if outside is None:
         return 2
     # Whitespace joining recognizes a marker or date wrapped over several lines.
+    outside = [unquote(line) for line in outside]
     joined = re.sub(r'\s+', ' ', '\n'.join(outside))
     joined = EXAMPLE.sub('', joined)
     found = False
@@ -1143,9 +1137,6 @@ def scan_normalized(text):
     cleared, follows, held, headings = False, False, [], []
     mechanics, gate_follows = False, False  # a git-mechanics rule; a hold beside a gate's own words
     level, section = 0, None  # current heading level; level of the cleared rule's section
-    # Cache only pure classification; every unit still updates the scan state.
-    restriction = functools.lru_cache(maxsize=128)(free_restriction)
-    strip = functools.lru_cache(maxsize=128)(strip_markers)
     for context, unit in units(outside, lambda: held.append(True), headings.append):
         if headings:
             level = headings.pop()
@@ -1178,12 +1169,12 @@ def scan_normalized(text):
     return 1 if found else 0
 
 
-def outside_managed(text):
-    """Raw lines outside managed blocks under any invisible-character or em-dash reading."""
+def outside_managed(text, choices):
+    """Raw lines outside managed blocks under any of the readings in choices."""
     raw = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
     keep = [False] * len(raw)
-    for joiner, em_dash in reading_choices(text):
-        lines = normalize(text, joiner, em_dash).split('\n')
+    for reading in choices:
+        lines = reading.split('\n')
         if len(lines) != len(raw):
             return text  # lines do not align: check the whole file
         managed = False
@@ -1223,48 +1214,22 @@ def hidden_splits(text):
     return count
 
 
-def dash_separates_hold(reading):
-    """Whether a spaced em-dash reading holds a PR in a way its hyphen reading may not show.
-
-    It reads the Markdown units scan_normalized reads, so a hold after a heading or an unpunctuated
-    block starts its own unit here too ('# Rules\\n\\nPRs are blocked by the\\nowner—CI is green.').
-    It tests PR_HELD on each sentence, as free_restriction does first, and reports a hold that
-    units() finds across list items or table rows. This only selects the full scan of the reading,
-    so it skips the other restriction checks. Each distinct sentence is tested once.
-    """
-    lines = unmanaged_lines(reading)
-    if lines is None:
-        return True
-    held = []
-    parts = set()
-    for _, unit in units(lines, lambda: held.append(True)):
-        if held:
-            return True
-        parts.update(re.split(r'[.!?]', strip_markers(unit)))
-    return bool(held) or any(PR_HELD.search(part) for part in parts)
-
-
 def scan_text(text):
     """0 clear, 1 dated canonical veto, 2 ambiguous/malformed evidence."""
     if len(text) > MAX_SCAN_CHARS:
         return 2
-    # Invisible characters may split a word or separate two words, and an em dash may separate words or
-    # join them: check each distinct reading. Text without them has a single reading.
-    choices = reading_choices(text)
-    hyphen = dict.fromkeys(normalize(text, joiner, em_dash) for joiner, em_dash in choices if em_dash == '-')
-    # Text with an unspaced em dash: every dash is first read as a hyphen, as before the spaced reading
-    # existed ('Laisse—moi fusionner'). A full second scan doubles the cost of any file with one such
-    # dash, so the spaced reading is scanned only when the hyphen readings are not ambiguous and it
-    # holds a PR ('PRs are blocked by the owner—CI is green'). The generator keeps that check lazy.
-    spaced = dict.fromkeys(normalize(text, joiner, em_dash) for joiner, em_dash in choices if em_dash != '-')
-    spaced = (reading for reading in spaced if not hyphen or dash_separates_hold(reading))
+    # A hold in any reading is a hold, so each distinct reading is scanned in full.
+    choices = readings(text)
+    # Cache only pure classification; every unit still updates the scan state. The readings of one
+    # file share most of their units, so they share caches sized for the distinct units of a file.
+    restriction = functools.lru_cache(maxsize=4096)(free_restriction)
+    strip = functools.lru_cache(maxsize=4096)(strip_markers)
     results = []
-    for readings in (hyphen, spaced):
-        for reading in readings:
-            results.append(scan_normalized(reading))
-            if results[-1] == 2:
-                return 2
-    if hidden_splits(outside_managed(text)) > 1:
+    for reading in choices:
+        results.append(scan_normalized(reading, restriction, strip))
+        if results[-1] == 2:
+            return 2
+    if hidden_splits(outside_managed(text, choices)) > 1:
         # Two readings cannot cover several invisible splits that need different choices.
         return 2
     return 1 if 1 in results else 0

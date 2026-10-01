@@ -1086,6 +1086,13 @@ TEXT_CASES = (
          "Read the guide\n\nPRs are blocked by the\nmaintainer—status: frozen."),
     Case("caught wrapped quoted PRs blocked by owner then unspaced em dash after a quoted note", 2,
          "> Note\n>\n> PRs are blocked by the\n> owner—CI is green."),
+    # Round 9b: a dash opening the wrapped line still separates the hold from what follows.
+    Case("caught wrapped PRs blocked by owner with em dashes on the next line", 2,
+         "PRs are blocked by the\n—owner—CI is green."),
+    Case("caught wrapped list item PRs blocked by owner with em dashes on the continuation", 2,
+         "- PRs are blocked by the\n  —owner—CI is green."),
+    Case("caught wrapped PRs blocked by owner with an em dash opening the last line", 2,
+         "PRs are blocked by the\n—owner."),
     Case("caught PRs blocked by release manager's freeze policy", 2,
          "PRs are blocked by the release manager's freeze policy."),
     Case("caught PRs blocked by release manager's code freeze policy", 2,
@@ -1254,8 +1261,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 971 or len({case.name for case in ALL_CASES}) != 971:
-    raise RuntimeError("Merge fixture inventory must contain 971 unique cases")
+if len(ALL_CASES) != 974 or len({case.name for case in ALL_CASES}) != 974:
+    raise RuntimeError("Merge fixture inventory must contain 974 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
@@ -1402,9 +1409,11 @@ class ScanTimeTests(unittest.TestCase):
             # Only an unspaced em dash adds the hyphen reading; the marker's spaced dash does not.
             # The hyphen reading is scanned first and a hold ends the scan.
             ("Laisse—moi fusionner.", 2, 1),
-            # The spaced reading costs a second scan only when a dash sentence reads as a PR hold.
-            ("- merge\n- go\n" * 40 + "a—b", 0, 1),
+            # Otherwise the spaced reading is scanned too, wherever the dash is.
+            ("- merge\n- go\n" * 40 + "a—b", 0, 2),
             ("PRs are blocked by the owner—CI is green.", 2, 2),
+            # Two invisible-character readings times two dash readings.
+            ("a\N{ZERO WIDTH SPACE}b—c", 0, 4),
         )
         for text, expected, reading_count in cases:
             with self.subTest(text=text):
@@ -1414,51 +1423,37 @@ class ScanTimeTests(unittest.TestCase):
                 calls = []
                 scan_normalized = module.scan_normalized
 
-                def counted(reading):
+                def counted(reading, *caches):
                     calls.append(reading)
-                    return scan_normalized(reading)
+                    return scan_normalized(reading, *caches)
 
                 module.scan_normalized = counted
                 self.assertEqual(module.scan_text(text), expected)
                 self.assertEqual(len(calls), reading_count)
 
-    def test_dash_hold_check_reads_each_distinct_reading_and_part_once(self) -> None:
-        cases = (
-            # An ambiguous hyphen reading ends the scan before the check runs.
-            ("Laisse—moi fusionner.", 2, 0, 0),
-            # Both invisible-character joiners give the same reading here: one check, and one sentence.
-            ("PRs are blocked by the " + "x " * 2000 + "—b", 0, 1, 1),
-            # Each distinct sentence is searched once: 80 list items give 3 searches, 50 sentences give 3.
-            ("- merge\n- go\n" * 40 + "a—b", 0, 1, 3),
-            ("Merge x—y. " * 50, 0, 1, 3),
-            # Distinct invisible-character readings are each checked.
-            ("a\N{ZERO WIDTH SPACE}b—c", 0, 2, 2),
-        )
-        for text, expected, check_count, search_count in cases:
-            with self.subTest(text=text[:40]):
+    def test_each_scan_normalizes_the_text_once(self) -> None:
+        # NFKC dominated the cost of a scan when every reading and the managed-block check each
+        # normalized the whole text again; one pass serves every reading.
+        for text in ("- merge" + "\n- go" * 200, "a\N{ZERO WIDTH SPACE}b", "Laisse—moi fusionner.",
+                     "a\N{ZERO WIDTH SPACE}b—c\n"):
+            with self.subTest(text=text[:20]):
                 spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
-                checked, searches = [], []
-                check, pattern = module.dash_separates_hold, module.PR_HELD
+                calls = []
+                unicodedata = module.unicodedata
 
-                def counted(*args):
-                    checked.append(args)
-                    return check(*args)
+                class Counted:
+                    def __getattr__(self, name):
+                        return getattr(unicodedata, name)
 
-                class CountedPattern:
-                    def search(self, value):
-                        searches.append(value)
-                        return pattern.search(value)
+                    def normalize(self, form, value):
+                        calls.append(form)
+                        return unicodedata.normalize(form, value)
 
-                module.dash_separates_hold = counted
-                self.assertEqual(module.scan_text(text), expected)
-                self.assertEqual(len(checked), check_count)
-                # Replay the checks alone so only their searches are counted.
-                module.PR_HELD = CountedPattern()
-                for args in checked:
-                    check(*args)
-                self.assertEqual(len(searches), search_count)
+                module.unicodedata = Counted()
+                module.scan_text(text)
+                self.assertEqual(calls, ["NFKC"])
 
     def test_long_invisible_run_stays_linear(self) -> None:
         # A quadratic hidden-split scan took over 10 s on this input; linear takes milliseconds.
