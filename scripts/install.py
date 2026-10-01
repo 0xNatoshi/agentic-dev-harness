@@ -587,7 +587,7 @@ class Locations:
             try:
                 status = os.stat(str(path))
             except FileNotFoundError:
-                continue  # A dangling link: the location and restoration checks own that refusal.
+                continue  # A dangling link is not refused here, as before: its own mode passed too.
             except PermissionError:
                 raise inaccessible(physical.parent, "searched", retry) from None
             if not status.st_mode & stat.S_IWUSR:
