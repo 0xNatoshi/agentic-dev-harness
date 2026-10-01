@@ -1236,24 +1236,41 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 receipt_path = Path(json.loads(result.stdout)["receipt"])
                 receipt = receipt_path.read_bytes()
+                older_receipt = json.loads(receipt)
+                del older_receipt["duplicates"][0]["resolved"]
                 after = snapshot(target)
                 # The folder moves outside the home and is replaced by a link to it there.
                 elsewhere = self.base / ("elsewhere" + folder.name)
                 shutil.move(str(folder), str(elsewhere))
                 link_directory(folder, elsewhere)
                 try:
-                    rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
-                    self.assert_refused(rollback, 2)
-                    error = json.loads(rollback.stderr)
-                    self.assertIn(f"The retired duplicate {legacy} would be restored to ", error["error"])
-                    self.assertEqual(error["details"]["retired_from"], json.loads(receipt)["duplicates"][0]["resolved"])
-                    self.assertFalse(legacy.exists())
+                    for older in (False, True):
+                        if older:
+                            # Nothing in a receipt without the resolved path shows where the link pointed.
+                            receipt_path.write_text(json.dumps(older_receipt), encoding="utf-8")
+                        content = receipt_path.read_bytes()
+                        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                        self.assert_refused(rollback, 2)
+                        error = json.loads(rollback.stderr)
+                        if older:
+                            self.assertIn(f"{folder} is a link or junction, and this receipt predates the record of "
+                                          "where each retired duplicate was", error["error"])
+                            self.assertEqual(error["details"]["link"], str(folder))
+                        else:
+                            self.assertIn(f"The retired duplicate {legacy} would be restored to ", error["error"])
+                            self.assertEqual(error["details"]["retired_from"],
+                                             json.loads(receipt)["duplicates"][0]["resolved"])
+                        self.assertFalse(legacy.exists())
+                        self.assertEqual(receipt_path.read_bytes(), content)
+                        self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+                        self.assertEqual(snapshot(target), after)
                 finally:
                     unlink_directory(folder)
                     shutil.move(str(elsewhere), str(folder))
-                self.assertEqual(receipt_path.read_bytes(), receipt)
-                self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
-                self.assertEqual(snapshot(target), after)
+                # Once the folder is back, either receipt rolls back: the older one for skills, the current one
+                # for .codex.
+                if folder == legacy.parent.parent:
+                    receipt_path.write_bytes(receipt)
                 rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
                 self.assertEqual(rollback.returncode, 0, rollback.stderr)
                 self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
@@ -1272,8 +1289,20 @@ class InstallerTests(unittest.TestCase):
             result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(legacy_source.exists())
-            rollback = self.run_installer("rollback", "--receipt", json.loads(result.stdout)["receipt"],
-                                          "--maintenance-confirmed")
+            receipt_path = Path(json.loads(result.stdout)["receipt"])
+            receipt = receipt_path.read_bytes()
+            # A receipt without the resolved path cannot show that the link is unchanged, so it blocks.
+            older_receipt = json.loads(receipt)
+            del older_receipt["duplicates"][0]["resolved"]
+            receipt_path.write_text(json.dumps(older_receipt), encoding="utf-8")
+            content = receipt_path.read_bytes()
+            rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(rollback, 2)
+            self.assertEqual(json.loads(rollback.stderr)["details"]["link"], str(self.home / ".codex"))
+            self.assertEqual(receipt_path.read_bytes(), content)
+            self.assertFalse(legacy_source.exists())
+            receipt_path.write_bytes(receipt)
+            rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
             self.assertEqual(rollback.returncode, 0, rollback.stderr)
             self.assertEqual((snapshot(target), snapshot(legacy_source)), (before, legacy_before))
         finally:
