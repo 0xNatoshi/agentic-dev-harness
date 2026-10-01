@@ -774,6 +774,136 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(".", [item["path"] for item in json.loads(rollback.stderr)["details"]])
         self.assertEqual(stat.S_IMODE(os.stat(self.target).st_mode), 0o700)
 
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_plan_blocks_a_directory_without_owner_write_permission(self):
+        self.v52_layout()
+        for path in (self.target, self.target.parent):
+            with self.subTest(path=path.name):
+                path.chmod(0o555)
+                self.addCleanup(path.chmod, 0o755)
+                before = snapshot(self.target)
+                output = self.base / "plan.json"
+                result = self.run_installer("plan", "--runtime", "claude", "--home", self.home, "--checksums", self.checksums,
+                                            "--output", output)
+                self.assert_refused(result, 2)
+                error = json.loads(result.stderr)
+                self.assertIn(f"add owner write permission to {path}, then plan again", error["error"])
+                self.assertEqual(error["details"], {"path": str(path), "mode": "0555"})
+                self.assertFalse(output.exists())
+                self.assertEqual(snapshot(self.target), before)
+                path.chmod(0o755)
+        plan = self.plan()
+        self.target.chmod(0o555)
+        # apply plans again, so it blocks before the park rename instead of failing there.
+        self.assert_refused(self.apply(plan), 2)
+        self.assertFalse((self.state() / "CURRENT").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_rollback_blocks_a_target_without_owner_write_permission_before_any_rename(self):
+        self.v52_layout()
+        # An explicit mode, so the recorded mode does not depend on the umask.
+        self.target.chmod(0o750)
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        recorded = json.loads(receipt_path.read_text(encoding="utf-8"))["after"]["."]["mode"]
+        self.assertEqual(recorded, 0o750)
+        self.target.chmod(0o555)
+        self.addCleanup(self.target.chmod, recorded)
+        result = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(result, 2)
+        self.assertIn(f"add owner write permission to {self.target} (the receipt records mode 0750), then run rollback again",
+                      json.loads(result.stderr)["error"])
+        self.assertEqual(snapshot(self.target), after)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+        self.assertFalse((self.state() / "CURRENT").exists())
+        self.target.chmod(recorded)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+
+    def legacy_owner_write_receipt(self):
+        """A receipt recording root mode 0550, as an older installer run by root could write, for a root at 0750."""
+        self.v52_layout()
+        self.target.chmod(0o750)
+        before = snapshot(self.target)
+        receipt_path = self.installed()
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["after"]["."]["mode"] = 0o550
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        self.addCleanup(lambda: self.target.exists() and self.target.chmod(0o750))
+        return before, receipt_path
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_rollback_of_a_receipt_recording_a_root_without_owner_write_accepts_the_owner_write_fix(self):
+        before, receipt_path = self.legacy_owner_write_receipt()
+        self.target.chmod(0o550)
+        blocked = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(blocked, 2)
+        self.assertIn(f"add owner write permission to {self.target} (the receipt records mode 0550; rollback also accepts "
+                      "0750), then run rollback again", json.loads(blocked.stderr)["error"])
+        self.target.chmod(0o750)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual(snapshot(self.target), before)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "rolled back")
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_owner_write_fix_still_refuses_any_other_drift(self):
+        _, receipt_path = self.legacy_owner_write_receipt()
+        pristine = self.base / "pristine"
+        shutil.copytree(self.home, pristine, symlinks=True)
+
+        def edit_with_owner_write():
+            (self.target / "SKILL.md").chmod(0o644)
+            (self.target / "SKILL.md").write_bytes(b"edited\n")
+
+        for name, change in (("another root mode", lambda: self.target.chmod(0o700)),
+                             ("owner write and an edited file", edit_with_owner_write)):
+            with self.subTest(drift=name):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home, symlinks=True)
+                change()
+                drifted = snapshot(self.target)
+                rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(rollback, 1)
+                self.assertEqual(snapshot(self.target), drifted)
+                self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+                self.assertFalse((self.state() / "CURRENT").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_interrupted_rollback_after_the_owner_write_fix_recovers(self):
+        before, receipt_path = self.legacy_owner_write_receipt()
+        after = snapshot(self.target)
+        pristine = self.base / "pristine"
+        shutil.copytree(self.home, pristine, symlinks=True)
+        names = self.checkpoints("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertIn("rollback:activated", names)
+        for name in names:
+            with self.subTest(checkpoint=name):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home, symlinks=True)
+                crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": name})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                recover = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assertEqual(recover.returncode, 0, recover.stderr)
+                self.assertFalse((self.state() / "CURRENT").exists())
+                state = json.loads(receipt_path.read_text(encoding="utf-8"))["state"]
+                # Until the commit, recovery puts back the tree as found: the owner-write fix, not the recorded mode.
+                self.assertEqual((snapshot(self.target), state),
+                                 (before, "rolled back") if name == "rollback:committed" else (after, "installed"))
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_rollback_refusal_names_the_recorded_root_mode(self):
+        self.v52_layout()
+        # An explicit mode, so the recorded mode does not depend on the umask.
+        self.target.chmod(0o755)
+        receipt_path = self.installed()
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["after"]["."]["mode"], 0o755)
+        self.target.chmod(0o700)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(rollback, 1)
+        self.assertIn(f"restore mode 0755 on {self.target} (now 0700)", json.loads(rollback.stderr)["error"])
+
     def test_rerun_recover_sets_a_stale_restoration_copy_aside(self):
         before, parked = self.crash_after_parking()
         shutil.rmtree(parked)
@@ -965,6 +1095,27 @@ class InstallerTests(unittest.TestCase):
                 self.recover("codex")
                 self.assertEqual(snapshot(target), before)
                 self.assertEqual(snapshot(legacy), legacy_before)
+
+    def test_rollback_refuses_a_receipt_without_an_after_inventory(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt_path.write_text(json.dumps(dict(receipt, after=None)), encoding="utf-8")
+        result = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(result, 1)
+        self.assertIn("after-inventory", json.loads(result.stderr)["error"])
+
+    def test_rollback_refuses_a_receipt_with_a_non_integer_root_mode(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["after"]["."]["mode"] = "0755"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        result = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(result, 1)
+        error = json.loads(result.stderr)["error"]
+        self.assertIn("after-inventory", error)
+        self.assertNotIn("restore mode", error)
 
     def test_rollback_refuses_a_receipt_copy_that_differs(self):
         self.v52_layout()
