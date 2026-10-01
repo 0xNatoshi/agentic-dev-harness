@@ -105,7 +105,8 @@ def invisible(c):
 UNSPACED_EM_DASH = re.compile('\\S[\u2014\u2015]|[\u2014\u2015]\\S')
 # A dash opening a line may be a list marker, as on main, or open a wrapped continuation, so it gets
 # both readings: as ' - ' alone it would indent the line under its '- ' siblings and split their list.
-LINE_EM_DASH = re.compile('(?m)^[ \t>]*[\u2014\u2015]')
+# Any whitespace but a newline may indent it, as LIST_ITEM's indent, and quote markers may precede it.
+LINE_EM_DASH = re.compile('(?m)^(?:[^\\S\\n]|>)*[\u2014\u2015]')
 
 
 def readings(text):

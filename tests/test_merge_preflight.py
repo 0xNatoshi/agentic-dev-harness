@@ -1106,6 +1106,18 @@ TEXT_CASES = (
          "- Do not do the following\n- Not now\n— merge"),
     Case("caught quoted em dash item Never then quoted hyphen item merge", 2, "> — Never\n> - merge PRs"),
     Case("caught em dash item Never with a tab then hyphen item merge", 2, "—\tNever\n- merge PRs"),
+    # Any indent before the dash counts, as for a list marker, including a lone CR line ending and
+    # control characters read as invisible.
+    Case("caught Ogham space em dash item Never then hyphen item merge", 2,
+         "\N{OGHAM SPACE MARK}— Never\n\N{OGHAM SPACE MARK}- merge PRs"),
+    Case("caught line separator em dash item Never then hyphen item merge", 2,
+         "\N{LINE SEPARATOR}— Never\n\N{LINE SEPARATOR}- merge PRs"),
+    Case("caught paragraph separator horizontal bar item Never then asterisk item merge", 2,
+         "\N{PARAGRAPH SEPARATOR}― Never\n\N{PARAGRAPH SEPARATOR}* merge PRs"),
+    Case("caught em dash item Never after lone CR line endings then hyphen item merge", 2,
+         "x\r— Never\r- merge PRs"),
+    Case("caught next line control em dash item Never then hyphen item merge", 2, "\x85— Never\n- merge PRs"),
+    Case("caught vertical tab em dash item Never then hyphen item merge", 2, "\x0b— Never\n- merge PRs"),
     Case("caught PRs blocked by release manager's freeze policy", 2,
          "PRs are blocked by the release manager's freeze policy."),
     Case("caught PRs blocked by release manager's code freeze policy", 2,
@@ -1274,8 +1286,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 983 or len({case.name for case in ALL_CASES}) != 983:
-    raise RuntimeError("Merge fixture inventory must contain 983 unique cases")
+if len(ALL_CASES) != 989 or len({case.name for case in ALL_CASES}) != 989:
+    raise RuntimeError("Merge fixture inventory must contain 989 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
