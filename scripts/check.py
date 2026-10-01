@@ -7,6 +7,27 @@ the Claude and Codex co-author trailers and the GitHub SSH user; in Python files
 it reads literal source content and comments, excluding Python syntax quotes.
 It does not detect personal names or reconstruct addresses through separate
 strings, escape decoding or interpolation.
+
+Accepted ambiguities tracked by #35:
+- Version-shaped pins (including alphanumeric prereleases), full commits and
+  numbered refs can resemble address domains; raw IPv4 also matches a version.
+  Single-label hosts named latest or next also match npm dist-tags.
+- A slash-containing local part followed by a default branch name resembles a
+  repository ref, and a dotless VCS ref can also name a mail host.
+
+Conservative refusals require rewording rather than wider address exemptions:
+- Arbitrary named YAML action refs (including quoted values); use a full commit
+  or an accepted version/ref shape. No YAML-key heuristic exempts addresses.
+- Other npm dist-tags; short revisions outside the accepted version/ref shapes;
+  non-default prose refs; underscore-containing numbered refs; additional
+  nonnumeric dotted prerelease components;
+  dotted alphabetic VCS revisions, even after .git; and Markdown uses examples
+  with dotted alphabetic refs.
+- Remotes, URL user info, SSH targets and bot trailers outside the allowlist.
+- Bash parameter transformations containing an at-sign.
+
+All screened files must be UTF-8, including metadata and imported local modules.
+The running checker itself must already be loadable by Python.
 """
 import ast
 import importlib.util
@@ -21,9 +42,6 @@ import unicodedata
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-from build import payloads, version  # noqa: E402
-from check_workflow_commands import check_repository  # noqa: E402
 
 
 def require(condition, detail):
@@ -37,9 +55,10 @@ def require(condition, detail):
 # final sentence period is not a label.
 DOTS = ".\u3002\uff0e\uff61"
 IDNA_DOTS = str.maketrans(DOTS[1:], "...")
-# Version pins such as action@v4.2.2 or pkg@1.2.3-beta.1 are semver-shaped, and their
-# last label is never an alphabetic top-level domain.
-VERSION = re.compile(r'v?\d+(?:\.\d+)*(?:-[0-9a-z-]+(?:\.[0-9a-z-]+)*)?\Z')
+# Version pins such as action@v4.2.2 or pkg@1.2.3-beta.1 use numeric dot components
+# after the first prerelease label, so an alphabetic domain cannot hide before a
+# numeric suffix. Multi-name dotted prereleases are rejected conservatively.
+VERSION = re.compile(r'v?\d+(?:\.\d+)*(?:-[0-9a-z-]+(?:\.[0-9]+)*)?\Z')
 # A single-label pin such as actions/checkout@<full commit SHA>.
 COMMIT = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 DIST_TAGS = {"latest", "next"}
@@ -47,7 +66,7 @@ DIST_TAGS = {"latest", "next"}
 # No top-level domain is all-numeric (RFC 3696), and a real domain before the numbers
 # (gmail.com.1) keeps two alphabetic labels, so it stays screened.
 REF_NAME = re.compile(r'[a-z][a-z0-9_-]*(?:\.[0-9]+)+\Z')
-# Default branch names after owner/repo@; any other dotless ref needs a `uses:` key.
+# Default branch names after owner/repo@; other dotless refs remain screened.
 DEFAULT_BRANCHES = {"main", "master", "trunk", "develop", "head"}
 # An OCI image digest: the image name, then @sha256: and 64 hex digits (or sha512, 128).
 DIGESTS = {"sha256": re.compile(r':[0-9a-f]{64}(?![0-9A-Za-z])'), "sha512": re.compile(r':[0-9a-f]{128}(?![0-9A-Za-z])')}
@@ -71,10 +90,6 @@ NEUTRAL_DOMAINS = {"users.noreply.github.com"}
 NEUTRAL_ADDRESSES = {"noreply@anthropic.com", "codex@openai.com", "git@github.com"}
 # A URI scheme and // before the local part mark URL user info.
 URI_SCHEME = re.compile(r'(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\Z')
-# In a YAML file the value of a `uses:` key is an action reference by schema, whatever
-# its ref; elsewhere the same text is prose and stays screened.
-USES_KEY = re.compile(r'\s*(?:-\s+)?uses:\s+["\x27]?\Z')
-YAML_SUFFIXES = (".yml", ".yaml")
 # pip-style VCS URLs put a revision after a plain path: git+https://host/owner/repo.git@main.
 VCS_SCHEME = re.compile(r'(?<![A-Za-z0-9+.-])(?:git|hg|svn|bzr)\+[a-z]+:\Z')
 VCS_PATH = re.compile(r'//[^/?#=&]+(?:/[^/?#=&]+)+\Z')
@@ -143,13 +158,21 @@ def python_text(text):
     return "".join("".join(row) for row in rows)
 
 
+def pin_shaped(domain):
+    """A version, full commit or numbered ref without an alphabetic top-level domain."""
+    last = domain.rpartition(".")[2]
+    return bool(
+        VERSION.match(domain) and not last.isalpha() and not last.startswith("xn--")
+        or COMMIT.match(domain) or REF_NAME.match(domain)
+    )
+
+
 def ref_shaped(domain):
-    """A revision that cannot be a screened mail domain: dotless, numbered, a version or a SHA."""
-    return "." not in domain or bool(REF_NAME.match(domain) or VERSION.match(domain) or COMMIT.match(domain))
+    """A VCS revision accepted by the dotless, numbered-ref, version or commit rules."""
+    return "." not in domain or pin_shaped(domain)
 
 
 def check_emails(relative, text):
-    yaml = str(relative).endswith(YAML_SUFFIXES)
     # Split on newlines only, as editors and python_text() count lines; splitlines()
     # also breaks on form feeds and Unicode separators and would shift the reported line.
     for number, line in enumerate(text.split("\n"), 1):
@@ -170,22 +193,16 @@ def check_emails(relative, text):
                 continue
             if not line[end:].startswith(wrapper[::-1].translate(CLOSING)):
                 local = token
-            elif not local and (not before or before[-1] in " \t([") and (
-                    not wrapper or wrapper == "`" and domain.endswith(".md")):
-                # No local part at all is an @mention or import; a wrapper-only
-                # token is a local part too, except a code span around a Markdown
-                # import such as `@AGENTS.md`.
+            elif not local and not wrapper and (not before or before[-1] in " \t(["):
+                # A truly empty local part is an @mention or bare import.
+                # Wrappers such as a backtick can themselves be mail local parts.
                 continue
-            last = domain.rpartition(".")[2]
-            if (VERSION.match(domain) and not last.isalpha() and not last.startswith("xn--")) \
-                    or COMMIT.match(domain) or REF_NAME.match(domain):
+            if pin_shaped(domain):
                 continue  # a Punycode label such as xn--p1ai is a top-level domain, not a pin
-            if "/" in local and not local.startswith("/") and (
-                    yaml and USES_KEY.fullmatch(before) or "." not in domain and domain in DEFAULT_BRANCHES):
-                # A repository reference: any ref after a YAML `uses:` key, or a default branch as
-                # in actions/checkout@main. Elsewhere a slash is a valid local-part character before
-                # an intranet host and .one may be a real top-level domain, so both stay screened;
-                # URL user info keeps its leading // in the local part.
+            if "/" in local and not local.startswith("/") and "." not in domain and domain in DEFAULT_BRANCHES:
+                # Only established default-branch names are exempt here. A YAML
+                # uses-looking line can be scalar content; slash local parts and
+                # named refs remain screened without assuming a YAML key context.
                 continue
             if "." not in domain and domain in DIST_TAGS:
                 continue  # a package dist-tag such as pkg@latest
@@ -216,15 +233,7 @@ def check_links(name, text, available):
 
 
 def main():
-    release = version()
-    package = payloads()
-    project = json.loads((ROOT / "project.json").read_text(encoding="utf-8"))
-    require(len(project["description"]) <= 120, "About description exceeds 120 characters")
-    require((ROOT / "README.md").read_text(encoding="utf-8").splitlines()[2] == project["description"], "README/project description mismatch")
-    require(project["private"] is True and project["license"] == "LicenseRef-Proprietary", "Private repository metadata must match its license")
-    model = ROOT / "skills/github-workflow/templates/AGENTS.md"
-    snapshot = model.parent / "history" / ("AGENTS-v" + project["repository_template_version"] + ".md")
-    require(model.read_bytes() == snapshot.read_bytes(), "Active template differs from its declared historical snapshot")
+    # Screen before metadata readers and local imports can decode or echo source.
     for path in ROOT.rglob("*"):
         relative_path = path.relative_to(ROOT)
         if any(part in {".git", "dist", "__pycache__"} for part in relative_path.parts) or path.name == "TASKS.md":
@@ -234,7 +243,11 @@ def main():
         if not path.is_file():
             continue
         data = path.read_bytes()
-        text = data.decode("utf-8")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            line = data[:error.start].count(b"\n") + 1
+            raise SystemExit(f"Source file is not UTF-8: {path.relative_to(ROOT).as_posix()}:{line}") from None
         require(not re.search(r"/(?:Users|home)/[A-Za-z0-9_.-]+/|[A-Za-z]:\\Users\\", text), f"Machine-specific path: {relative}")
         check_emails(relative, python_text(text) if path.suffix == ".py" else text)
         require(not re.search(r"(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{24,}|-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----)", text), f"Possible credential: {relative}")
@@ -244,6 +257,19 @@ def main():
             tomllib.loads(text)
         elif path.suffix == ".json":
             json.loads(text)
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from build import payloads, version
+    from check_workflow_commands import check_repository
+
+    release = version()
+    package = payloads()
+    project = json.loads((ROOT / "project.json").read_text(encoding="utf-8"))
+    require(len(project["description"]) <= 120, "About description exceeds 120 characters")
+    require((ROOT / "README.md").read_text(encoding="utf-8").splitlines()[2] == project["description"], "README/project description mismatch")
+    require(project["private"] is True and project["license"] == "LicenseRef-Proprietary", "Private repository metadata must match its license")
+    model = ROOT / "skills/github-workflow/templates/AGENTS.md"
+    snapshot = model.parent / "history" / ("AGENTS-v" + project["repository_template_version"] + ".md")
+    require(model.read_bytes() == snapshot.read_bytes(), "Active template differs from its declared historical snapshot")
     for name, data in package.items():
         if name.endswith(".md") and "/templates/" not in name:
             check_links(name, data.decode("utf-8"), package)

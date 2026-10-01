@@ -5,6 +5,8 @@ import sys
 import tempfile
 import unittest
 
+from scripts.check import check_emails
+
 from tests._fixture_support import fixture_environment, run
 from tests.test_merge_preflight import FAKE_GH
 
@@ -30,6 +32,61 @@ class SourceCheckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="harness-workflow-healthy-") as directory:
             root = Path(directory)
             source = self.copy_source(root)
+            environment, _ = fixture_environment(root)
+            result = run([sys.executable, "scripts/check.py"], source, environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('"source_checks": "passed"', result.stdout)
+
+    def test_source_gate_reports_invalid_utf8_without_echoing_source(self):
+        marker = b"private-content-must-not-appear"
+        # Metadata consumers and local module imports must not run before the screen.
+        for relative in [
+            "VERSION", "package-files.json", "project.json", "README.md",
+            "profiles/AGENTS.template.md", "docs/fixture-encoding.txt",
+            "scripts/build.py", "scripts/install.py", "scripts/check_workflow_commands.py",
+        ]:
+            with self.subTest(path=relative), tempfile.TemporaryDirectory(prefix="harness-source-encoding-") as directory:
+                root = Path(directory)
+                source = self.copy_source(root)
+                path = source / relative
+                original = path.read_bytes() if path.exists() else b""
+                line = original.count(b"\n") + 2
+                path.write_bytes(original + b"\n" + marker + b"\xff\n")
+                environment, _ = fixture_environment(root)
+                result = run([sys.executable, "scripts/check.py"], source, environment)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(result.stderr, f"Source file is not UTF-8: {relative}:{line}\n")
+                self.assertEqual(result.stdout, "")
+                self.assertNotIn(marker.decode("ascii"), result.stderr)
+
+    def test_source_gate_rejects_address_shaped_version_pins(self):
+        for domain in ["1-beta.com", "1-mail.xn--p1ai", "1-beta.mail.com.2",
+                       "1-mail.xn--p1ai.2", "1-beta.co1", "1.2.3-alpha.beta.1"]:
+            for local in ["person", "git+https://host.test/owner/repo.git"]:
+                with self.subTest(domain=domain, local=local), tempfile.TemporaryDirectory(prefix="harness-pin-address-") as directory:
+                    root = Path(directory)
+                    source = self.copy_source(root)
+                    reference = "@".join([local, domain])
+                    (source / "fixture-pins.txt").write_text(reference + "\n", encoding="utf-8")
+                    environment, _ = fixture_environment(root)
+                    result = run([sys.executable, "scripts/check.py"], source, environment)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("Email address outside the neutral allowlist: fixture-pins.txt:1", result.stderr)
+                    self.assertNotIn(reference, result.stdout + result.stderr)
+                    self.assertNotIn(domain, result.stdout + result.stderr)
+                    self.assertNotIn('"source_checks": "passed"', result.stdout)
+
+    def test_source_gate_accepts_version_shaped_vcs_revisions(self):
+        pins = ["1.2.3", "v1.2.3-beta.1", "1.2.3-beta", "v1.2.3-alpha-beta.1",
+                "feature.1", "0123456789abcdef" * 2 + "01234567"]
+        revisions = ["main", "feature", *pins]
+        references = ["git+https://host.test/" + "@".join(["owner/repo.git", revision]) for revision in revisions]
+        references.extend("@".join(["package", pin]) for pin in pins)
+        references.append("@".join(["first/last", "main"]))
+        with tempfile.TemporaryDirectory(prefix="harness-vcs-version-") as directory:
+            root = Path(directory)
+            source = self.copy_source(root)
+            (source / "fixture-vcs.txt").write_text("\n".join(references) + "\n", encoding="utf-8")
             environment, _ = fixture_environment(root)
             result = run([sys.executable, "scripts/check.py"], source, environment)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -204,7 +261,7 @@ class SourceCheckTests(unittest.TestCase):
                         # Only an all-numeric last label reads as a ref or tag.
                         "@".join(["owner/action", "feature.1a"]), "@".join(["person", "mail.example-host.co1"]),
                         "@".join(["person", "host.\u0661"]),
-                        # A dotted alphabetic ref passes only as the value of a `uses:` key.
+                        # A dotted alphabetic ref stays screened, including uses-looking prose.
                         "@".join(["owner/action", "feature.one"]),
                         "@".join(["see uses: owner/action", "feature.one"]),
                         # A slash local part is a repository reference only before a default branch.
@@ -240,6 +297,70 @@ class SourceCheckTests(unittest.TestCase):
             self.assertIn(f"Email address outside the neutral allowlist: profiles/AGENTS.template.md:{line}", result.stderr)
             self.assertNotIn(address, result.stdout + result.stderr)
 
+    def test_documented_email_residuals_keep_their_explicit_boundary(self):
+        rows = [
+            ("named yaml action ref", "fixture.yml", "uses: " + "@".join(["first/last", "private.mail"]), False),
+            ("quoted named yaml action ref", "fixture.yml", 'uses: "' + "@".join(["first/last", "private.mail"]) + '"', False),
+            *[("named yaml ref " + ref, "fixture.yml", "uses: " + "@".join(["owner/action", ref]), False) for ref in ["feature", "feature.one", "release.candidate", "release-1.x", "v1.x"]],
+            ("YAML full commit", "fixture.yml", "uses: " + "@".join(["owner/action", "0123456789abcdef" * 4]), True),
+            ("YAML numeric version", "fixture.yml", "uses: " + "@".join(["owner/action", "v5"]), True),
+            ("YAML numbered ref", "fixture.yml", "uses: " + "@".join(["owner/action", "feature.1"]), True),
+            ("underscore numbered ref", "fixture.yml", "uses: " + "@".join(["owner/action", "feature_foo.1"]), False),
+            ("raw IPv4 version ambiguity", "fixture.txt", "@".join(["person", "10.0.0.1"]), True),
+            ("latest dist-tag ambiguity", "fixture.txt", "@".join(["person", "latest"]), True),
+            ("next dist-tag ambiguity", "fixture.txt", "@".join(["person", "next"]), True),
+            ("default-branch slash ambiguity", "fixture.txt", "@".join(["first/last", "main"]), True),
+            ("dotless VCS revision", "fixture.txt", "git+https://host.test/" + "@".join(["owner/repo.git", "feature"]), True),
+            *[("other npm tag " + tag, "fixture.txt", "@".join(["pkg", tag]), False) for tag in ["beta", "canary", "rc"]],
+            ("scoped stable tag", "fixture.txt", "@".join(["", "scope/pkg", "stable"]), False),
+            ("short commit", "fixture.txt", "@".join(["actions/checkout", "1a2b3c4"]), False),
+            ("prose release ref", "fixture.txt", "@".join(["owner/repo", "release-1.x"]), False),
+            ("markdown uses ref", "fixture.md", "uses: " + "@".join(["owner/action", "feature.one"]), False),
+            ("non-allowlisted Git host", "fixture.txt", "@".join(["git", "gitlab.com"]) + ":owner/repo.git", False),
+            ("URL user info", "fixture.txt", "https://x-access-token:${GITHUB_TOKEN}" + "@" + "github.com/owner/repo.git", False),
+            ("SSH mail host", "fixture.txt", "ssh " + "@".join(["user", "server"]), False),
+            ("unlisted bot trailer", "fixture.txt", "Signed-off-by: Bot <" + "@".join(["bot", "private.mail"]) + ">", False),
+            *[("dotted VCS ref " + ref, "fixture.txt", "git+https://host.test/" + "@".join(["owner/repo.git", ref]), False) for ref in ["feature.one", "release-1.x"]],
+            ("Bash transformation", "fixture.txt", "${value" + "@Q}", False),
+        ]
+        for label, relative, text, accepted in rows:
+            with self.subTest(case=label):
+                if accepted:
+                    check_emails(relative, text)
+                else:
+                    with self.assertRaisesRegex(ValueError, "Email address outside the neutral allowlist: " + relative.replace(".", r"\.") + ":1"):
+                        check_emails(relative, text)
+
+    def test_source_gate_rejects_named_yaml_refs_in_values_and_scalars(self):
+        reference = "@".join(["first/last", "private.mail"])
+        cases = [
+            ("actual key", "uses: " + reference + "\n", 1),
+            ("quoted key value", 'uses: "' + reference + '"\n', 1),
+            ("single-quoted key value", "uses: '" + reference + "'\n", 1),
+            ("literal scalar", "run: |\n  uses: " + reference + "\n", 2),
+            ("indented chomping scalar", "run: |2-\n  uses: " + reference + "\n", 2),
+            ("folded scalar", "description: >-\n  uses: " + reference + "\n", 2),
+            ("quoted multiline scalar", 'description: "text\n  uses: ' + reference + '\n"\n', 2),
+            ("long prefix", "run:" + " " * 300 + "uses: " + reference + "\n", 1),
+            ("non-YAML whitespace", "\x0cuses: " + reference + "\n", 1),
+        ]
+        for label, text, line in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory(prefix="harness-yaml-ref-") as directory:
+                root = Path(directory)
+                source = self.copy_source(root)
+                relative = ".github/workflows/fixture-uses.yml"
+                (source / relative).write_text(text, encoding="utf-8", newline="")
+                environment, _ = fixture_environment(root)
+                result = run([sys.executable, "scripts/check.py"], source, environment)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"Email address outside the neutral allowlist: {relative}:{line}", result.stderr)
+                self.assertNotIn(reference, result.stdout + result.stderr)
+
+    def test_source_gate_rejects_backtick_local_parts_before_markdown_domains(self):
+        for domain in ["private.md", "mail.private.md", "private\u3002md"]:
+            with self.subTest(domain=domain):
+                self.check_rejected(chr(96) + "@" + domain + chr(96))
+
     def test_source_gate_accepts_neutral_email_forms(self):
         addresses = [
             "@".join(["fixture", "example.invalid"]),
@@ -249,7 +370,7 @@ class SourceCheckTests(unittest.TestCase):
             "@".join(["git", "github.com"]) + ":owner/repo.git",
             "`" + "@".join(["noreply", "anthropic.com"]) + "`",
             "**" + "@".join(["git", "github.com"]) + "**",
-            "imports `@AGENTS.md` and `@../.codex/AGENTS.md`",
+            "imports @AGENTS.md and `@./AGENTS.md` and `@../.codex/AGENTS.md`",
             "_" + "@".join(["noreply", "anthropic.com"]) + "_",
             "~~" + "@".join(["noreply", "anthropic.com"]) + "~~",
             "{'" + "@".join(["noreply", "anthropic.com"]) + "'}",
@@ -288,13 +409,13 @@ class SourceCheckTests(unittest.TestCase):
             "git+https://github.com/" + "@".join(["owner/repo.git", "feature"]),
             "git+ssh://" + "@".join(["git", "github.com/owner/repo.git", "main"]),
         ]
-        # Workflow lines: in YAML the whole value of a `uses:` key is an action reference.
+        # Workflow pins use the same independently verifiable shapes as prose.
         uses = [
-            "  - uses: " + "@".join(["owner/action", "feature.one"]),
-            "        uses: '" + "@".join(["owner/action", "release.candidate"]) + "'",
-            "        uses: \"" + "@".join(["owner/action", "feature.one"]) + "\"",
-            "    uses: " + "@".join(["owner/repo/.github/workflows/ci.yml", "feature.one"]),
-            "    uses: " + "@".join(["owner/action", "feature"]),
+            "  - uses: " + "@".join(["owner/action", "0123456789abcdef" * 2 + "01234567"]),
+            "        uses: '" + "@".join(["owner/action", "v4.2.2"]) + "'",
+            "        uses: \"" + "@".join(["owner/action", "v5"]) + "\"",
+            "    uses: " + "@".join(["owner/repo/.github/workflows/ci.yml", "main"]),
+            "    uses: " + "@".join(["owner/action", "feature.1"]),
         ]
         with tempfile.TemporaryDirectory(prefix="harness-neutral-email-") as directory:
             root = Path(directory)
