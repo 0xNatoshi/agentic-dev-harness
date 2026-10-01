@@ -102,7 +102,7 @@ def invisible(c):
 
 # Only an unspaced em dash can stand for a hyphen, so only text with one, before or after its invisible
 # characters are removed, or with a dash opening a line, gets the hyphen reading: the spaced dash of
-# the canonical marker costs no extra scan.
+# the canonical marker costs no extra reading.
 UNSPACED_EM_DASH = re.compile('\\S[\u2014\u2015]|[\u2014\u2015]\\S')
 # A dash opening a line may be a list marker, as on main, or open a wrapped continuation, so it gets
 # both readings: as ' - ' alone it would indent the line under its '- ' siblings and split their list.
