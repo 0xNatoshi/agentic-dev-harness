@@ -166,9 +166,11 @@ DECIDER_BASE = r'(?:owner|maintainer|admin|human)'
 ROLE_BASE = r'(?:release\s+manager|reviewer|(?:tech|team)\s+lead|code\s+owner)'
 # A role word naming a document, tool or place ('Consult the reviewer guide', 'Merge via the
 # admin panel', 'Merges go through the reviewer queue') names no one who decides.
-TOOL_NOUN = (r'(?!\s+(?:guide\w*|checklists?|docs?|documentation|notes?|templates?|bots?|tools?|files?|panels?|queues?'
-             r'|channels?|dashboards?|ui|pages?|settings?|buttons?|lists?)\b)')
-DECIDER = (r'(?:me|us|moi|nous|(?:the\s+|a\s+|an\s+|your\s+)?(?:(?:repo(?:sitory)?|project)(?:[’\x27]s)?\s+)?' + DECIDER_BASE + r's?'
+TOOL_WORD = (r'(?:guide\w*|checklists?|docs?|documentation|notes?|templates?|bots?|tools?|files?|panels?|queues?'
+             r'|channels?|dashboards?|ui|pages?|settings?|buttons?|lists?)')
+TOOL_NOUN = r'(?!\s+' + TOOL_WORD + r'\b)'
+DECIDER_PREFIX = r'(?:(?:repo(?:sitory)?|project)(?:[’\x27]s)?\s+)?'
+DECIDER = (r'(?:me|us|moi|nous|(?:the\s+|a\s+|an\s+|your\s+)?' + DECIDER_PREFIX + DECIDER_BASE + r's?'
            r'|(?:le\s+|la\s+|les\s+|un\s+|l[’\x27])?(?:propriétaires?|mainteneu(?:r|rs|se|ses)|humains?))\b(?![’\x27]s\b)')
 # Roles that decide when a merge is reserved or asked for: 'Merging is reserved for the release
 # manager', 'Ask a reviewer before merging'. Kept out of DECIDER so 'Merge once a reviewer approves'
@@ -225,21 +227,31 @@ FAILURE_EXPLANATION = (r'\s*(?:the\s+)?(?:(?:failing|failed|red)\s+' + CHECK_NOU
                        + r'\s+(?:fail|fails|failed|(?:are|is)\s+(?:red|failing)))\s*(?:\)\s*)?$')
 # A named human or explicit freeze is a hold; a role modifying a gate or thing is not.
 # A possessive decision still names the human; a tool noun after it ('review queue') does not.
+PR_BLOCKER_PERSON = (r'(?:(?:la\s+)?(?:décision|validation|approbation|relecture)\s+'
+                     r'(?:du|de\s+la|de\s+l[’\x27]|des)\s*)?'
+                     + DECIDER_PREFIX + r'(?:(?:core|security)\s+)?'
+                     r'(?:me|us|moi|nous|' + DECIDER_BASE + r's?|' + ROLE_BASE + r's?|(?:tech|team)-leads?|leads?|teams?'
+                     r'|mainteneu(?:r|rs|se|ses)|propriétaires?|responsables?|administrat(?:eur|rice)s?'
+                     r'|relecteu(?:r|rs|se|ses)|relectrices?|équipes?|chefs?)'
+                     r'(?:[’\x27]s?\s+(?:decisions?|review|approval|call|sign-?off|go-ahead|go|ok(?:ay)?|say-so|word|request|green\s+light))?'
+                     r'|(?:my|our|mon|ma|notre|nos|mes)\s+(?:decisions?|call|say-so|word|go-ahead|approval|décisions?|validation|accord)')
+PR_BLOCKER_GATE = (r'(?:times?|ci|checks?|tests?|builds?|lint|pipelines?|jobs?|workflows?|polic(?:y|ies)'
+                   r'|rules?|status|runs?|vérifications?|règles?|protection|requirements?|enforce\w*|counts?|notifications?)')
+# Only fixed gate modifiers may intervene: never skip 'until', 'if' or another condition.
+# A hyphen before a gate/tool names a thing; an em dash before a condition still names a person.
 PR_BLOCKER = (r'(?:(?:the|a|an|my|our|your|their|his|her|le|la|les|un|une|du|des|mon|ma|mes|ton|ta|tes|notre|nos|votre|vos|leur|leurs|son|sa|ses)\s+|l[’\x27])?'
-              r'(?:(?:me|us|moi|nous|' + DECIDER_BASE + r's?|' + ROLE_BASE + r's?|(?:tech|team)-leads?|leads?|teams?'
-              r'|mainteneu(?:r|rs|se|ses)|propriétaires?|responsables?(?:\s+des?\s+(?:versions?|releases?|livraisons?))?'
-              r'|relecteu(?:r|rs|se|ses)|relectrices?|équipes?|chefs?)'
-              r'(?:[’\x27]s?\s+(?:decisions?|review|approval|call|sign-?off|go-ahead|go|ok(?:ay)?|say-so|word|green\s+light))?'
-              r'|(?:(?:release|code)\s+)?freeze|hold|embargo|gel)\b(?![’\x27](?:s\b|\s)|-)'
-              r'(?!\s+(?:time|ci|checks?|tests?|builds?|lint|pipelines?|jobs?|workflows?|polic(?:y|ies)'
-              r'|rules?|status|runs?|vérifications?|règles?)\b)' + TOOL_NOUN)
+              r'(?:(?:' + PR_BLOCKER_PERSON + r')\b(?![’\x27](?:s\b|\s))'
+              r'(?!(?:\s+|-)(?:(?:review|approval|protection|branch|enforced|required|merge|policy)\s+){0,2}'
+              r'(?:' + PR_BLOCKER_GATE + r'|' + TOOL_WORD + r')\b)'
+              r'|(?:(?:feature|deploy|deployment|holiday|release|code|merge|security|legal)(?:\s+|-))?'
+              r'(?:freezes?|holds?|embargo(?:es)?|gels?)\b(?![’\x27](?:s\b|\s)|-)' + TOOL_NOUN + r')')
 PR_BLOCKED = (r'^\W*(?:(?:all|every|any|the|open|pending|toutes|tous|les)\s+){0,2}' + PR_NOUN
               + r'\s+(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:(?:now|currently|temporarily|all|actuellement|désormais)\s+)?'
               r'(?:blocked|bloquée?s?)\b(?=\s*$|\s*[,;:)](?!' + FAILURE_EXPLANATION + r')'
               r'|\s+(?:until|till|while|jusqu\w*|tant|pendant|for\s+now|today|pour\s+le\s+moment)\b'
               r'(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:(?:failing|green)\s+)?' + CHECK_NOUN + r'\b)'
-              r'|\s+(?:by|pending|par|en\s+attente\s+(?:de|du|des|d[’\x27]))\s+'
-              r'(?:(?:review|revue|relecture)\s+(?:by|par)\s+)?' + PR_BLOCKER + r')')
+              r'|\s+(?:by|pending|par)\s+'
+              r'(?:(?:(?:a|an|code)\s+)?(?:review|revue|relecture)\s+(?:by|par)\s+)?' + PR_BLOCKER + r')')
 # A PR state that PR_HELD reads as a gate, not a hold: 'held to the same standard', 'blocked by failing checks'.
 PR_GATE = re.compile(r'(?P<gate_prefix>' + PR_NOUN + r'[^.!?]{0,80}?)\b(?:held|blocked|bloquée?s?)\b')
 # Only a gate's own words, so the rest of its sentence is still read for a hold: 'All PRs are
