@@ -117,7 +117,7 @@ class PackageTests(unittest.TestCase):
             outside = Path(directory) / "outside.txt"
             outside.write_text("Private fixture content", encoding="utf-8")
             (source / "skills/github-workflow/references/external.md").symlink_to(outside)
-            with self.assertRaisesRegex(ValueError, "Symlink"):
+            with self.assertRaisesRegex(ValueError, r"^Symlink cannot enter the package: skills/github-workflow/references/external\.md$"):
                 BUILD.build(Path(directory) / "output", root=source)
             self.assertFalse((Path(directory) / "output").exists())
 
@@ -125,7 +125,7 @@ class PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="harness-extra-") as directory:
             source = self.copied_source(directory)
             (source / "skills/github-workflow/private.bak").write_text("Private fixture content", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "Unexpected source file"):
+            with self.assertRaisesRegex(ValueError, r"^Unexpected source file: skills/github-workflow/private\.bak$"):
                 BUILD.build(Path(directory) / "output", root=source)
 
     def test_rejects_unlisted_runtime_configuration(self):
