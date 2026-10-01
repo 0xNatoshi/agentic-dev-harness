@@ -509,7 +509,8 @@ class Locations:
         location checks, so it covers an accessible root; retired duplicates and an inaccessible discovery
         parent are not diagnosed here (#54). Windows is not checked: a directory's read-only attribute does
         not prevent renames there, and Explorer sets it on customized folders.
-        recorded_mode is the target mode a receipt expects, named so one fix also satisfies its drift check.
+        recorded_mode is the target mode a receipt expects, named so one fix also satisfies its drift check;
+        a recorded mode without owner write is also satisfied by that mode with owner write added.
         """
         if os.name == "nt":
             return
@@ -519,7 +520,10 @@ class Locations:
                 mode = stat.S_IMODE(os.lstat(str(path)).st_mode)
                 hint = f"add owner write permission to {path}"
                 if path == self.target and recorded_mode is not None:
-                    hint += f" (the receipt records mode {recorded_mode:04o})"
+                    hint += f" (the receipt records mode {recorded_mode:04o}"
+                    if not recorded_mode & stat.S_IWUSR:
+                        hint += f"; rollback also accepts {recorded_mode | stat.S_IWUSR:04o}"
+                    hint += ")"
                 raise Blocked(f"{path} has no owner write permission (mode {mode:04o}), {reason}; {hint}, then {retry}",
                               {"path": str(path), "mode": f"{mode:04o}"})
 
@@ -1243,8 +1247,16 @@ def command_rollback(options) -> dict:
         # A receipt field is untrusted input: only an integer mode is quoted back in guidance.
         root = receipt["after"].get(".")
         recorded = root.get("mode") if isinstance(root, dict) else None
-        locations.require_movable(recorded if type(recorded) is int else None, "run rollback again")
-        changed = differences(receipt["after"], inventory(locations.target))
+        recorded = recorded if type(recorded) is int else None
+        locations.require_movable(recorded, "run rollback again")
+        active = inventory(locations.target)
+        origin = receipt["after"]
+        if (recorded is not None and not recorded & stat.S_IWUSR and isinstance(active, dict)
+                and isinstance(active.get("."), dict) and active["."].get("mode") == recorded | stat.S_IWUSR):
+            # An older installer could record a root without owner write, which require_movable refuses.
+            # The owner write it asks for is the only accepted difference, so its one fix also passes drift.
+            origin = {**receipt["after"], ".": {**root, "mode": recorded | stat.S_IWUSR}}
+        changed = differences(origin, active)
         if changed:
             message = "The active tree no longer matches the receipt's after-inventory; rollback refused"
             root = next((item for item in changed if item["path"] == "."), None)
@@ -1262,7 +1274,7 @@ def command_rollback(options) -> dict:
             origin_backup = work / "origin-backup" / SKILL
             copy_tree(locations.target, origin_backup)
             fsync_tree(origin_backup)
-            if differences(receipt["after"], inventory(origin_backup)):
+            if differences(origin, inventory(origin_backup)):
                 raise Refused("The copy of the installed tree does not match the after-inventory")
             incoming_path = None
             if receipt["before"] is not None:
@@ -1301,7 +1313,7 @@ def command_rollback(options) -> dict:
             "receipt": str(receipt_path),
             "journal": str(journal),
             "target": str(locations.target),
-            "origin": receipt["after"],
+            "origin": origin,
             "origin_backup": str(origin_backup),
             "incoming": receipt["before"],
             "incoming_path": str(incoming_path) if incoming_path else None,

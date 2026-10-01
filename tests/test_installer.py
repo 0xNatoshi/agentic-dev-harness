@@ -821,6 +821,28 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(rollback.returncode, 0, rollback.stderr)
 
     @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_rollback_of_a_receipt_recording_a_root_without_owner_write_accepts_the_owner_write_fix(self):
+        self.v52_layout()
+        self.target.chmod(0o750)
+        before = snapshot(self.target)
+        receipt_path = self.installed()
+        # An older installer kept a root mode without owner write in its receipt.
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["after"]["."]["mode"] = 0o550
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        self.target.chmod(0o550)
+        self.addCleanup(self.target.chmod, 0o750)
+        blocked = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(blocked, 2)
+        self.assertIn(f"add owner write permission to {self.target} (the receipt records mode 0550; rollback also accepts "
+                      "0750), then run rollback again", json.loads(blocked.stderr)["error"])
+        self.target.chmod(0o750)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual(snapshot(self.target), before)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "rolled back")
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
     def test_rollback_refusal_names_the_recorded_root_mode(self):
         self.v52_layout()
         # An explicit mode, so the recorded mode does not depend on the umask.
