@@ -19,6 +19,30 @@ Check Desktop version or `codex --version`, active config.toml, custom-role supp
 
 The preflight requires Git, gh, Git Bash/Bash with awk/grep/mktemp and **Python 3.8+ standard library**. Verify a real working python3, py -3 or python, in that detection order. If absent, installation remains unqualified until Python is installed from the [official Windows distribution](https://www.python.org/downloads/windows/) and checked again. No external jq is needed.
 
+Use the first working Python 3.8+ launcher in the same terminal as the installation commands below. Keep its executable and arguments separate; every command reuses this selection:
+
+```powershell
+$installerPython = $null
+$installerPythonArgs = @()
+$pythonCandidates = @(
+    @{ Name = 'python3'; Args = @() },
+    @{ Name = 'py'; Args = @('-3') },
+    @{ Name = 'python'; Args = @() }
+)
+foreach ($candidate in $pythonCandidates) {
+    $candidateCommand = Get-Command -Name $candidate.Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $candidateCommand) { continue }
+    $candidateArgs = $candidate.Args
+    & $candidateCommand.Source @candidateArgs -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        $installerPython = $candidateCommand.Source
+        $installerPythonArgs = $candidateArgs
+        break
+    }
+}
+if (-not $installerPython) { throw 'Python 3.8+ unavailable; install Python and repeat discovery' }
+```
+
 ## Update check — read-only, before any backup or edit
 
 Run this first. It answers "is this computer already current, and what must change?" and modifies nothing. Record one outcome per checkpoint, using these four words:
@@ -35,9 +59,9 @@ Keep the original ZIP and its separately delivered `dev-harness-v6.5.0-SHA256SUM
 ```powershell
 $packageZip = (Resolve-Path '..\dev-harness-v6.5.0-codex-claude.zip' -ErrorAction Stop).Path
 $checksums = (Resolve-Path '..\dev-harness-v6.5.0-SHA256SUMS.txt' -ErrorAction Stop).Path
-py -3 .\install.py verify-package $packageZip --checksums $checksums
+& $installerPython @installerPythonArgs .\install.py verify-package $packageZip --checksums $checksums
 if ($LASTEXITCODE -ne 0) { throw 'Package verification failed; stop the update' }
-py -3 .\install.py verify-package . --checksums $checksums
+& $installerPython @installerPythonArgs .\install.py verify-package . --checksums $checksums
 if ($LASTEXITCODE -ne 0) { throw 'Extracted package verification failed; stop the update' }
 ```
 
@@ -82,7 +106,7 @@ Use this section only when the skill checkpoint needs an update. A current or de
 
 ```powershell
 $planPath = Join-Path $backupRoot 'skill-plan.json'
-py -3 .\install.py plan --runtime codex --package $packageZip --checksums $checksums --output $planPath
+& $installerPython @installerPythonArgs .\install.py plan --runtime codex --package $packageZip --checksums $checksums --output $planPath
 if ($LASTEXITCODE -ne 0) { throw 'Planning failed; do not apply' }
 ```
 
@@ -115,7 +139,7 @@ Unknown files and authentic local history remain active unless they occupy a pac
 Stop all Claude and Codex sessions that can consume the affected skills, prevent new sessions from starting, and close handles or shells whose working directory is in the target. Run the following from an independent terminal outside every skill root, keeping consumers stopped through verification. An agent running inside a consuming session must hand over the prepared plan rather than run the mutation itself. `--maintenance-confirmed` records the operator's confirmation; it does not stop applications.
 
 ```powershell
-$applyOutput = py -3 .\install.py apply --plan $planPath --checksums $checksums --maintenance-confirmed
+$applyOutput = & $installerPython @installerPythonArgs .\install.py apply --plan $planPath --checksums $checksums --maintenance-confirmed
 if ($LASTEXITCODE -ne 0) { throw 'Apply failed; preserve the JSON error and recovery state' }
 $installed = $applyOutput | ConvertFrom-Json
 $receiptPath = $installed.receipt
@@ -138,13 +162,13 @@ $retainedInstaller = $receipt.installer_copy.path
 if (-not $retainedInstaller) { throw 'Use the verified matching package installer for this older receipt' }
 $actualHash = (Get-FileHash -LiteralPath $retainedInstaller -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
 if ($actualHash -ne $receipt.installer_copy.sha256) { throw 'Retained installer hash mismatch; stop' }
-py -3 $retainedInstaller rollback --receipt $receiptPath --maintenance-confirmed
+& $installerPython @installerPythonArgs $retainedInstaller rollback --receipt $receiptPath --maintenance-confirmed
 if ($LASTEXITCODE -ne 0) { throw 'Rollback failed; inspect the JSON error and keep recovery data' }
 ```
 
 Use the original receipt path reported by apply. Rollback refuses if the active tree, including its recorded modes, differs from the receipt's after-inventory; preserve and reconcile later edits before retrying. Otherwise it restores the verified before-state, including edited named files, duplicate copies and caches, or returns a previously absent target to absence. A deleted retained installer must be replaced by a separately verified matching package installer; do not reconstruct missing recovery evidence.
 
-For an interrupted apply, retain the original plan and run `py -3 .\install.py recover --plan $planPath --maintenance-confirmed` from the verified package. For an interrupted rollback, use `recover --receipt $receiptPath --maintenance-confirmed` with that verified installer. Reestablish the maintenance boundary first. Prefer the exact plan or receipt over `recover --runtime codex`: the recorded directories are reused even when `CODEX_HOME` or `--home` changes. Codex state is under the selected home, independently of `CODEX_HOME`; the runtime form checks only that currently resolved state directory, and `nothing to recover` is limited to the reported root. Read the reported result: recovery may restore the before-state or acknowledge an already committed transaction. Never delete `CURRENT`, the journal or recovery copies to clear an error.
+For an interrupted apply, retain the original plan and run `& $installerPython @installerPythonArgs .\install.py recover --plan $planPath --maintenance-confirmed` from the verified package. For an interrupted rollback, use `recover --receipt $receiptPath --maintenance-confirmed` with that verified installer. Reestablish the maintenance boundary first. Prefer the exact plan or receipt over `recover --runtime codex`: the recorded directories are reused even when `CODEX_HOME` or `--home` changes. Codex state is under the selected home, independently of `CODEX_HOME`; the runtime form checks only that currently resolved state directory, and `nothing to recover` is limited to the reported root. Read the reported result: recovery may restore the before-state or acknowledge an already committed transaction. Never delete `CURRENT`, the journal or recovery copies to clear an error.
 
 Success is exit 0 with JSON on stdout. Refusals such as drift use exit 1; blocked preconditions such as active consumers or links use exit 2. Exit 3 can indicate an incomplete restoration or an unexpected filesystem error: inspect the JSON and retained state before deciding the recovery action. Failed commands write JSON to stderr. A nonzero result is not a completed installation.
 
