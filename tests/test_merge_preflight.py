@@ -1118,6 +1118,20 @@ TEXT_CASES = (
          "x\r— Never\r- merge PRs"),
     Case("caught next line control em dash item Never then hyphen item merge", 2, "\x85— Never\n- merge PRs"),
     Case("caught vertical tab em dash item Never then hyphen item merge", 2, "\x0b— Never\n- merge PRs"),
+    # A whitespace control character is also invisible: removed, it leaves the dash unspaced, so the
+    # dash is still read as a hyphen, as on main.
+    Case("caught French let me merge with vertical tabs around an em dash", 2,
+         "Laisse\x0b—\x0bmoi fusionner."),
+    Case("caught French let me merge with form feeds around a horizontal bar", 2,
+         "Laisse\x0c―\x0cmoi fusionner."),
+    Case("caught French ask me first with next line controls around an em dash", 2,
+         "Avant de fusionner, demande\x85—\x85moi."),
+    Case("caught my sign-off with record separators around an em dash", 2,
+         "Merging requires my sign\x1e—\x1eoff."),
+    Case("orphan end marker with vertical tabs around an em dash", 2,
+         "<!-- github\x0b—\x0bworkflow:end -->"),
+    Case("unclosed start marker with vertical tabs around an em dash", 2,
+         "<!-- github\x0b—\x0bworkflow:start v6.2 -->\nExample <!-- github-workflow:end -->"),
     Case("caught PRs blocked by release manager's freeze policy", 2,
          "PRs are blocked by the release manager's freeze policy."),
     Case("caught PRs blocked by release manager's code freeze policy", 2,
@@ -1286,8 +1300,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 989 or len({case.name for case in ALL_CASES}) != 989:
-    raise RuntimeError("Merge fixture inventory must contain 989 unique cases")
+if len(ALL_CASES) != 995 or len({case.name for case in ALL_CASES}) != 995:
+    raise RuntimeError("Merge fixture inventory must contain 995 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

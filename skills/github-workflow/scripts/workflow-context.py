@@ -100,8 +100,9 @@ def invisible(c):
     return category == 'Cf' or (category == 'Cc' and c not in '\t\n\r') or bool(IGNORABLE.match(c))
 
 
-# Only an unspaced em dash can stand for a hyphen, so only text with one, or with a dash opening a line,
-# gets the hyphen reading: the spaced dash of the canonical marker costs no extra scan.
+# Only an unspaced em dash can stand for a hyphen, so only text with one, before or after its invisible
+# characters are removed, or with a dash opening a line, gets the hyphen reading: the spaced dash of
+# the canonical marker costs no extra scan.
 UNSPACED_EM_DASH = re.compile('\\S[\u2014\u2015]|[\u2014\u2015]\\S')
 # A dash opening a line may be a list marker, as on main, or open a wrapped continuation, so it gets
 # both readings: as ' - ' alone it would indent the line under its '- ' siblings and split their list.
@@ -129,10 +130,11 @@ def readings(text):
         table.update(dict.fromkeys(map(ord, hidden), joiner))
         folded.append(text.translate(table).replace('\r\n', '\n').replace('\r', '\n').casefold())
     # Translation, line endings and casefolding leave em dashes in place, so the NFKC pass and each
-    # translation serve both dash readings. Line starts are found in the folded readings, where every
-    # line ending is a newline and no invisible character stands before the dash.
-    hyphen = ('\u2014' in text or '\u2015' in text) and (
-        UNSPACED_EM_DASH.search(text) or any(LINE_EM_DASH.search(reading) for reading in folded))
+    # translation serve both dash readings. Dashes are also found in the folded readings, where every
+    # line ending is a newline and no invisible character stands next to the dash: a whitespace
+    # control character such as VT or NEL is invisible, so removing it can leave the dash unspaced.
+    hyphen = ('\u2014' in text or '\u2015' in text) and (UNSPACED_EM_DASH.search(text) or any(
+        UNSPACED_EM_DASH.search(reading) or LINE_EM_DASH.search(reading) for reading in folded))
     em_dashes = ('-', ' - ') if hyphen else (' - ',)
     return list(dict.fromkeys(reading.replace('\u2014', em_dash).replace('\u2015', em_dash)
                               for em_dash in em_dashes for reading in folded))
