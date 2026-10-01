@@ -1163,7 +1163,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
 
     def test_rollback_blocks_a_folder_replaced_by_a_link_its_retired_duplicate_would_return_through(self):
-        if not symlinks_supported():
+        if os.name != "nt" and not symlinks_supported():
             self.skipTest("symlinks unavailable")
         target = self.home / ".agents" / "skills" / "github-workflow"
         vendor = self.home / ".codex" / "skills" / "vendor"
@@ -1178,16 +1178,20 @@ class InstallerTests(unittest.TestCase):
         elsewhere = self.base / "elsewhere"
         elsewhere.mkdir()
         vendor.rmdir()
-        os.symlink(elsewhere, vendor, target_is_directory=True)
+        if os.name == "nt":
+            # A junction needs no symlink privilege.
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(vendor), str(elsewhere)], check=True, capture_output=True)
+        else:
+            os.symlink(elsewhere, vendor, target_is_directory=True)
         try:
             rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
             self.assert_refused(rollback, 2)
-            self.assertIn(f"{vendor} is a link or junction, so the retired duplicate {legacy} would be restored outside "
+            self.assertIn(f"{vendor} is a link or junction, so the retired duplicate {legacy} could be restored outside "
                           f"{vendor.parent}; replace it with a directory or remove it, then run rollback again",
                           json.loads(rollback.stderr)["error"])
             self.assertEqual(list(elsewhere.iterdir()), [])
         finally:
-            # A Windows directory symlink is removed as a directory.
+            # A Windows junction is removed as a directory, without touching its target.
             if os.name == "nt":
                 os.rmdir(vendor)
             else:
@@ -1199,6 +1203,40 @@ class InstallerTests(unittest.TestCase):
         rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
         self.assertEqual(rollback.returncode, 0, rollback.stderr)
         self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+
+    def test_rollback_restores_a_retired_duplicate_for_a_receipt_recording_a_root_without_owner_write(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "vendor" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt_path = Path(json.loads(result.stdout)["receipt"])
+        # As an older installer run by root could record it; rollback accepts the root with owner write added.
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["after"]["."]["mode"] &= ~stat.S_IWUSR
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_a_failed_recover_the_journal_cannot_record_still_reports_its_cause_and_retry(self):
+        before, parked = self.crash_after_parking()
+        transaction = parked.parent.parent
+        # The journal and the undo both write in the transaction directory, so both fail.
+        transaction.chmod(0o500)
+        try:
+            failed = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+            self.assert_refused(failed, 3)
+            error = json.loads(failed.stderr)["error"]
+            self.assertRegex(error, r"^Restoration incomplete: .*Permission denied.* \(the journal could not record it: "
+                                    r".*Permission denied.*\)\. Recovery data kept in ")
+            self.assertTrue(error.endswith(f"{transaction}; fix the cause and run `recover` again"), error)
+        finally:
+            transaction.chmod(0o755)
+        self.assertTrue((self.state() / "CURRENT").exists())
+        self.recover()
+        self.assertEqual(snapshot(self.target), before)
 
     def test_a_failed_undo_the_journal_cannot_record_still_reports_its_cause_and_recover(self):
         spec = importlib.util.spec_from_file_location("harness_installer_undo", self.installer)

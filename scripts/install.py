@@ -1086,22 +1086,27 @@ def finish(state: Path) -> None:
     sync_directory(state)
 
 
+def record_undo_error(operation: Operation, error: Exception) -> str:
+    """Journal why an undo failed; when the journal cannot record it either, say so in the report instead.
+
+    The same cause (a full disk, an unwritable state directory) can stop both, and the report must still
+    name the original failure and `recover` (#54)."""
+    operation.record["undo_error"] = str(error)
+    try:
+        write_json(operation.path, operation.record)
+    except OSError as unrecorded:
+        return f" (the journal could not record it: {unrecorded})"
+    return ""
+
+
 def undo_or_report(operation: Operation, failure: object) -> None:
     """Restore the origin state after failure, or record why not and report an incomplete restoration."""
     try:
         operation.undo()
     except (Failure, OSError) as error:
-        operation.record["undo_error"] = str(error)
-        journal = ""
-        try:
-            write_json(operation.path, operation.record)
-        except OSError as unrecorded:
-            # The same cause (a full disk, an unwritable state directory) can stop the undo and the journal:
-            # the original failure and the recovery instruction are still reported (#54).
-            journal = f" (the journal could not record it: {unrecorded})"
-        raise Incomplete(f"{failure}; restoration incomplete: {error}{journal}. Recovery data kept in "
-                         f"{operation.path.parent}; run `recover` with the same --plan or --receipt before any "
-                         "other step", getattr(error, "details", None))
+        raise Incomplete(f"{failure}; restoration incomplete: {error}{record_undo_error(operation, error)}. Recovery "
+                         f"data kept in {operation.path.parent}; run `recover` with the same --plan or --receipt before "
+                         "any other step", getattr(error, "details", None))
 
 
 def attempt(operation: Operation, state: Path) -> None:
@@ -1375,15 +1380,17 @@ def command_rollback(options) -> dict:
                 parent = original.parent
             if parent is not None:
                 restoring.append((parent, f"so the retired duplicate {original} cannot be moved back into it"))
-            # Discovery never follows links, so a folder replaced by a link after apply would send the copy
-            # outside its root. Only the root and its ancestors are checked by check().
-            root = next((root for root in locations.roots if root in original.parents), None)
-            for part in [parent, *parent.parents] if parent is not None and root is not None else []:
-                if root not in part.parents:
+            # Discovery never follows links, so a folder replaced by a link after apply could send the copy
+            # outside its root. check() refuses links only at the selected root and above it.
+            skill_root = next((path for path in locations.roots if path in original.parents), None)
+            if parent is None or skill_root is None:
+                continue
+            for part in [parent, *parent.parents]:
+                if skill_root not in part.parents:
                     break
                 if is_link(part):
-                    raise Blocked(f"{part} is a link or junction, so the retired duplicate {original} would be restored "
-                                  f"outside {root}; replace it with a directory or remove it, then run rollback again",
+                    raise Blocked(f"{part} is a link or junction, so the retired duplicate {original} could be restored "
+                                  f"outside {skill_root}; replace it with a directory or remove it, then run rollback again",
                                   {"path": str(part)})
         locations.require_movable(recorded, "run rollback again", restoring)
         active = inventory(locations.target, "run rollback again")
@@ -1534,10 +1541,9 @@ def command_recover(options) -> dict:
         try:
             operation.undo()
         except (Failure, OSError) as error:
-            operation.record["undo_error"] = str(error)
-            write_json(operation.path, operation.record)
-            raise Incomplete(f"Restoration incomplete: {error}. Recovery data kept in {operation.path.parent}; "
-                             "fix the cause and run `recover` again", getattr(error, "details", None))
+            raise Incomplete(f"Restoration incomplete: {error}{record_undo_error(operation, error)}. Recovery data kept "
+                             f"in {operation.path.parent}; fix the cause and run `recover` again",
+                             getattr(error, "details", None))
         result = {"result": "restored", "operation": record["operation"], "journal": str(journal), "target": record["target"]}
         for key in ("parked_drift", "moved_drift"):
             if key in operation.record:
