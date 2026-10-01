@@ -209,9 +209,14 @@ def write_json(path: Path, value: object) -> None:
     write_durable(path, (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
-def read_json(path: Path) -> dict:
+def read_json(path: Path, retry: str | None = None) -> dict:
+    """With retry, a directory on the way to path that cannot be searched blocks with its fix (#54)."""
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except PermissionError as error:
+        if retry is not None:
+            searchable_part(Path(os.path.abspath(path)), retry)
+        raise Refused(f"Cannot read {path}: {error}")
     except (OSError, ValueError) as error:
         raise Refused(f"Cannot read {path}: {error}")
     if not isinstance(value, dict):
@@ -249,6 +254,23 @@ def inaccessible(path: Path, action: str, retry: str = "plan again") -> Blocked:
     shown = f" (mode {mode})" if mode else ""
     return Blocked(f"{path} cannot be {action}{shown}, so the installer cannot inspect what it holds; "
                    f"add owner read and search (execute) permission to {path}, then {retry}", {"path": str(path), "mode": mode})
+
+
+def searchable_part(path: Path, retry: str) -> Path | None:
+    """The deepest existing path on the way to path, or None when none exists.
+
+    Top-down with lstat, as in check(): a directory that cannot be searched is named with its fix,
+    never taken for an absent one."""
+    found = None
+    for part in reversed([path, *path.parents]):
+        try:
+            os.lstat(str(part))
+        except (FileNotFoundError, NotADirectoryError):
+            break
+        except PermissionError:
+            raise inaccessible(part.parent, "searched", retry) from None
+        found = part
+    return found
 
 
 def inventory(root: Path, retry: str | None = None) -> dict | None:
@@ -1293,7 +1315,8 @@ def staging_problems(staged: dict, package_files: dict, before: dict, classifica
 
 def command_rollback(options) -> dict:
     given = Path(os.path.abspath(options.receipt))
-    receipt = read_json(given)
+    # The receipt is read before Locations.check(), so an unsearchable directory above it is diagnosed here.
+    receipt = read_json(given, "run rollback again")
     if receipt.get("receipt_format") != 1:
         raise Refused("Unsupported receipt format")
     locations = Locations(receipt["runtime"], receipt["home"], receipt.get("config_root"))
@@ -1304,7 +1327,7 @@ def command_rollback(options) -> dict:
     receipt_path = transaction / "receipt.json"
     if transaction.parent != locations.state:
         raise Refused("The receipt's transaction is not in the runtime's installer state directory")
-    if not same_path(str(given), str(receipt_path)) and canonical(read_json(receipt_path)) != canonical(receipt):
+    if not same_path(str(given), str(receipt_path)) and canonical(read_json(receipt_path, "run rollback again")) != canonical(receipt):
         raise Refused(f"The receipt differs from the canonical receipt {receipt_path}; roll back with that one")
     if receipt.get("state") != "installed":
         raise Refused(f"The receipt state is {receipt.get('state')!r}; only an installed receipt can be rolled back")
@@ -1323,20 +1346,11 @@ def command_rollback(options) -> dict:
         # Each retired duplicate returns to its original root, or below its nearest existing ancestor (#54).
         # The retired copy itself is not checked: its inventory records its mode, so one that lost owner
         # write no longer matches and the verified backup is restored instead.
-        # Top-down with lstat, as in check(): a directory that cannot be searched is named, never taken for an
-        # absent one, and the parent the duplicate returns through must be searchable as well as writable.
+        # The parent the duplicate returns through must be searchable as well as writable.
         restoring = []
         for duplicate in receipt["duplicates"]:
             original = Path(duplicate["path"])
-            parent = None
-            for path in reversed([original, *original.parents]):
-                try:
-                    os.lstat(str(path))
-                except (FileNotFoundError, NotADirectoryError):
-                    break
-                except PermissionError:
-                    raise inaccessible(path.parent, "searched", "run rollback again") from None
-                parent = path
+            parent = searchable_part(original, "run rollback again")
             if parent == original:
                 parent = original.parent
             if parent is not None:
@@ -1439,7 +1453,7 @@ def mark_rolled_back(record: dict, tolerant: bool = False) -> bool:
 def command_recover(options) -> dict:
     if options.plan or options.receipt:
         # The recorded config root, so recovery finds the state whatever the environment now says.
-        recorded = read_json(Path(options.plan or options.receipt))
+        recorded = read_json(Path(options.plan or options.receipt), "run recover again")
         locations = Locations(recorded["runtime"], recorded["home"], recorded.get("config_root"))
     elif options.runtime:
         locations = Locations(options.runtime, options.home)

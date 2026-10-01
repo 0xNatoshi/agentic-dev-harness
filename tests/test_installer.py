@@ -1048,6 +1048,33 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(snapshot(self.target), after)
 
     @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_a_directory_above_the_receipt_that_cannot_be_searched_blocks_rollback_and_recover(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        receipt, after = receipt_path.read_bytes(), snapshot(self.target)
+        commands = ((("rollback", "--receipt", receipt_path, "--maintenance-confirmed"), "run rollback again"),
+                    (("recover", "--receipt", receipt_path, "--maintenance-confirmed"), "run recover again"))
+        # The configuration directory holds both the skills and the installer state; the receipt is read first.
+        for path in (self.target.parent.parent, self.state()):
+            mode = path.stat().st_mode & 0o7777
+            for command, retry in commands:
+                with self.subTest(path=str(path), command=command[0]):
+                    path.chmod(0o600)
+                    try:
+                        result = self.run_installer(*command)
+                        self.assert_refused(result, 2)
+                        error = json.loads(result.stderr)
+                        self.assertIn(f"{path} cannot be searched (mode 0600), so the installer cannot inspect what it "
+                                      f"holds; add owner read and search (execute) permission to {path}, then {retry}",
+                                      error["error"])
+                        self.assertEqual(error["details"], {"path": str(path), "mode": "0600"})
+                    finally:
+                        path.chmod(mode)
+                    self.assertEqual(receipt_path.read_bytes(), receipt)
+                    self.assertFalse((self.state() / "CURRENT").exists())
+                    self.assertEqual(snapshot(self.target), after)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
     def test_a_second_codex_root_that_cannot_be_searched_or_listed_blocks_plan(self):
         self.v52_layout(self.home / ".agents" / "skills" / "github-workflow")
         second = self.home / ".codex" / "skills"
