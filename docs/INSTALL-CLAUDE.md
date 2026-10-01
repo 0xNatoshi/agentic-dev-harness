@@ -20,6 +20,25 @@ Confirm actual loading with `/context` in a local Code session and record the Cl
 
 The preflight requires Git, gh, Git Bash/Bash, awk/grep/mktemp and **Python 3.8+ standard library**. Verify python3, py -3 or python launches that version; the script tries them in this order. Missing Python leaves installation unqualified: use the [official Windows distribution](https://www.python.org/downloads/windows/), then check again. No external jq is required.
 
+## Update check — read-only, before any backup or edit
+
+Run this first. It answers "is this computer already current, and what must change?" and modifies nothing. Record one outcome per checkpoint, using these four words:
+
+- **current** — matches the package.
+- **personalized** — matches, plus deliberate local additions or preferences.
+- **outdated** — a package rule is absent, older or altered.
+- **blocked** — unreadable, or not safely ownable.
+
+Report the outcome per checkpoint; do not collapse them into one verdict.
+
+1. **Package** — verify the extracted ZIP against `SHA256SUMS.txt` and every entry in `MANIFEST.json`, and record the package version. A mismatch is `blocked`, and no later checkpoint is trustworthy.
+2. **Instruction files** — compare `$claudeHome\CLAUDE.md` with `configurations/claude-desktop/CLAUDE.md`, and `$claudeHome\AGENTS.md` with `configurations/claude-desktop/AGENTS.md`. Keep exactly one relative `@AGENTS.md` import resolving to its neighbor, plus unrelated imports. Preferences merged on purpose are `personalized`.
+3. **`github-workflow` skill** — resolve `$claudeHome\skills\github-workflow`. A real directory is compared file by file with `skills/github-workflow/`. A link or junction is **not** replaced: resolve its canonical directory, record the link target and its owner, and compare there. One canonical directory can serve several applications at once and is then checked once for all of them. Evidence is the file count, every SHA-256 and the three license templates; extra `.bak` or history files are retained customizations.
+4. **Claude imports and registration** — confirm the imports that load in the effective profile and that `/github-workflow` resolves. `agents/openai.yaml` and the Codex role TOMLs do not configure Claude subagents.
+5. **Loading** — in a new local Code session, `/context` must show the effective CLAUDE.md and establish the imported AGENTS.md. File presence or import text does not prove loading.
+
+When every checkpoint is `current` or `personalized`, no package update is needed: report any deliberate local differences, change nothing and skip the remaining sections. Otherwise record only the `outdated` checkpoints as update candidates, preserving local customizations. A `blocked` checkpoint needs its missing evidence or ownership resolved before changing that target; a blocked package check stops the whole update. Back up the confirmed edit targets before using the remaining sections.
+
 ## Back up and compare versions
 
 Before editing, create private `%LOCALAPPDATA%\dev-harness\backups\v6.5.0-claude-<timestamp>` and record its absolute path:
