@@ -500,6 +500,33 @@ class Locations:
         self.target = self.skills / SKILL
         self.state = self.skills.parent / "dev-harness-install"
 
+    def require_movable(self, recorded_mode: int | None = None, retry: str = "plan again") -> None:
+        """Block before any rename when the selected skill directory or its skill root lacks owner write permission.
+
+        A conservative precondition of this installer, not a full access check: POSIX refuses to move a
+        directory to another parent without write permission on it, or to rename inside a root without
+        write permission there, so apply and rollback would stop at their first rename. It runs after the
+        location checks, so it covers an accessible root; retired duplicates and an inaccessible discovery
+        parent are not diagnosed here (#54). Windows is not checked: a directory's read-only attribute does
+        not prevent renames there, and Explorer sets it on customized folders.
+        recorded_mode is the target mode a receipt expects, named so one fix also satisfies its drift check;
+        a recorded mode without owner write is also satisfied by that mode with owner write added.
+        """
+        if os.name == "nt":
+            return
+        for path, reason in ((self.skills, f"so {SKILL} cannot be moved in or out of it"),
+                             (self.target, "so it cannot be moved to another directory")):
+            if exists(path) and not os.lstat(str(path)).st_mode & stat.S_IWUSR:
+                mode = stat.S_IMODE(os.lstat(str(path)).st_mode)
+                hint = f"add owner write permission to {path}"
+                if path == self.target and recorded_mode is not None:
+                    hint += f" (the receipt records mode {recorded_mode:04o}"
+                    if not recorded_mode & stat.S_IWUSR:
+                        hint += f"; rollback also accepts {recorded_mode | stat.S_IWUSR:04o}"
+                    hint += ")"
+                raise Blocked(f"{path} has no owner write permission (mode {mode:04o}), {reason}; {hint}, then {retry}",
+                              {"path": str(path), "mode": f"{mode:04o}"})
+
     def describe(self) -> dict:
         return {
             "runtime": self.runtime,
@@ -611,6 +638,7 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
     """Return the plan and the verified package it describes."""
     locations = Locations(runtime, home, config)
     locations.check()
+    locations.require_movable()
     package = load_package(package_source)
     verification = verify_package(package, checksums)
     package_files = package.skill_files()
@@ -1208,15 +1236,35 @@ def command_rollback(options) -> dict:
         raise Refused(f"The receipt differs from the canonical receipt {receipt_path}; roll back with that one")
     if receipt.get("state") != "installed":
         raise Refused(f"The receipt state is {receipt.get('state')!r}; only an installed receipt can be rolled back")
+    if not isinstance(receipt.get("after"), dict):
+        raise Refused("The receipt has no after-inventory; rollback refused")
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check()
     with Lock(locations.state):
         if exists(locations.state / "CURRENT"):
             raise Blocked(f"An interrupted transaction is recorded in {locations.state / 'CURRENT'}; run `recover` first")
-        changed = differences(receipt["after"], inventory(locations.target))
+        # A receipt field is untrusted input: only an integer mode is quoted back in guidance.
+        root = receipt["after"].get(".")
+        recorded = root.get("mode") if isinstance(root, dict) else None
+        recorded = recorded if type(recorded) is int else None
+        locations.require_movable(recorded, "run rollback again")
+        active = inventory(locations.target)
+        origin = receipt["after"]
+        if (recorded is not None and not recorded & stat.S_IWUSR and isinstance(active, dict)
+                and isinstance(active.get("."), dict) and active["."].get("mode") == recorded | stat.S_IWUSR):
+            # An older installer could record a root without owner write, which require_movable refuses.
+            # The owner write it asks for is the only accepted difference, so its one fix also passes drift.
+            origin = {**receipt["after"], ".": {**root, "mode": recorded | stat.S_IWUSR}}
+        changed = differences(origin, active)
         if changed:
-            raise Refused("The active tree no longer matches the receipt's after-inventory; rollback refused", changed)
+            message = "The active tree no longer matches the receipt's after-inventory; rollback refused"
+            root = next((item for item in changed if item["path"] == "."), None)
+            expected, actual = (root["expected"], root["actual"]) if root else (None, None)
+            if (isinstance(expected, dict) and isinstance(actual, dict) and expected.get("type") == actual.get("type")
+                    and type(expected.get("mode")) is int and type(actual.get("mode")) is int):
+                message += f"; restore mode {expected['mode']:04o} on {locations.target} (now {actual['mode']:04o})"
+            raise Refused(message, changed)
         work = transaction / ("rollback-" + uuid.uuid4().hex[:8])
         journal = work / "journal.json"
         work.mkdir(parents=True)
@@ -1226,7 +1274,7 @@ def command_rollback(options) -> dict:
             origin_backup = work / "origin-backup" / SKILL
             copy_tree(locations.target, origin_backup)
             fsync_tree(origin_backup)
-            if differences(receipt["after"], inventory(origin_backup)):
+            if differences(origin, inventory(origin_backup)):
                 raise Refused("The copy of the installed tree does not match the after-inventory")
             incoming_path = None
             if receipt["before"] is not None:
@@ -1265,7 +1313,7 @@ def command_rollback(options) -> dict:
             "receipt": str(receipt_path),
             "journal": str(journal),
             "target": str(locations.target),
-            "origin": receipt["after"],
+            "origin": origin,
             "origin_backup": str(origin_backup),
             "incoming": receipt["before"],
             "incoming_path": str(incoming_path) if incoming_path else None,

@@ -173,6 +173,21 @@ Success is exit 0 with JSON on stdout. Refusals such as drift use exit 1; blocke
 
 The legacy `$claudeHome\commands\github-workflow.md` is reported by the installer but is not removed. Retire it only under a separate verified ownership and backup decision after skill activation; otherwise record its owner and reevaluation trigger.
 
+### Legacy receipt with a root lacking owner write
+
+On POSIX, an older receipt can record a selected skill directory without owner write permission. Its retained installer is frozen at installation time; the matching old package used when no installer copy was retained is also unchanged by extracting a newer package. Both historical routes expect the recorded mode. If only owner write was added to that directory, returning it to the mode recorded by the receipt allows the historical route to run in the original permission context. Preserve all later content edits and reconcile other inventory drift first; never edit the receipt or its inventories to make a check pass.
+
+If the verified current installer asks for owner write and explicitly supports that single change on a legacy receipt, use that installer for this exceptional rollback. Keep consumers stopped and preserve the canonical receipt, its original retained installer and hash, backups and journals. Verify the corrected package ZIP and extracted files with the package-check commands above and its separately delivered checksums; the version number alone does not identify the corrected build. Use its extracted directory as the current directory and keep the original canonical receipt path in `$receiptPath`.
+
+Add only the owner-write permission requested for the selected skill directory. The corrected installer accepts exactly the recorded root mode with owner write added; it still refuses other mode, content or inventory changes. Run it in a permission context that can perform the original directory moves and restoration. The mode exception does not supply missing operating-system permissions, and these steps do not authorize switching accounts or elevating privileges. Then run:
+
+```powershell
+& $installerPython @installerPythonArgs .\install.py rollback --receipt $receiptPath --maintenance-confirmed
+if ($LASTEXITCODE -ne 0) { throw 'Legacy rollback failed; inspect the JSON error and preserve recovery state' }
+```
+
+Do not replace the historical installer copy, change its recorded hash, regenerate the receipt or reapply the package to bypass a refusal. If this exceptional rollback is interrupted, use the same verified corrected installer for `recover --receipt $receiptPath --maintenance-confirmed`, with consumers still stopped. Preserve `CURRENT` and all recovery data until the reported restoration is verified.
+
 ## Verify loading and worktree boundaries
 
 - Verify manifest, final inventory/counts, copied hashes and merge diffs. Check @AGENTS.md, other imports, references and three license templates. In a **new local Code session**, `/context` must show the correct CLAUDE.md and `/memory` or context view must establish the imported AGENTS.md. Probe a distinctive rule read-only without opening the file ad hoc, and check `/github-workflow`. File existence/import text does not prove loading. If the session cannot establish the imported source/content, report **loading unverified** and require a new session or diagnosis rather than claiming full qualification. Read merge/review/closure rules.
