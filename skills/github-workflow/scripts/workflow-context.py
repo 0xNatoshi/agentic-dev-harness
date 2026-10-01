@@ -2,6 +2,7 @@
 """Read-only origin binding and conservative suspension checks (Python 3.8+)."""
 import collections
 import datetime
+import functools
 import json
 import re
 import subprocess
@@ -142,6 +143,12 @@ APPROVAL_WORD = (r'\b(?:approv\w*|agreement|consent\w*|permission|authori[sz]\w*
                  r'|(?:(?:my|our|your|their|his|her|the|a|mon|ma|ton|notre|votre|le|un)\s+|[’\x27]s\s+)go'
                  r'|go(?![\s-]+(?:to|home|back)\b)'
                  r'|(?:my|our|mon|ma|mes|notre|nos)\s+(?:own\s+)?(?:reviews?|ok(?:ay)?|relecture|revue)'
+                 # 'until my return', but not 'our return codes' or 'our returns policy'. Units are
+                 # whitespace-collapsed, so one space before the pronoun is enough. The lookahead
+                 # first keeps the lookbehinds off every other position.
+                 r'|(?=(?:my|our|mon|notre)\s+re)(?:(?<=\buntil\s)|(?<=\btill\s)|(?<=\bafter\s)|(?<=\bpending\s)|(?<=\bbefore\s)|(?<=\bupon\s)'
+                 r'|(?<=jusqu’à\s)|(?<=jusqu\x27à\s)|(?<=\bavant\s)|(?<=\baprès\s)|(?<=\bdès\s))'
+                 r'(?:my|our|mon|notre)\s+(?:return|retour)(?![\s-]*(?:codes?|values?|types?|polic\w*|statements?|modules?)\b)'
                  r'|(?:i|we)\s+(?:say|give)\s+(?:so|ok(?:ay)?))\b')
 # Someone who decides: 'until I say go', 'until you hear from me', 'until we approve'.
 # 'Wait for our CI' and 'We hold PRs that fail CI' name no decision.
@@ -153,33 +160,117 @@ INTEGRATION_WORD = re.compile(r'\b(?:integrat\w*|lands?|landed|landing|ships?|sh
 # The scope must sit in the same clause, near the verb: 'integrate any PR', 'landing on main',
 # 'PRs are shipped', 'Hold all PRs'. A PR named in an earlier clause does not make 'its own
 # integration' a merge, nor 'no approval needed when they hold' a hold on it.
-# Who decides a reserved merge: the speaker, or a named human role.
-DECIDER = (r'(?:me|us|moi|nous|(?:the\s+|a\s+)?(?:(?:repo(?:sitory)?|project)(?:[’\x27]s)?\s+)?(?:owners?|maintainers?|admins?|humans?)'
+# Who decides a reserved merge: the speaker, or a named human role. The base lists are shared
+# with POSSESSOR so that 'the owner decides' and 'the owner's call' name the same people.
+DECIDER_BASE = r'(?:owner|maintainer|admin|human)'
+ROLE_BASE = r'(?:release\s+manager|reviewer|(?:tech|team)\s+lead|code\s+owner)'
+# A role word naming a document, tool or place ('Consult the reviewer guide', 'Merge via the
+# admin panel', 'Merges go through the reviewer queue') names no one who decides.
+TOOL_NOUN = (r'(?!\s+(?:guide\w*|checklists?|docs?|documentation|notes?|templates?|bots?|tools?|files?|panels?|queues?'
+             r'|channels?|dashboards?|ui|pages?|settings?|buttons?|lists?)\b)')
+DECIDER = (r'(?:me|us|moi|nous|(?:the\s+|a\s+|an\s+|your\s+)?(?:(?:repo(?:sitory)?|project)(?:[’\x27]s)?\s+)?' + DECIDER_BASE + r's?'
            r'|(?:le\s+|la\s+|les\s+|un\s+|l[’\x27])?(?:propriétaires?|mainteneu(?:r|rs|se|ses)|humains?))\b(?![’\x27]s\b)')
+# Roles that decide when a merge is reserved or asked for: 'Merging is reserved for the release
+# manager', 'Ask a reviewer before merging'. Kept out of DECIDER so 'Merge once a reviewer approves'
+# stays an ordinary review gate. A plural possessive ('the reviewers’ guide') names a thing.
+ROLE = (r'(?:(?:the|a|an|your|le|la|les|un|une)\s+)?(?:' + ROLE_BASE + r's?'
+        r'|relecteu(?:r|rs|se|ses)|relectrices?|responsables?\s+des?\s+(?:versions?|releases?|livraisons?))\b'
+        r'(?![’\x27](?:s\b|\s))' + TOOL_NOUN)
+DECIDER_ROLE = r'(?:' + DECIDER + r'|' + ROLE + r')'
+# Who merges a PR in the passive voice: 'PRs are merged by the owner'. 'Merged by a maintainer
+# after review' or 'by the release manager on Fridays' describes an ordinary process instead.
+OWNER_BY = (r'(?:me|us|moi|nous|(?:the\s+|your\s+)?(?:(?:repo(?:sitory)?|project)(?:[’\x27]s)?\s+)?owners?'
+            r'|(?:le\s+|la\s+|les\s+|l[’\x27])?propriétaires?)\b(?![’\x27]s\b)' + TOOL_NOUN)
 # Who approves or is asked: 'Merge once the owner approves', 'Ping me before merging'.
 DECIDER_OR_I = r'(?:i|we|' + DECIDER + r')'
+# Who may be the only one to merge: 'Only I may merge', 'Nobody but the owner merges'.
+# '(?!-)' leaves 'Only human-written PRs' to its noun.
+RESERVER = r'(?:(?:i|we)\b|' + DECIDER_ROLE + r')(?!-)'
+# Whose call a merge is: 'my call', 'the owner's decision', 'the tech lead's call'.
+POSSESSOR = (r'(?:my|our|mon|ma|notre|(?:the\s+)?(?:(?:repo(?:sitory)?|project)(?:[’\x27]s)?\s+)?'
+             r'(?:' + DECIDER_BASE + r'|' + ROLE_BASE + r')s?[’\x27](?:s\b)?)')
 DECIDER_ACT = r'(?:approv\w*|say\s+(?:so|go|ok)|gives?\s+(?:the\s+)?(?:go|ok|green\s+light)|signs?\s+off|confirms?)\b'
-ASK_DECIDER = (r'(?:\b(?:ask|consult|check\s+with|confirm\s+with|ping|talk\s+to)\s+' + DECIDER
+ASK_DECIDER = (r'(?:\b(?:ask|consult|check\s+with|confirm\s+with|ping|talk\s+to|consulte[rz]?)\s+' + DECIDER_ROLE
                + r'|\b(?:demande[rz]?|consulte[rz]?|préviens|prévenez)-(?:moi|nous)\b|\bme\s+(?:demander|consulter|prévenir)\b'
-               + r'|\b(?:demande[rz]?|consulte[rz]?)\s+(?:au|aux|à\s+l[’\x27]?|à\s+la|à\s+un)\s*' + DECIDER + r')')
+               + r'|\b(?:demande[rz]?|consulte[rz]?)\s+(?:au|aux|à\s+l[’\x27]?|à\s+la|à\s+un)\s*' + DECIDER_ROLE + r')')
+# 'ask me first'; a bare 'before' only when it ends the clause or cell ('| ask me before |').
+FIRST_WORD = r'(?:first|beforehand|d[’\x27]abord|avant|before(?=\s*(?:$|[|,;.)])))\b'
 SCOPE_NEAR = 40
 NOT_BEFORE = re.compile(r'\b(?:not|never|n[’\x27]t|no\s+need\s+to|pas|jamais)\s+(?:\w+\s+)?$')
+CHECK_NOUN = r'(?:ci|checks?|tests?|builds?|lint\w*|status\s+checks?)'
+# 'PRs are held to the same standard' names no hold, but 'held in the queue until I approve',
+# 'held up' and 'held to my approval' do: only the standard idiom (and 'held accountable' or
+# 'held responsible') is excluded, and only when
+# no condition or speaker follows in its sentence ('held to a high bar until I approve').
+# The window is bounded so the lookahead stays linear.
+HELD_IDIOM = (r'(?:\s+(?:accountable|responsible)\b|\s+to\s+(?:(?:the|a|an|our|same|high\w*|strict\w*)\s+){0,3}'
+              r'(?:standards?|bar|rules?|conventions?|quality|expectations?)\b)'
+              r'(?![^.!?]{0,120}?(?:\b(?:until|till|pending|unless|before|wait\w*|jusqu\w*)\b|' + FIRST_PERSON + r'))')
 HOLD_VERB = re.compile(r'\b(?:hold\w*|paus\w*|freez\w*|frozen|wait\w*|suspend\w*|attend\w*|gel\w*|block\w*|bloqu\w*'
-                       r'|park\w*|unmerged)\b')
+                       r'|park\w*|held(?!' + HELD_IDIOM + r')|unmerged)\b')
 # A held pull request or frozen branch needs no merge word or approver: 'All PRs are on hold.',
 # 'Hold PRs.', 'Every PR needs my approval.', 'The main branch is frozen.'
 PR_NOUN = r'\b(?:prs?|mrs?|pull[\s-]+requests?|merge[\s-]+requests?|demandes?\s+de\s+fusion)\b'
 # 'PRs are not on hold' and 'The main branch is not frozen' lift the state instead.
 NOT_HELD = r'(?!(?:not|no|never|pas|plus|jamais)\b)'
+PR_STATE = (r'(?:on\s+hold|on\s+pause|en\s+pause|paused|suspended|frozen|parked|held(?!\s+(?:to|in|against|accountable|responsible|up)\b)'
+            r'|en\s+attente|suspendue?s?|gelée?s?)')
+# 'All PRs are blocked' holds them; 'Draft PRs are blocked', 'PRs are blocked by failing checks'
+# or '... until CI passes' describe a gate. So the PRs open the clause, with at most a
+# quantifier, and the state ends it or a time or event condition that is not a check follows.
+# After punctuation, only a failure explanation that ends the sentence describes a gate:
+# 'PRs are blocked: failing checks.' but not 'All PRs are blocked: CI is down.'
+FAILURE_EXPLANATION = (r'\s*(?:the\s+)?(?:(?:failing|failed|red)\s+' + CHECK_NOUN + r'|' + CHECK_NOUN
+                       + r'\s+(?:fail|fails|failed|(?:are|is)\s+(?:red|failing)))\s*(?:\)\s*)?$')
+PR_BLOCKED = (r'^\W*(?:(?:all|every|any|the|open|pending|toutes|tous|les)\s+){0,2}' + PR_NOUN
+              + r'\s+(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:(?:now|currently|temporarily|all|actuellement|désormais)\s+)?'
+              r'(?:blocked|bloquée?s?)\b(?=\s*$|\s*[,;:)](?!' + FAILURE_EXPLANATION + r')'
+              r'|\s+(?:until|till|while|jusqu\w*|tant|pendant|for\s+now|today|pour\s+le\s+moment)\b'
+              r'(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:(?:failing|green)\s+)?' + CHECK_NOUN + r'\b))')
+# A PR state that PR_HELD reads as a gate, not a hold: 'held to the same standard', 'blocked by failing checks'.
+PR_GATE = re.compile(r'(?P<gate_prefix>' + PR_NOUN + r'[^.!?]{0,80}?)\b(?:held|blocked|bloquée?s?)\b')
+# Only a gate's own words, so the rest of its sentence is still read for a hold: 'All PRs are
+# blocked by the maintainer until further notice.' keeps 'maintainer until further notice'.
+# The prefix may itself contain an owner hold, so the substitution must preserve it.
+GATE_WORDS = re.compile(PR_GATE.pattern + r'(?:\s+(?:until|till|by|for|on)\s+(?:the\s+)?'
+                        r'(?:(?:failing|failed|red|required)\s+)?' + CHECK_NOUN
+                        + r'(?:\s+(?:pass\w*|(?:are|is)\s+green))?)?'
+                        r'|\b(?:the\s+)?' + CHECK_NOUN + r'\s+(?:fail\w*|(?:are|is)\s+(?:red|failing))')
+# A lifted state: 'PRs are not on hold', 'PRs aren't on hold', 'PRs are no longer on hold'.
+LIFTED = r'(?:(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:not|no\s+longer|pas|plus)|(?:aren|isn)[’\x27]t)\s+'
+# Imperatives open their clause, after an optional softener: 'Please freeze main.'
+IMPERATIVE = r'^\W*(?:(?:please|now|kindly|temporarily)\s+)?'
 PR_HELD = re.compile(
-    PR_NOUN + r'(?:\s+\w+){0,2}?\s+(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:' + NOT_HELD + r'\w+\s+)?'
-    r'(?:on\s+hold|paused|suspended|frozen|en\s+attente|suspendue?s?|gelée?s?)\b'
-    r'|^\W*(?:hold|pause|freeze|suspend)\s+(?:all\s+|every\s+|the\s+|any\s+)?(?:open\s+|pending\s+)?' + PR_NOUN
+    PR_NOUN + r'(?:\s+\w+){0,2}?\s+'
+    # Also a state after a lifted one: 'PRs are not on hold but frozen', 'PRs aren't on hold
+    # anymore, but they are frozen'.
+    + r'(?:' + LIFTED + PR_STATE + r'(?:\s+(?:anymore|any\s+longer))?,?\s+(?:but|mais)\s+'
+    r'(?:(?:they\s+are|they[’\x27]re|ils\s+sont|elles\s+sont|now|still|rather|instead|are|is|sont|plutôt|désormais)\s+){0,2}'
+    r'|(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:' + NOT_HELD + r'\w+\s+)?)' + PR_STATE + r'\b'
+    + r'|' + PR_BLOCKED
+    + r'|' + IMPERATIVE + r'(?:hold|pause|freeze|suspend)\s+(?:all\s+|every\s+|the\s+|any\s+)?(?:open\s+|pending\s+)?' + PR_NOUN
+    # Bare 'main' as the object: 'Freeze main until I approve', 'Hold main.'; 'Freeze the main
+    # lockfile' names something else, so a condition word or the end of the clause must follow.
+    + r'|' + IMPERATIVE + r'(?:hold|pause|freeze|suspend|gèle|gelez|bloque|bloquez|suspends|suspendez)\s+'
+    r'(?:the\s+|la\s+branche\s+)?(?:main|master|trunk)(?:\s+branch)?'
+    r'(?=\s*$|\s*[,;:)]|\s+(?:until|unless|till|pending|for|while|during|now|today|temporarily'
+    r'|jusqu\w*|tant|pendant|maintenant|aujourd\w*)\b)'
+    # 'Lock main' is also branch protection ('Lock the main branch for force pushes', 'Lock
+    # main: require signed commits'), so only a time or condition makes it a hold.
+    + r'|' + IMPERATIVE + r'lock\s+(?:the\s+)?(?:main|master|trunk)(?:\s+branch)?'
+    r'(?=\s*$|\s*[,;)]|\s+(?:until|unless|till|pending|while|during|now|today|temporarily|for\s+(?:now|the\s+duration))\b)'
     + r'|\bkeep\s+(?:all\s+|the\s+)?(?:open\s+)?' + PR_NOUN + r'\s+on\s+hold\b'
     + r'|' + PR_NOUN + r'[^.!?;:]{0,30}\b(?:needs?|requires?|nécessitent|nécessite)\b[^.!?;:]{0,40}' + APPROVAL_WORD
     # Only a negation right before the state lifts it: 'Main not develop is frozen' holds.
     + r'|\b(?:branch\w*|branche\w*|main|master|trunk)\b(?:\s+\w+){0,2}?\s+(?:(?:is|are|est|sont)\s+)?'
-    r'(?<!\bnot\s)(?<!\bno\s)(?<!\bnever\s)(?<!\bpas\s)(?<!\bplus\s)(?<!\bjamais\s)(?:frozen|gel(?:é|ée|és|ées))\b')
+    r'(?<!\bnot\s)(?<!\bno\s)(?<!\bnever\s)(?<!\bpas\s)(?<!\bplus\s)(?<!\bjamais\s)(?:frozen|gel(?:é|ée|és|ées))\b'
+    # 'The main branch is paused', 'Main is on hold'. Pausing is common debugger and CI wording,
+    # so the branch itself must open the clause and be paused: not 'Branch protection is paused',
+    # 'Builds on main are paused' or 'When the debugger stops, main is paused'.
+    + r'|^\W*(?:the\s+|la\s+|le\s+)?(?:(?:(?:main|master|trunk|default)\s+)?(?:branch(?:es)?|branche)(?:\s+(?:main|master|trunk))?'
+    r'|main|master|trunk)\s+(?:is|are|remains?|stays?|ha(?:s|ve)\s+been|est|sont|reste|restent|a\s+été)\s+'
+    r'(?:(?:now|currently|temporarily|actuellement|désormais)\s+)?'
+    r'(?:paused|suspended|on\s+hold|on\s+pause|en\s+pause|en\s+attente|suspendue?s?)\b')
 # Restrictions that carry pause, approval or wait wording. Unlike a bare negation
 # ('- Do not add dependencies' beside '- Merge requests use squash'), they are
 # also read across the items of one list or the rows of one table.
@@ -187,7 +278,8 @@ PR_HELD = re.compile(
 HOLD_BRANCHES = (
     (MERGE_WORD + r'[^.!?]{0,120}' + PAUSE_WORD, 'mp'),
     (PAUSE_WORD + r'[^.!?]{0,120}' + MERGE_WORD, 'mp'),
-    (MERGE_WORD + r'(?:\s+[^\s.!?;:]+){0,4}?\s+(?:only|seulement|uniquement|après|after|requires?|needs?|nécessite\w*|exige\w*'
+    # Also a label: 'Merge PRs: only after my approval'.
+    (MERGE_WORD + r'(?:\s+[^\s.!?;:]+){0,4}?(?:\s*:[\s*_`]*|\s+)(?:only|seulement|uniquement|après|after|requires?|needs?|nécessite\w*|exige\w*'
      r'|requiert|(?:is|are)\s+subject\s+to)\b[^.!?]{0,90}' + APPROVAL_WORD, 'mqa'),
     (r'\bonly\s+' + MERGE_WORD + r'[^.!?;:]{0,60}\b(?:after|once|when|if)\b[^.!?;:]{0,60}' + APPROVAL_OR_FIRST, 'mx'),
     (APPROVAL_WORD + r'[^.!?]{0,90}\b(?:before|avant)\s+(?:de\s+|toute?\s+|any\s+)?(?:[^\s.!?;:]+\s+){0,3}?' + MERGE_WORD, 'mab'),
@@ -213,17 +305,79 @@ HOLD_BRANCHES = (
     (r'\b(?:nothing|nobody|no\s+one|aucune?|rien|personne)\b[^.!?;:]{0,40}(?:' + MERGE_WORD + r'|' + INTEGRATION_WORD.pattern + r')'
      + r'[^.!?;:]{0,60}\b(?:without|sans|until|unless|jusqu\w*|before|avant)\b'
      + r'(?:(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:green\s+)?(?:ci|checks?|tests?|builds?|lint\w*|status\s+checks?)\b)'
-     + r'|[^.!?;:]{0,60}(?:' + APPROVAL_OR_FIRST + r'|\b' + DECIDER + r'))', 'mg'),
+     + r'|[^.!?;:]{0,60}(?:' + APPROVAL_OR_FIRST + r'|\b' + DECIDER + r'))', 'mgc'),
     # 'Approval required for merges'; 'Approval is not required to merge' grants autonomy.
     (APPROVAL_WORD + r'\s+(?:(?:is|are|est|sont)\s+)?(?:required|needed|mandatory|requise?s?|obligatoires?|nécessaires?)\b'
      r'[^.!?]{0,90}' + MERGE_WORD, 'arm'),
     # Asking someone who decides, not a bot or CI: 'Ask me before merging'.
     (ASK_DECIDER + r'[^.!?]{0,60}\b(?:before|avant)\b[^.!?]{0,90}' + MERGE_WORD
      + r'|\b(?:before|avant)\s+(?:de\s+|any\s+|toute?\s+|you\s+|we\s+)?' + MERGE_WORD + r'[^.!?]{0,60}' + ASK_DECIDER, 'kbm'),
-    # 'Leave merging to me', 'Merging is reserved for the owner'; 'Merge it for me' delegates instead.
-    (r'\bleav\w*\b[^.!?]{0,30}' + MERGE_WORD + r'[^.!?]{0,30}\bto\s+' + DECIDER
-     + r'|' + MERGE_WORD + r'[^.!?]{0,60}\b(?:up\s+to|left\s+to|reserved\s+(?:to|for)|réservée?s?\s+(?:à|aux?))\s+' + DECIDER
-     + r'|' + MERGE_WORD + r'[^.!?]{0,20}\b(?:me\s+|nous\s+|m[’\x27])(?:est|sont)\s+réservée?s?\b', 'mt'))
+    # 'Merge PRs, ask me first', also across list items and table cells. The merge and the ask
+    # sit side by side, so '- Keep your branch up to date by merging main' above '- For large
+    # changes, ask a maintainer first', or 'Merge conflicts: ask the reviewer first', stay apart.
+    (MERGE_WORD + r'(?:\s+(?:all\s+|the\s+|any\s+|a\s+|every\s+)?' + PR_NOUN + r')?[\s,:;|-]{1,6}'
+     + ASK_DECIDER + r'\s+(?:\w+\s+)?' + FIRST_WORD
+     + r'|' + ASK_DECIDER + r'\s+(?:\w+\s+)?' + FIRST_WORD + r'[\s,]*(?:(?:and|then|puis|et|before|avant\s+de)\s+){1,2}' + MERGE_WORD, 'mkf'),
+    # 'Leave merging to me', 'Merging is reserved for the owner' or 'for the release manager';
+    # 'Merge it for me' delegates instead. 'Up to' and 'left to' name a decider only: 'Squash
+    # vs. merge commit is up to the reviewer' leaves a method choice, not the merge. The merge
+    # word is read once, and each lookahead skips positions where no ending can start.
+    (r'\bleav\w*\b[^.!?]{0,30}' + MERGE_WORD + r'[^.!?]{0,30}\bto\s+' + DECIDER_ROLE
+     + r'|' + MERGE_WORD + r'(?:[^.!?]{0,60}(?=[ulr])\b(?:(?:up\s+to|left\s+to)\s+' + DECIDER
+     + r'|(?:reserved\s+(?:to|for)|restricted\s+to|limited\s+to'
+     r'|(?:réservée?s?|restreinte?s?|limitée?s?)\s+(?:à|aux?))\s+' + DECIDER_ROLE + r')'
+     + r'|[^.!?]{0,20}(?=[mn])\b(?:me\s+|nous\s+|m[’\x27])(?:est|sont)\s+réservée?s?\b)', 'mtl'),
+    # The branches below have no word classes (None): list and table runs never try them, so
+    # their forms split over two items or rows stay unread ('- Only the owner' above '- merges
+    # PRs'). Each unit is still read with its context, so a label item, parent item or heading
+    # before it counts. One MERGE_WORD prefix is shared so each merge word is read once here.
+    (MERGE_WORD + r'(?:'
+     # 'Merges go through me', 'Les fusions passent par moi'; not 'through the merge queue',
+     # 'via the admin panel' or 'through the maintainer bot'.
+     r'(?:\s+(?:(?:always|toujours)\s+)?(?:(?:must|should|doivent|doit)\s+|ha(?:s|ve)\s+to\s+)?(?:(?:always|toujours)\s+)?'
+     r'(?:go(?:es)?|pass(?:es)?|run|runs))?\s+(?:only\s+|exclusively\s+|uniquement\s+|seulement\s+)?(?:through|via)\s+'
+     + DECIDER_ROLE + TOOL_NOUN
+     + r'|\s+(?:(?:toujours|always)\s+)?(?:passe|passent|doivent\s+passer|doit\s+passer)\s+(?:(?:uniquement|seulement|toujours)\s+)?par\s+'
+     + DECIDER_ROLE + TOOL_NOUN
+     # 'PRs are merged by the owner', 'Merges are done by me', 'Les PR sont fusionnées par moi';
+     # not 'merged by a maintainer after review', an ordinary process, nor 'PRs opened by me'.
+     + r'|(?:\s+(?:is|are|get|gets|sont|est)\s+(?:done|handled|performed|made|faite?s?|gérée?s?|effectuée?s?))?'
+     r'\s+(?:only\s+|exclusively\s+|uniquement\s+|seulement\s+)?(?:by|par)\s+' + OWNER_BY
+     # 'Merging is my call', 'Merging a PR is the owner's decision'; not 'my favourite part of the
+     # job', 'Merged PRs are my responsibility to monitor' or 'the reviewer's call between squash
+     # and rebase'. Only a PR noun may sit between, so a label item ('- Merge PRs') cannot lend
+     # its merge to the next item ('- Releases are my call').
+     + r'|(?<!\bmerged)(?<!fusionné)(?<!fusionnée)(?<!fusionnés)(?<!fusionnées)'
+     r'(?:\s+(?:all\s+|the\s+|a\s+|an\s+|les\s+|des\s+|une?\s+)?' + PR_NOUN + r')?'
+     r'(?:\s+(?:is|are|remains?|stays?|reste|restent|est|sont)\s+(?:(?:always|solely|entirely|still|toujours)\s+)?|\s*:\s*)'
+     + POSSESSOR
+     + r'\s+(?:own\s+)?(?:call|decision|choice|prerogative|responsibility|décision|choix|responsabilité)\b'
+     r'(?!\s+(?:to\s+(?!make\b|take\b)\w+|between|entre|of\s+(?:squash|rebase|merge|method)\w*)))'
+     + r'|\blaiss\w*[\s-](?:moi|nous)\s+(?:(?:faire|gérer)\s+)?(?:les\s+|la\s+)?' + MERGE_WORD
+     + r'|\blet\s+(?:me|us)\s+(?:(?:do|handle)\s+(?:all\s+)?(?:the\s+)?)?' + MERGE_WORD
+     + r'|\bc[’\x27]est\s+(?:moi|nous)\s+qui\s+' + MERGE_WORD, None),
+    # 'Only the owner merges PRs', 'Only I may merge', 'Only the owner is allowed to merge PRs',
+    # 'Seul le propriétaire fusionne les PR'. Only a modal or permission may sit between, and the
+    # merge word must not name a thing: 'Only admins can bypass merge checks', 'Only code
+    # owners can approve merge requests'.
+    (r'\b(?:only|seule?s?)\s+' + RESERVER + r'\s+(?:(?:can|may|must|should|shall|will|could|gets?\s+to|peut|peuvent|doit|doivent'
+     r'|(?:is|am|are|be)\s+(?:allowed|permitted|authori[sz]ed)\s+to|ha(?:s|ve)\s+(?:the\s+)?(?:permission|right)\s+to'
+     r'|(?:est|sont)\s+autorisée?s?\s+à|(?:a|ont)\s+le\s+droit\s+de)\s+)?' + MERGE_WORD
+     + r'(?![\s-]+(?:requests?|checks?|conflicts?|commits?|queues?|settings?|methods?|strateg\w*|buttons?|messages?|markers?)\b)', None),
+    # 'Nobody but me merges PRs', 'Nobody merges PRs except the owner'; 'Nobody merges without
+    # CI' is read by the 'without' branch.
+    (r'\b(?:nobody|no\s+one|personne)\s+(?:but|except|other\s+than|besides|apart\s+from|save|sauf|à\s+part)\s+' + RESERVER
+     + r'[^.!?;:]{0,30}' + MERGE_WORD
+     + r'|\b(?:nobody|no\s+one|personne)\s+(?:ne\s+)?' + MERGE_WORD
+     + r'[^.!?;:]{0,30}\b(?:but|except|other\s+than|besides|apart\s+from|save|sauf|à\s+part)\s+' + RESERVER, None),
+    # 'Merge nothing before my approval'; 'Merge nothing before CI passes' names no approver.
+    (MERGE_WORD + r'\s+(?:nothing|rien|aucune?\s+\w+)\s+(?:before|avant)\b[^.!?;:]{0,60}' + APPROVAL_OR_FIRST, None),
+    # 'I handle all merges myself', 'I'll merge PRs myself'; the speaker comes first, so '- Merge
+    # PRs' above '- I write the docs myself' does not read as one rule. 'I merge my own PRs
+    # myself' describes self-merging instead. Word steps, not a character span, keep a long run
+    # of 'I' cheap.
+    (r'\b(?:i|we|je|nous)(?:[’\x27](?:ll|m|d|ve|re))?(?:\s+[\w’\x27-]+){0,5}?\s+' + MERGE_WORD
+     + r'(?!\s+(?:[\w’\x27-]+\s+)?own\b)(?:\s+[\w’\x27-]+){0,4}?\s+(?:myself|ourselves|moi-même|nous-mêmes)\b', None))
 HOLD_FREE = '|'.join(pattern for pattern, _ in HOLD_BRANCHES)
 # Word classes of HOLD_BRANCHES. A phrase such as 'on hold' may be split across
 # two items, so its last word counts on its own.
@@ -231,24 +385,42 @@ RUN_WORDS = {
     'm': re.compile(MERGE_WORD),
     'p': re.compile(PAUSE_WORD + r'|\b(?:hold|attente)\b'),
     # Supersets of the words each class stands for: 'my' and 'go to' may sit in two items.
-    'a': re.compile(APPROVAL_WORD + r'|\b(?:off|light|go)\b'),
-    'q': re.compile(r'\b(?:only|seulement|uniquement|après|after|requires?|needs?|subject)\b'),
+    'a': re.compile(APPROVAL_WORD + r'|\b(?:off|light|go|returns?|retour)\b'),
+    'q': re.compile(r'\b(?:only|seulement|uniquement|après|after|requires?|needs?|subject|nécessite\w*|exige\w*|requiert)\b'),
     'b': re.compile(r'\b(?:before|avant)\b'),
     'o': re.compile(r'\b(?:obtain|get|seek|receive|wait)\b'),
     'w': re.compile(r'\b(?:wait\w*|attend\w*)\b'),
     'h': re.compile(r'\b(?:stop|hold|wait|attend\w*)\b'),
     'u': re.compile(r'\b(?:until|unless|jusqu\w*|que)\b'),
-    'x': re.compile(APPROVAL_OR_FIRST + r'|\b(?:off|light|vert|go)\b'),
+    'x': re.compile(APPROVAL_OR_FIRST + r'|\b(?:off|light|vert|go|returns?|retour)\b'),
     'n': re.compile(BAN_WORD + r'|\b(?:allowed|permitted|autoris\w*|permis\w*)\b'),
     'z': re.compile(FREEZE_STEM),
     'r': re.compile(r'\b(?:required|needed|mandatory|requise?s?|obligatoires?|nécessaires?)\b'),
-    'k': re.compile(r'\b(?:ask|consult\w*|check|confirm|ping|demande\w*)\b'),
-    't': re.compile(r'\b' + DECIDER),
+    'k': re.compile(r'\b(?:ask|consult\w*|check|confirm|ping|talk|demande\w*|préven\w*|préviens)\b'),
+    't': re.compile(r'\b' + DECIDER_ROLE),
+    'l': re.compile(r'\b(?:leav\w*|up|left|reserved|restricted|limited|réservée?s?|restreinte?s?|limitée?s?)\b'),
+    'f': re.compile(r'\b' + FIRST_WORD),
     'd': re.compile(r'\b' + DECIDER_ACT),
     'g': re.compile(r'\b(?:nothing|nobody|no\s+one|aucune?|rien|personne)\b'),
+    # The connective 'Nothing is merged without my consent' needs, so '- Merge nothing' above a
+    # long list of '- first' items is not read again on each of them.
+    'c': re.compile(r'\b(?:without|sans|until|unless|jusqu\w*|before|avant)\b'),
     # A bare 'go' is an approval word, so 'must be approved' needs its own class.
     'e': re.compile(r'\b(?:approved|authori[sz]ed|signed)\b')}
-RUN_BRANCHES = tuple((re.compile(pattern), frozenset(words)) for pattern, words in HOLD_BRANCHES)
+# Word classes a branch can end on. Every branch can end on one of RUN_ENDS_ANY. An item with
+# none of them, only a decider or 'first', can end only the branches below, and only on the
+# listed classes: 'mkf' on 'first', 'kbm' and 'mtl' on who decides, 'mgc' on either. 'mtl' then
+# ends on 'to the owner', 'reserved for me' or 'm'est réservée', so the run must hold one.
+RUN_ENDS_ANY = frozenset('mpaxnz')
+RUN_ENDS_DECIDER = {'mkf': (frozenset('f'), None), 'kbm': (frozenset('t'), None), 'mgc': (frozenset('ft'), None),
+                    'mtl': (frozenset('t'), re.compile(r'\b(?:to|for|à|aux?)\s+' + DECIDER_ROLE
+                                                       + r'|\b(?:me\s+|nous\s+|m[’\x27])(?:est|sont)\s+réservée?s?\b'))}
+RUN_ENDS = RUN_ENDS_ANY | frozenset('ft')
+# Each branch: pattern, needed word classes, the classes it ends on in an item with only a
+# decider or 'first' and what the run must then hold, and whether it is read only in the new
+# item and the one before it ('mkf' reads a merge and an ask side by side).
+RUN_BRANCHES = tuple((re.compile(pattern), frozenset(words), *RUN_ENDS_DECIDER.get(words, (frozenset(), None)), words == 'mkf')
+                     for pattern, words in HOLD_BRANCHES if words is not None)
 # A HOLD_BRANCHES match has no sentence punctuation and, for ordinary word
 # lengths, starts fewer than RUN_WINDOW characters before its last item, so a
 # list or table is read in bounded windows.
@@ -265,6 +437,9 @@ FREE = re.compile(
     + r'|\b[ée]vit\w*\s+(?:de\s+fusionner|toute?\s+fusions?|les\s+fusions)\b'
     # One long rule sentence, read once per unit rather than per list window.
     + r'|' + MERGE_WORD + r'[^.!?;:]{0,120}' + BAN_WORD)
+# Every FREE branch needs a merge word, or an integration word in the 'nothing is landed' form.
+# Most units name neither, and this check costs far less than FREE's many branches.
+FREE_NEEDS = re.compile(MERGE_WORD + '|' + INTEGRATION_WORD.pattern)
 
 # A flagged unit that only states git mechanics is cleared when none of these apply.
 HOLD_CONTEXT = re.compile(
@@ -456,8 +631,25 @@ def terminated(block):
     return block.rstrip(' \t*_`"\'»”’)]').endswith(('.', '!', '?'))
 
 
+# Markdown emphasis and code-span markers at word edges: '**Merging**:', 'Only **I** may merge',
+# 'Freeze `main`'. Inner underscores ('merge_queue') are part of the word and stay.
+EMPHASIS = re.compile(r'(?<!\w)[*_`]+|[*_`]+(?!\w)')
+
+
 def strip_markers(value):
-    return DATED.sub('', EXAMPLE.sub('', re.sub(r'\s+', ' ', value)))
+    return DATED.sub('', EXAMPLE.sub('', EMPHASIS.sub('', re.sub(r'\s+', ' ', value))))
+
+
+def run_class(text):
+    """The text the run patterns read and its RUN_WORDS classes."""
+    text = strip_markers(text)
+    return text, ''.join(key for key, pattern in RUN_WORDS.items() if pattern.search(text))
+
+
+def run_match(joined, last_two, candidates):
+    """Whether a candidate branch matches the run's last sentence or its last two items."""
+    return any(pattern.search(last_two if pair else joined) for pattern, pair, tail in candidates
+               if tail is None or tail.search(joined))
 
 
 def units(lines, hold_found, heading_found=lambda level: None):
@@ -483,6 +675,9 @@ def units(lines, hold_found, heading_found=lambda level: None):
     run_classes = collections.deque()  # their RUN_WORDS classes
     run_words = collections.Counter()  # RUN_WORDS classes across the run
     run_size, run_held = 0, False
+    # Pure per-text work, so repeated items and run windows are read once.
+    classify = functools.lru_cache(maxsize=128)(run_class)
+    held = functools.lru_cache(maxsize=128)(run_match)
 
     def context(extra=(), near=()):
         """Heading path, then lead-ins and extra cut to CONTEXT_LIMIT, then near items uncut."""
@@ -501,30 +696,34 @@ def units(lines, hold_found, heading_found=lambda level: None):
             return
         # Sized on the text the patterns read, so padding or example markers
         # cannot push an earlier item out of the window.
-        text = strip_markers(text)
+        text, words = classify(text)
         # Keep at least RUN_WINDOW characters of earlier items before the new one.
         while len(run) > 1 and run_size - len(run[0]) - 1 >= RUN_WINDOW:
             run_size -= len(run.popleft()) + 1
             run_words.subtract(run_classes.popleft())
-        words = ''.join(key for key, pattern in RUN_WORDS.items() if pattern.search(text))
         run.append(text)
         run_classes.append(words)
         run_size += len(text) + 1
         run_words.update(words)
         # Only a restriction that ends in the new item is new; earlier ones were
         # read before. It cannot cross sentence punctuation, and each branch is
-        # tried only when the run holds every word class it needs.
-        if len(run) == 1 or not set(words) & set('mpaxnz'):
+        # tried only when the run holds every word class it needs. An item naming
+        # only who decides or 'first' ('- to the owner', '- ask a reviewer', '- avant')
+        # can end only a branch that ends on those words, so only those are tried then.
+        if len(run) == 1 or not RUN_ENDS.intersection(words):
             return
         present = {key for key, count in run_words.items() if count}
-        candidates = [pattern for pattern, needed in RUN_BRANCHES if needed <= present]
+        decider_only = not RUN_ENDS_ANY.intersection(words)
+        candidates = tuple((pattern, pair, tail if decider_only else None) for pattern, needed, ends, tail, pair in RUN_BRANCHES
+                           if needed <= present and not (decider_only and ends.isdisjoint(words)))
         if not candidates:
             return
         joined = ' '.join(run)
         cut = len(joined) - len(text) - 1  # end of the earlier items
         start = max(joined.rfind('.', 0, cut), joined.rfind('!', 0, cut), joined.rfind('?', 0, cut)) + 1
+        last_two = joined[max(start, cut - len(run[-2])):]
         joined = joined[start:]
-        if any(pattern.search(joined) for pattern in candidates):
+        if held(joined, last_two, candidates):
             run_held = True
             hold_found()
 
@@ -770,12 +969,21 @@ def near_scope(text, match):
     return bool(PR_SCOPE.search(before) or PR_SCOPE.search(after))
 
 
+# 'Integration:' opening a unit is a rule label for the merge step itself; 'Continuous
+# integration:' and 'Integration tests:' name something else. The label also needs a speaker
+# or a PR in its unit: 'Integration: needs admin consent in Entra ID' is an app integration.
+# A speaker's approval of an app ('needs my approval to connect the app') still holds: no
+# reviewed wording separates it from a merge approval in every context.
+INTEGRATION_LABEL = re.compile(r'[\W_]*(integration|intégration)[*_`]*\s*:')
+FIRST_PERSON_WORD = re.compile(FIRST_PERSON)
+
+
 def integrations_as_merges(text):
     return INTEGRATION_WORD.sub(lambda match: 'merge' if near_scope(text, match) else match.group(), text)
 
 
 def free_restriction(context, unit):
-    """True for a restriction, 'cleared' for an exempted git-mechanics rule, else False."""
+    """True for a restriction, 'cleared' for an exempted git-mechanics rule, 'gate' for a PR gate, else False."""
     text = (context + ' ' + unit).strip()
     if any(PR_HELD.search(part) for part in re.split(r'[.!?]', unit)):
         return True
@@ -787,8 +995,20 @@ def free_restriction(context, unit):
                 near_scope(part, verb) and not NOT_BEFORE.search(part[max(0, verb.start() - SCOPE_NEAR):verb.start()]) for verb in HOLD_VERB.finditer(part))
                for part in re.split(r'[.!?]', unit)):
             return True
+    label = INTEGRATION_LABEL.match(unit)
+    if label and (FIRST_PERSON_WORD.search(unit) or PR_SCOPE.search(unit)):
+        unit = unit[:label.start(1)] + 'merge' + unit[label.end(1):]
+        text = (context + ' ' + unit).strip()
+    if PR_SCOPE.search(unit):
         text = integrations_as_merges(text)
-    if not FREE.search(text):
+    if not FREE_NEEDS.search(text) or not FREE.search(text):
+        # 'PRs are held to the same standard.' or 'PRs are blocked: failing checks.' describes a
+        # gate, but a heading, lead-in, later sentence or later unit can still hold it
+        # ('## Freeze until I approve'), so it is read like a cleared rule. Only sentences without
+        # the gate are read here; scan_normalized reads the gate sentence without its GATE_WORDS.
+        if PR_GATE.search(unit):
+            rest = [part for part in re.split(r'[.!?]', unit) if not PR_GATE.search(part)]
+            return True if any(FOLLOW_HOLD.search(part) or HOLD_CONTEXT.search(part) for part in rest) else 'gate'
         return False
     if HOLD_CONTEXT.search(text) or SCOPE.search(text) or NEVER_EXEMPT.search(text):
         return True
@@ -842,30 +1062,39 @@ def scan_normalized(text):
     # Free-form restrictions are read per Markdown unit so that sibling list
     # items and separate sentences are not joined into one false restriction.
     cleared, follows, held, headings = False, False, [], []
+    mechanics, gate_follows = False, False  # a git-mechanics rule; a hold beside a gate's own words
     level, section = 0, None  # current heading level; level of the cleared rule's section
+    # Cache only pure classification; every unit still updates the scan state.
+    restriction = functools.lru_cache(maxsize=128)(free_restriction)
+    strip = functools.lru_cache(maxsize=128)(strip_markers)
     for context, unit in units(outside, lambda: held.append(True), headings.append):
         if headings:
             level = headings.pop()
             if section is not None and level <= section:
                 section = None  # a sibling or parent heading ends the cleared rule's section
-        unit = strip_markers(unit)
-        result = free_restriction(strip_markers(context), unit)
+        unit = strip(unit)
+        context = strip(context)
+        result = restriction(context, unit)
         if result is True:
             return 2
-        if result == 'cleared' and FOLLOW_HOLD.search(strip_markers(context)):
+        if result in ('cleared', 'gate') and FOLLOW_HOLD.search(context):
             return 2  # a heading, lead-in or parent item conditions the rule
         if section is not None and NEXT_HOLD.search(unit):
             return 2  # a later unit of the section qualifies the cleared rule
-        if result == 'cleared' and section is None:
+        if result in ('cleared', 'gate') and section is None:
             section = level
-        cleared = cleared or result == 'cleared'
-        follows = follows or bool(FOLLOW_HOLD.search(unit))
+        cleared = cleared or result in ('cleared', 'gate')
+        # A gate's own words ('blocked', 'until CI passes') are not a hold, so they would clear
+        # a gate beside a method rule; the rest of its unit still qualifies that rule.
+        follows = follows or (result != 'gate' and bool(FOLLOW_HOLD.search(unit)))
+        mechanics = mechanics or result == 'cleared'
+        gate_follows = gate_follows or (result == 'gate' and bool(FOLLOW_HOLD.search(GATE_WORDS.sub(r'\g<gate_prefix> ', unit))))
     if held:
         return 2  # a list or table carries a pause or approval restriction across items
     # A hold or approval sentence anywhere in the file may qualify a cleared
     # rule without naming a merge, even from a sibling section under the
     # same parent heading.
-    if cleared and follows:
+    if cleared and follows or mechanics and gate_follows:
         return 2
     return 1 if found else 0
 
@@ -919,8 +1148,9 @@ def scan_text(text):
     """0 clear, 1 dated canonical veto, 2 ambiguous/malformed evidence."""
     if len(text) > MAX_SCAN_CHARS:
         return 2
-    # Invisible characters may split a word or separate two words: check both readings.
-    results = [scan_normalized(normalize(text, joiner)) for joiner in ('', ' ')]
+    # Invisible characters may split a word or separate two words: check each distinct reading.
+    readings = dict.fromkeys(normalize(text, joiner) for joiner in ('', ' '))
+    results = [scan_normalized(reading) for reading in readings]
     if hidden_splits(outside_managed(text)) > 1:
         # Two readings cannot cover several invisible splits that need different choices.
         results.append(2)
