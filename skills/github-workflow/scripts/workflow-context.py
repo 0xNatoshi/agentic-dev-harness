@@ -100,8 +100,8 @@ def invisible(c):
     return category == 'Cf' or (category == 'Cc' and c not in '\t\n\r') or bool(IGNORABLE.match(c))
 
 
-def normalize(text, joiner=''):
-    """Casefold and map dashes; replace invisible characters with joiner."""
+def normalize(text, joiner='', em_dash=' - '):
+    """Casefold and map dashes; replace invisible characters with joiner and an em dash with em_dash."""
     # A spaced soft hyphen is read as a dash; elsewhere it is invisible.
     text = re.sub('(?<=\\s)\u00ad|\u00ad(?=\\s)', '-', text)
     text = unicodedata.normalize('NFKC', text)
@@ -110,14 +110,26 @@ def normalize(text, joiner=''):
         if invisible(c):
             table[ord(c)] = joiner
         elif c in '\u2014\u2015':
-            # An em dash or horizontal bar separates words even unspaced, unlike a hyphen that joins them.
-            table[ord(c)] = ' - '
+            # An em dash or horizontal bar usually separates words even unspaced, unlike a hyphen that
+            # joins them; scan_text also reads it as a hyphen ('Laisse—moi fusionner').
+            table[ord(c)] = em_dash
         elif unicodedata.category(c) == 'Pd' or c == '\u2212':
             table[ord(c)] = '-'
     return text.translate(table).replace('\r\n', '\n').replace('\r', '\n').casefold()
 
 
-START = re.compile(r'^\s*<!--\s*github-workflow:start\b(?:(?!-->).)*-->\s*$')
+# Only an unspaced em dash can stand for a hyphen, so only text with one gets the hyphen reading:
+# the spaced dash of the canonical marker costs no extra scan.
+UNSPACED_EM_DASH = re.compile('\\S[\u2014\u2015]|[\u2014\u2015]\\S')
+
+
+def reading_choices(text):
+    """The (joiner, em_dash) pairs for normalize() whose readings scan_text must check."""
+    em_dashes = (' - ', '-') if UNSPACED_EM_DASH.search(unicodedata.normalize('NFKC', text)) else (' - ',)
+    return [(joiner, em_dash) for joiner in ('', ' ') for em_dash in em_dashes]
+
+
+START =re.compile(r'^\s*<!--\s*github-workflow:start\b(?:(?!-->).)*-->\s*$')
 END = re.compile(r'^\s*<!--\s*github-workflow:end\s*-->\s*$')
 PREFIX = r'(?:autonomous\s+merge\s+suspended\s*-\s*(?:request\s+dated|requested\s+on|asked\s+on)|merge\s+autonome\s+suspendu\s*-\s*(?:demande\s+du|demandé\s+le))'
 EXAMPLE = re.compile(PREFIX + r'\s*<date>(?!\s*\d)')
@@ -240,11 +252,12 @@ PR_BLOCKER_PERSON = (r'(?:(?:la\s+)?(?:décision|validation|approbation|relectur
 # The speaker's own decision: 'blocked by my decision', not 'blocked by our CI'.
 PR_BLOCKER_MINE = r'(?:my|our|mon|ma|notre|nos|mes)\s+(?:decisions?|call|say-so|word|go-ahead|approval|décisions?|validation|accord)\b'
 PR_BLOCKER_GATE = (r'(?:ci|checks?|checkers?|tests?|builds?|lint\w*|pipelines?|jobs?|workflows?|polic(?:y|ies)|gates?'
-                   r'|failures?|scans?|coverage|(?<=github\s)actions|rules?|status|runs?|vérifications?|règles?|protection'
-                   r'|requirements?|enforce\w*|counts?|notifications?)')
+                   r'|failures?(?!\s+to\b)|outages?|runners?|timeouts?|scans?|coverage|(?<=github\s)actions|rules?|status|runs?|vérifications?|règles?|protection'
+                   r'|requirements?(?!\s+to\b)|enforce\w*|counts?|notifications?)')
 # Words that end the noun phrase after a person: a condition, relative, preposition,
-# coordination, determiner, verb or time adverb. 'the reviewer until checks pass' never reaches 'checks'.
-PR_PHRASE_END = (r'(?:until|till|unless|if|while|when\w*|wh(?:o|om|ose|ich)|that|pending|for|since|because|and|or|but|nor|so'
+# concession, coordination, determiner, verb or time adverb. 'the reviewer until checks pass' and
+# 'the owner although CI is green' never reach the gate word.
+PR_PHRASE_END = (r'(?:until|till|unless|if|while|when\w*|although|though|even|despite|whereas|except|once|yet|wh(?:o|om|ose|ich)|that|pending|for|since|because|and|or|but|nor|so'
                  r'|as|on|in|at|to|with\w*|after|before|via|per|from|of|about|than|by|is|are|was|were|be|been|has|have|had'
                  r'|will|may|can|must|should|would|could|the|a|an|this|these|those|some|any|all|every|each|no'
                  r'|today|tonight|now|again|still|right|currently'
@@ -252,14 +265,19 @@ PR_PHRASE_END = (r'(?:until|till|unless|if|while|when\w*|wh(?:o|om|ose|ich)|that
                  r'|le|la|les|l|un|une|ce|cet|cette|ces)\b')
 FREEZE_NOUN = r'(?:freezes?|holds?|embargo(?:es)?|gels?)'
 # A modifier is one word; a hyphenated compound ('end-to-end') is one word, so a phrase end inside
-# it ends nothing. A standalone freeze or hold word is never a modifier: 'the team's freeze rules'
-# names the freeze, not a gate.
-PR_MODIFIER = r'(?!(?:' + PR_PHRASE_END + r'|' + FREEZE_NOUN + r'\b)(?!-))\w+(?:-\w+)*'
-# The phrase's head (its last word, at most four words in) decides: a gate or tool head names a
-# thing ('team unit tests', 'reviewer assignment queue', 'the owner's CI'); any other head, or a
-# longer phrase, names the person ('the owner's final decision'). An unclassified phrase stays a
-# hold. A hyphen joins words; a comma ends the phrase, and so does an em dash, which normalize() spaces.
-PR_GATE_HEAD = (r'(?:\s+|-)(?:' + PR_MODIFIER + r'\s+){0,3}(?:\w+-)*(?:' + PR_BLOCKER_GATE + r'|' + TOOL_WORD + r')\b'
+# it ends nothing. A freeze, hold or human-decision word, alone or in a compound, is never a
+# modifier: 'the team's freeze rules', 'the owner's code-freeze gate' and 'the owner's final
+# decision gate' name the freeze or the person, not a gate. So does a failure or requirement
+# to act: 'the owner's failure to review'.
+HUMAN_DECISION = r'(?:decisions?|approvals?|manual|consent|permissions?)'
+PR_VETO = r'(?!(?:' + FREEZE_NOUN + r'|' + HUMAN_DECISION + r')\b)'
+PR_MODIFIER = r'(?!' + PR_PHRASE_END + r'(?!-))' + PR_VETO + r'\w+(?:-' + PR_VETO + r'\w+)*'
+# The phrase's head (its last word before a phrase end or punctuation) decides: a gate or tool
+# head names a thing ('team unit tests', 'reviewer assignment queue', 'the owner's CI'); any other
+# head names the person ('the owner's final decision'). An unclassified phrase stays a hold.
+# There is no word cap: each modifier is one whitespace-separated word, so matching stays linear.
+# A hyphen joins words; a comma ends the phrase, and so does an em dash in the reading where normalize() spaces it.
+PR_GATE_HEAD = (r'(?:\s+|-)(?:' + PR_MODIFIER + r'\s+)*(?:' + PR_VETO + r'\w+-)*(?:' + PR_BLOCKER_GATE + r'|' + TOOL_WORD + r')\b'
                 r'(?![’\x27-])(?=\s*(?:$|[^\w\s])|\s+' + PR_PHRASE_END + r')')
 # Determiners, including quantifiers ('both maintainers', 'the other maintainers').
 PR_DETERMINER = (r'(?:(?:the|a|an|my|our|your|their|his|her|all|both|any|some|either|each|other|two|three'
@@ -268,8 +286,9 @@ PR_DETERMINER = (r'(?:(?:the|a|an|my|our|your|their|his|her|all|both|any|some|ei
 PR_BLOCKER = (PR_DETERMINER + r'{0,2}'
               r'(?:' + PR_BLOCKER_MINE + r'|(?!code\s+owners?\s+reviews?\b)(?:' + PR_BLOCKER_PERSON + r')\b'
               r'(?:[’\x27]s?(?=\s+\w))?(?![’\x27])(?!' + PR_GATE_HEAD + r')'
-              # Up to two modifiers name the freeze ('the current release freeze', 'the year-end freeze').
-              r'|(?:(?!' + PR_PHRASE_END + r')\w+(?:\s+|-)){0,2}'
+              # Modifiers up to the freeze word name the freeze ('the current release freeze', 'the end-of-year
+              # code freeze'); a hyphenated compound is one modifier.
+              r'|(?:(?!' + PR_PHRASE_END + r'(?!-))\w+(?:-\w+)*\s+)*(?:\w+-)*'
               + FREEZE_NOUN + r'\b(?![’\x27](?:s\b|\s)|-(?!(?:period|window)\b))' + TOOL_NOUN + r')')
 PR_BLOCKED = (r'^\W*(?:(?:all|every|any|the|open|pending|toutes|tous|les)\s+){0,2}' + PR_NOUN
               + r'\s+(?:are|is|remain|stay|restent|reste|sont|est)\s+'
@@ -1152,11 +1171,11 @@ def scan_normalized(text):
 
 
 def outside_managed(text):
-    """Raw lines outside managed blocks under either invisible-character reading."""
+    """Raw lines outside managed blocks under any invisible-character or em-dash reading."""
     raw = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
     keep = [False] * len(raw)
-    for joiner in ('', ' '):
-        lines = normalize(text, joiner).split('\n')
+    for joiner, em_dash in reading_choices(text):
+        lines = normalize(text, joiner, em_dash).split('\n')
         if len(lines) != len(raw):
             return text  # lines do not align: check the whole file
         managed = False
@@ -1200,8 +1219,9 @@ def scan_text(text):
     """0 clear, 1 dated canonical veto, 2 ambiguous/malformed evidence."""
     if len(text) > MAX_SCAN_CHARS:
         return 2
-    # Invisible characters may split a word or separate two words: check each distinct reading.
-    readings = dict.fromkeys(normalize(text, joiner) for joiner in ('', ' '))
+    # Invisible characters may split a word or separate two words, and an em dash may separate words or
+    # join them: check each distinct reading. Text without them has a single reading.
+    readings = dict.fromkeys(normalize(text, joiner, em_dash) for joiner, em_dash in reading_choices(text))
     results = [scan_normalized(reading) for reading in readings]
     if hidden_splits(outside_managed(text)) > 1:
         # Two readings cannot cover several invisible splits that need different choices.

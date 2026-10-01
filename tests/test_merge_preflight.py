@@ -98,6 +98,7 @@ TEXT_CASES = (
     Case("start cannot swallow adjacent comments and veto", 2, "<!-- github-workflow:start v6.3 --> Autonomous merge suspended — request dated 2026-09-27 <!-- owner note -->\n<!-- github-workflow:end -->"),
     Case("start must be one complete comment", 2, "<!-- github-workflow:start v6.3 --> <!-- owner note -->\n<!-- github-workflow:end -->"),
     Case("orphan marker", 2, "<!-- github-workflow:end -->"),
+    Case("orphan marker with em dash for a hyphen", 2, "<!-—github-workflow:end -->"),
     # Free-form restrictions per Markdown unit and invisible characters.
     Case("kept hold until I approve", 2, "Do not merge anything until I approve."),
     Case("kept bare never merge", 2, "Never merge."),
@@ -662,6 +663,8 @@ TEXT_CASES = (
     Case("caught nobody merges except the owner", 2, "Nobody merges PRs except the owner."),
     Case("caught let me merge", 2, "Let me merge."),
     Case("caught French let me merge without hyphen", 2, "Laisse moi fusionner."),
+    Case("caught French let me merge with em dash for a hyphen", 2, "Laisse—moi fusionner."),
+    Case("caught freeze dependencies lockfiles then em dash and merges", 2, "Freeze dependencies, lockfiles—and merges."),
     Case("caught table row ask me before", 2, "| Action | Rule |\n|---|---|\n| Merge PRs | ask me before |"),
     Case("caught merging is the tech lead's call", 2, "Merging is the tech lead's call."),
     Case("caught merging is the code owner's decision", 2, "Merging is the code owner's decision."),
@@ -989,11 +992,47 @@ TEXT_CASES = (
     Case("caught PRs blocked by owner then dash about checks", 2,
          "PRs are blocked by the owner — checks are irrelevant."),
     Case("caught PRs blocked by reviewer until checks", 2, "PRs are blocked by the reviewer until checks."),
-    Case("caught PRs blocked by owner over four words before a gate", 2,
-         "PRs are blocked by the owner five more words long tests."),
+    Case("cleared PRs blocked by team four modifiers before tests", 0,
+         "PRs are blocked by the team nightly automated security unit tests."),
     Case("caught French PRs blocked by mainteneur du dépôt", 2,
          "Les PR sont bloquées par le mainteneur du dépôt."),
     Case("cleared PRs blocked by our CI", 0, "PRs are blocked by our CI."),
+    # Issue #62 round 7: a concession ends the phrase, no word cap before a gate or freeze head,
+    # a gate's outage, runner or timeout is still the gate, and a freeze or human-decision word
+    # in a modifier, or a failure to act, keeps the person.
+    Case("caught PRs blocked by owner although CI green", 2, "PRs are blocked by the owner although CI is green."),
+    Case("caught PRs blocked by owner even though CI green", 2,
+         "PRs are blocked by the owner even though CI is green."),
+    Case("caught PRs blocked by owner though CI green", 2, "PRs are blocked by the owner though CI is green."),
+    Case("caught PRs blocked by owner despite green CI", 2, "PRs are blocked by the owner despite green CI."),
+    Case("caught PRs blocked by owner once CI green", 2, "PRs are blocked by the owner once CI is green."),
+    Case("caught PRs blocked by owner yet CI green", 2, "PRs are blocked by the owner yet CI is green."),
+    Case("caught PRs blocked by three modifiers before a code freeze", 2,
+         "PRs are blocked by the big annual holiday code freeze."),
+    Case("caught PRs blocked by hyphenated end-of-year code freeze", 2,
+         "PRs are blocked by the annual end-of-year holiday code freeze."),
+    Case("caught PRs blocked by owner's long final release decision", 2,
+         "PRs are blocked by the owner's long overdue final release decision."),
+    Case("caught PRs blocked by owner until long gate phrase passes", 2,
+         "PRs are blocked by the owner until the nightly automated security unit tests pass."),
+    Case("cleared PRs blocked by reviewer pull request assignment queue", 0,
+         "PRs are blocked by the reviewer pull request assignment queue."),
+    Case("cleared PRs blocked by maintainer automated code review bot", 0,
+         "PRs are blocked by the maintainer automated code review bot."),
+    Case("cleared PRs blocked by team's CI outage", 0, "PRs are blocked by the team's CI outage."),
+    Case("cleared PRs blocked by team's CI outages", 0, "PRs are blocked by the team's CI outages."),
+    Case("cleared PRs blocked by team's flaky CI runner", 0, "PRs are blocked by the team's flaky CI runner."),
+    Case("cleared PRs blocked by team's CI timeouts", 0, "PRs are blocked by the team's CI timeouts."),
+    Case("cleared PRs blocked by maintainer's GitHub Actions runner", 0,
+         "PRs are blocked by the maintainer's GitHub Actions runner."),
+    Case("caught PRs blocked by owner's failure to review", 2, "PRs are blocked by the owner's failure to review."),
+    Case("caught PRs blocked by owner's failure to decide", 2, "PRs are blocked by the owner's failure to decide."),
+    Case("caught PRs blocked by owner's final decision gate", 2, "PRs are blocked by the owner's final decision gate."),
+    Case("caught PRs blocked by owner's manual review gate", 2, "PRs are blocked by the owner's manual review gate."),
+    Case("caught PRs blocked by owner's code-freeze gate", 2, "PRs are blocked by the owner's code-freeze gate."),
+    Case("caught PRs blocked by owner's hold-period gate", 2, "PRs are blocked by the owner's hold-period gate."),
+    Case("caught PRs blocked by owner's freeze-gate", 2, "PRs are blocked by the owner's freeze-gate."),
+    Case("cleared PRs blocked by owner's CI failure", 0, "PRs are blocked by the owner's CI failure."),
     # Issue #62 round 6: any freeze or hold modifier, quantifiers, an unspaced em dash, more
     # adverbs and gate heads; only lead time clears among time words.
     Case("caught PRs blocked by current release freeze", 2, "PRs are blocked by the current release freeze."),
@@ -1186,8 +1225,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 926 or len({case.name for case in ALL_CASES}) != 926:
-    raise RuntimeError("Merge fixture inventory must contain 926 unique cases")
+if len(ALL_CASES) != 954 or len({case.name for case in ALL_CASES}) != 954:
+    raise RuntimeError("Merge fixture inventory must contain 954 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
@@ -1331,6 +1370,8 @@ class ScanTimeTests(unittest.TestCase):
             ("Autonomous merge sus\u200bpended — request dated 2026-09-27", 1, 2),
             ("Autonomous\u200bmerge suspended — request dated 2026-09-27", 1, 2),
             ("Autonomous\u200bmerge sus\u200bpended — request dated 2026-09-27", 2, 2),
+            # Only an unspaced em dash adds the hyphen reading; the marker's spaced dash does not.
+            ("Laisse—moi fusionner.", 2, 2),
         )
         for text, expected, reading_count in cases:
             with self.subTest(text=text):
