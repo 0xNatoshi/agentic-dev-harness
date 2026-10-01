@@ -1440,6 +1440,8 @@ class ScanTimeTests(unittest.TestCase):
             # A spaced dash opening a line also adds it, since it may be a list marker; one inside a line does not.
             ("- merge\n- go\n" * 40 + "— go\n", 0, 2),
             ("> — Squash merges only.\n", 0, 2),
+            # Line starts are found in the folded readings, so a lone CR, which git show output keeps, ends a line.
+            ("x\r— go\r", 0, 2),
             ("- merge\n- go\n" * 40 + "a — b\n", 0, 1),
             # Two invisible-character readings times two dash readings.
             ("a\N{ZERO WIDTH SPACE}b—c", 0, 4),
