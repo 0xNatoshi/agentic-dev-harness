@@ -498,11 +498,14 @@ class Locations:
         self.state = self.skills.parent / "dev-harness-install"
 
     def require_movable(self, recorded_mode: int | None = None, retry: str = "plan again") -> None:
-        """Block before any rename when the target or its skill root lacks owner write permission.
+        """Block before any rename when the selected skill directory or its skill root lacks owner write permission.
 
-        POSIX refuses to move such a directory to another parent, or to rename inside such a root, so
-        apply and rollback would stop at their first rename. Windows is not checked: a directory's
-        read-only attribute does not prevent renames there, and Explorer sets it on customized folders.
+        A conservative precondition of this installer, not a full access check: POSIX refuses to move a
+        directory to another parent without write permission on it, or to rename inside a root without
+        write permission there, so apply and rollback would stop at their first rename. It runs after the
+        location checks, so it covers an accessible root; retired duplicates and an inaccessible discovery
+        parent are not diagnosed here (#54). Windows is not checked: a directory's read-only attribute does
+        not prevent renames there, and Explorer sets it on customized folders.
         recorded_mode is the target mode a receipt expects, named so one fix also satisfies its drift check.
         """
         if os.name == "nt":
