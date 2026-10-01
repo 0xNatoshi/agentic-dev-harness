@@ -1068,6 +1068,12 @@ TEXT_CASES = (
          "PRs are blocked by the owner―CI is irrelevant."),
     Case("caught PRs blocked by maintainer then unspaced em dash before status", 2,
          "PRs are blocked by the maintainer—status: frozen."),
+    Case("caught ordered item PRs blocked by owner then unspaced em dash", 2,
+         "1) PRs are blocked by the owner—CI is green."),
+    Case("caught quoted ordered item PRs blocked by owner then unspaced em dash", 2,
+         "> 1) PRs are blocked by the owner—CI is green."),
+    Case("caught wrapped quoted ordered item PRs blocked by owner then unspaced em dash", 2,
+         "> 1) PRs are blocked by the\n>    owner—CI is green."),
     Case("caught PRs blocked by release manager's freeze policy", 2,
          "PRs are blocked by the release manager's freeze policy."),
     Case("caught PRs blocked by release manager's code freeze policy", 2,
@@ -1236,8 +1242,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 962 or len({case.name for case in ALL_CASES}) != 962:
-    raise RuntimeError("Merge fixture inventory must contain 962 unique cases")
+if len(ALL_CASES) != 965 or len({case.name for case in ALL_CASES}) != 965:
+    raise RuntimeError("Merge fixture inventory must contain 965 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
@@ -1403,6 +1409,45 @@ class ScanTimeTests(unittest.TestCase):
                 module.scan_normalized = counted
                 self.assertEqual(module.scan_text(text), expected)
                 self.assertEqual(len(calls), reading_count)
+
+    def test_dash_hold_check_reads_each_distinct_reading_and_part_once(self) -> None:
+        cases = (
+            # An ambiguous hyphen reading ends the scan before the check runs.
+            ("Laisse—moi fusionner.", 2, 0, 0),
+            # Both invisible-character joiners give the same reading here: one check, and the one
+            # sentence and its one line are the same part.
+            ("PRs are blocked by the " + "x " * 2000 + "—b", 0, 1, 1),
+            # Only the dash sentence and its dash line are read, not every line or sentence.
+            ("- merge\n- go\n" * 40 + "a—b", 0, 1, 2),
+            ("Merge x—y. " * 50, 0, 1, 2),
+            # Distinct invisible-character readings are each checked.
+            ("a\N{ZERO WIDTH SPACE}b—c", 0, 2, 2),
+        )
+        for text, expected, check_count, search_count in cases:
+            with self.subTest(text=text[:40]):
+                spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                checked, searches = [], []
+                check, pattern = module.dash_separates_hold, module.PR_HELD
+
+                def counted(*args):
+                    checked.append(args)
+                    return check(*args)
+
+                class CountedPattern:
+                    def search(self, value):
+                        searches.append(value)
+                        return pattern.search(value)
+
+                module.dash_separates_hold = counted
+                self.assertEqual(module.scan_text(text), expected)
+                self.assertEqual(len(checked), check_count)
+                # Replay the checks alone so only their searches are counted.
+                module.PR_HELD = CountedPattern()
+                for args in checked:
+                    check(*args)
+                self.assertEqual(len(searches), search_count)
 
     def test_long_invisible_run_stays_linear(self) -> None:
         # A quadratic hidden-split scan took over 10 s on this input; linear takes milliseconds.

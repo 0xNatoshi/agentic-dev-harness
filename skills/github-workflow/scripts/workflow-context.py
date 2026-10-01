@@ -1216,16 +1216,21 @@ def hidden_splits(text):
     return count
 
 
-def dash_separates_hold(text, joiner):
-    """Whether a sentence or line holding an em dash reads as a PR hold when the dash separates words.
+def dash_separates_hold(marked):
+    """Whether a sentence or line holding an em dash, marked U+0000, reads as a PR hold when the dash separates words.
 
-    This only selects the full spaced-reading scan, so it may over-select. It reads whole sentences
-    and single lines, as free_restriction tests PR_HELD per sentence and a line may open an imperative.
+    This only selects the full spaced-reading scan, so it may over-select. It reads each sentence holding
+    a dash, as free_restriction tests PR_HELD per sentence, and each of its lines holding one, as a line
+    may open an imperative; like units(), it first drops blockquote prefixes and a list marker from each
+    line ('> 1) PRs are blocked by the owner—CI is green.'). Each distinct part is tested once.
     """
-    # normalize() maps source control characters to joiner, so U+0000 here marks only an em dash.
-    marked = normalize(text, joiner, ' \x00 ')
-    parts = re.split(r'[.!?]', marked) + re.split(r'[.!?\n]', marked)
-    return any(PR_HELD.search(strip_markers(part.replace('\x00', '-'))) for part in parts if '\x00' in part)
+    parts = set()
+    for sentence in re.split(r'[.!?]', marked):
+        if '\x00' in sentence:
+            lines = [LIST_ITEM.sub('', unquote(line), 1) for line in sentence.split('\n')]
+            parts.add(' '.join(lines))
+            parts.update(line for line in lines if '\x00' in line)
+    return any(PR_HELD.search(strip_markers(part.replace('\x00', '-'))) for part in parts)
 
 
 def scan_text(text):
@@ -1235,20 +1240,22 @@ def scan_text(text):
     # Invisible characters may split a word or separate two words, and an em dash may separate words or
     # join them: check each distinct reading. Text without them has a single reading.
     choices = reading_choices(text)
-    readings = dict.fromkeys(normalize(text, joiner, em_dash) for joiner, em_dash in choices if em_dash == '-')
-    spaced = [joiner for joiner, em_dash in choices if em_dash != '-']
-    if readings:
-        # Text with an unspaced em dash: every dash is first read as a hyphen, as before the spaced
-        # reading existed ('Laisse—moi fusionner'). A full second scan doubles the cost of any file
-        # with one such dash, so the spaced reading is scanned only when a sentence holding a dash
-        # reads as a PR hold once the dash separates words ('PRs are blocked by the owner—CI is green').
-        spaced = [joiner for joiner in spaced if dash_separates_hold(text, joiner)]
-    readings.update(dict.fromkeys(normalize(text, joiner) for joiner in spaced))
+    hyphen = dict.fromkeys(normalize(text, joiner, em_dash) for joiner, em_dash in choices if em_dash == '-')
+    # normalize() maps source control characters to the joiner, so U+0000 marks only an em dash here,
+    # and replacing it with '-' gives the spaced reading normalize(text, joiner).
+    marked = dict.fromkeys(normalize(text, joiner, ' \x00 ') for joiner, em_dash in choices if em_dash != '-')
+    # Text with an unspaced em dash: every dash is first read as a hyphen, as before the spaced reading
+    # existed ('Laisse—moi fusionner'). A full second scan doubles the cost of any file with one such
+    # dash, so the spaced reading is scanned only when the hyphen readings are not ambiguous and a
+    # sentence holding a dash reads as a PR hold once the dash separates words
+    # ('PRs are blocked by the owner—CI is green'). The generator keeps that check lazy.
+    spaced = (reading.replace('\x00', '-') for reading in marked if not hyphen or dash_separates_hold(reading))
     results = []
-    for reading in readings:
-        results.append(scan_normalized(reading))
-        if results[-1] == 2:
-            return 2
+    for readings in (hyphen, spaced):
+        for reading in readings:
+            results.append(scan_normalized(reading))
+            if results[-1] == 2:
+                return 2
     if hidden_splits(outside_managed(text)) > 1:
         # Two readings cannot cover several invisible splits that need different choices.
         return 2
