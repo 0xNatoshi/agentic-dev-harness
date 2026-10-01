@@ -238,6 +238,19 @@ def exists(path: Path) -> bool:
     return os.path.lexists(str(path))
 
 
+def inaccessible(path: Path, action: str, retry: str = "plan again") -> Blocked:
+    """A directory the OS refused to search or list, named with the fix instead of an error on one of its children (#54).
+
+    Read and search permission are both named: either alone leaves the directory uninspectable."""
+    try:
+        mode = f"{stat.S_IMODE(os.stat(str(path)).st_mode):04o}"
+    except OSError:
+        mode = None
+    shown = f" (mode {mode})" if mode else ""
+    return Blocked(f"{path} cannot be {action}{shown}, so the installer cannot inspect what it holds; "
+                   f"add owner read and search (execute) permission to {path}, then {retry}", {"path": str(path), "mode": mode})
+
+
 def inventory(root: Path) -> dict | None:
     """Relative POSIX path -> type, mode and, for files, SHA-256 and size. None when absent.
 
@@ -500,22 +513,24 @@ class Locations:
         self.target = self.skills / SKILL
         self.state = self.skills.parent / "dev-harness-install"
 
-    def require_movable(self, recorded_mode: int | None = None, retry: str = "plan again") -> None:
-        """Block before any rename when the selected skill directory or its skill root lacks owner write permission.
+    def require_movable(self, recorded_mode: int | None = None, retry: str = "plan again", moves=()) -> None:
+        """Block before any rename when the selected skill directory, its skill root or a moved duplicate lacks owner write permission.
 
         A conservative precondition of this installer, not a full access check: POSIX refuses to move a
         directory to another parent without write permission on it, or to rename inside a root without
         write permission there, so apply and rollback would stop at their first rename. It runs after the
-        location checks, so it covers an accessible root; retired duplicates and an inaccessible discovery
-        parent are not diagnosed here (#54). Windows is not checked: a directory's read-only attribute does
-        not prevent renames there, and Explorer sets it on customized folders.
+        location checks, which already block a root that cannot be searched or listed (#54). Windows is not
+        checked: a directory's read-only attribute does not prevent renames there, and Explorer sets it on
+        customized folders.
         recorded_mode is the target mode a receipt expects, named so one fix also satisfies its drift check;
         a recorded mode without owner write is also satisfied by that mode with owner write added.
+        moves adds (directory, reason) pairs for retired duplicates, which leave their parent on apply and
+        return to it on rollback.
         """
         if os.name == "nt":
             return
         for path, reason in ((self.skills, f"so {SKILL} cannot be moved in or out of it"),
-                             (self.target, "so it cannot be moved to another directory")):
+                             (self.target, "so it cannot be moved to another directory"), *moves):
             if exists(path) and not os.lstat(str(path)).st_mode & stat.S_IWUSR:
                 mode = stat.S_IMODE(os.lstat(str(path)).st_mode)
                 hint = f"add owner write permission to {path}"
@@ -537,8 +552,26 @@ class Locations:
             "state_root": str(self.state),
         }
 
-    def check(self) -> None:
+    def check(self, retry: str = "plan again") -> None:
         """Block when the target's canonical source or the state location cannot be owned safely."""
+        # Top-down, so a directory that cannot be searched or listed is named before any of its children is
+        # inspected (#54). The OS decides, so ownership and ACLs need no mode reasoning: lstat needs search
+        # permission on the parent, listdir read permission on the directory itself.
+        for root in self.roots:
+            for path in reversed([root / SKILL, root, *root.parents]):
+                try:
+                    os.lstat(str(path))
+                except (FileNotFoundError, NotADirectoryError):
+                    break
+                except PermissionError:
+                    raise inaccessible(path.parent, "searched", retry) from None
+                if path in (self.skills.parent, self.skills) and is_link(path):
+                    break  # Refused as a link below, before anything behind it is inspected.
+                if path == root and os.path.isdir(str(root)):
+                    try:
+                        os.listdir(str(root))
+                    except PermissionError:
+                        raise inaccessible(root, "listed", retry) from None
         for path in (self.skills.parent, self.skills, self.target):
             if is_link(path):
                 raise Blocked(f"{path} is a link or junction; its canonical source is not identified", {"path": str(path)})
@@ -577,8 +610,13 @@ def declares_skill(directory: Path) -> bool:
 def discoverable(roots) -> list:
     """Every directory under the skill roots that a runtime could load as github-workflow.
 
-    Linked directories are reported, not followed, so the plan can block on them.
+    Linked directories are reported, not followed, so the plan can block on them. A directory that cannot
+    be listed or searched blocks: whether it holds another copy cannot be established (#54).
     """
+    def unlisted(error: OSError) -> None:
+        if isinstance(error, PermissionError):
+            raise inaccessible(Path(error.filename), "listed") from None
+
     found = []
     existing = [root for root in roots if root.is_dir()]
     for index, root in enumerate(existing):
@@ -587,14 +625,23 @@ def discoverable(roots) -> list:
         if any(contains(str(other), str(root)) and (not contains(str(root), str(other)) or position < index)
                for position, other in enumerate(existing) if position != index):
             continue
-        for directory, subdirectories, names in os.walk(str(root)):
+        for directory, subdirectories, names in os.walk(str(root), onerror=unlisted):
             kept = []
-            for name in sorted(subdirectories):
-                path = Path(directory) / name
-                if not is_link(path):
-                    kept.append(name)
-                elif name == SKILL or declares_skill(path):
-                    found.append(str(path))
+            try:
+                if subdirectories or names:
+                    # Listing needs read permission only; reaching any entry also needs search permission.
+                    try:
+                        os.lstat(os.path.join(directory, [*subdirectories, *names][0]))
+                    except FileNotFoundError:
+                        pass
+                for name in sorted(subdirectories):
+                    path = Path(directory) / name
+                    if not is_link(path):
+                        kept.append(name)
+                    elif name == SKILL or declares_skill(path):
+                        found.append(str(path))
+            except PermissionError:
+                raise inaccessible(Path(directory), "searched") from None
             subdirectories[:] = kept
             path = Path(directory)
             if "SKILL.md" in names and (path.name == SKILL or declares_skill(path)):
@@ -667,6 +714,10 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
     if overlapping:
         raise Blocked("A github-workflow SKILL.md overlaps a skill root, the target or another copy. Owner: the operator. "
                       "Trigger: move the stray SKILL.md or nested copy out of the skill roots, then plan again", overlapping)
+    # Each duplicate leaves its root on apply (--retire-duplicate) and returns on rollback (#54).
+    locations.require_movable(moves=[move for path in duplicates for move in (
+        (Path(path).parent, f"so the duplicate {path} cannot be moved out of it"),
+        (Path(path), "so this duplicate cannot be moved to another directory"))])
     plan = {
         "plan_format": 1,
         "installer_version": INSTALLER_VERSION,
@@ -1240,7 +1291,7 @@ def command_rollback(options) -> dict:
         raise Refused("The receipt has no after-inventory; rollback refused")
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
-    locations.check()
+    locations.check("run rollback again")
     with Lock(locations.state):
         if exists(locations.state / "CURRENT"):
             raise Blocked(f"An interrupted transaction is recorded in {locations.state / 'CURRENT'}; run `recover` first")
@@ -1248,7 +1299,16 @@ def command_rollback(options) -> dict:
         root = receipt["after"].get(".")
         recorded = root.get("mode") if isinstance(root, dict) else None
         recorded = recorded if type(recorded) is int else None
-        locations.require_movable(recorded, "run rollback again")
+        # Each retired duplicate returns to its original root, or below its nearest existing ancestor (#54).
+        # The retired copy itself is not checked: its inventory records its mode, so one that lost owner
+        # write no longer matches and the verified backup is restored instead.
+        restoring = []
+        for duplicate in receipt["duplicates"]:
+            original = Path(duplicate["path"])
+            parent = next((path for path in original.parents if exists(path)), None)
+            if parent is not None:
+                restoring.append((parent, f"so the retired duplicate {original} cannot be moved back into it"))
+        locations.require_movable(recorded, "run rollback again", restoring)
         active = inventory(locations.target)
         origin = receipt["after"]
         if (recorded is not None and not recorded & stat.S_IWUSR and isinstance(active, dict)
@@ -1354,7 +1414,7 @@ def command_recover(options) -> dict:
         raise Refused("recover needs --plan, --receipt or --runtime")
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
-    locations.check()
+    locations.check("run recover again")
     nothing = {"result": "nothing to recover", "config_root": str(locations.config), "state_root": str(locations.state)}
     if not (options.plan or options.receipt):
         # --runtime resolves the config root from this invocation only; a transaction planned under
