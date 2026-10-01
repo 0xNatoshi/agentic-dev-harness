@@ -959,6 +959,41 @@ TEXT_CASES = (
     Case("cleared PRs blocked by maintainer jobs", 0, "PRs are blocked by the maintainer jobs."),
     Case("cleared PRs blocked by maintainer status", 0, "PRs are blocked by the maintainer status."),
     Case("cleared PRs blocked by maintainer runs", 0, "PRs are blocked by the maintainer runs."),
+    # Issue #62 round 5: the head of the noun phrase after a person decides. A gate or tool head
+    # clears whatever modifies it; any other head, a boundary word or punctuation keeps the hold.
+    Case("cleared PRs blocked by team unit tests", 0, "PRs are blocked by team unit tests."),
+    Case("cleared PRs blocked by maintainer automated checks", 0,
+         "PRs are blocked by the maintainer automated checks."),
+    Case("cleared PRs blocked by team security checks", 0, "PRs are blocked by the team security checks."),
+    Case("cleared PRs blocked by reviewer assignment queue", 0,
+         "PRs are blocked by the reviewer assignment queue."),
+    Case("cleared PRs blocked by maintainer review bot", 0, "PRs are blocked by the maintainer review bot."),
+    Case("cleared PRs blocked by owner's CI", 0, "PRs are blocked by the owner's CI."),
+    Case("cleared PRs blocked by maintainers' required checks", 0,
+         "PRs are blocked by the maintainers’ required checks."),
+    Case("cleared PRs blocked by owner-run checks", 0, "PRs are blocked by the owner-run checks."),
+    Case("cleared PRs blocked by team unit tests until they pass", 0,
+         "PRs are blocked by team unit tests until they pass."),
+    Case("cleared PRs blocked by team unit tests then relative clause", 0,
+         "PRs are blocked by team unit tests, which run nightly."),
+    Case("cleared PRs blocked by release manager checklist", 0,
+         "PRs are blocked by the release manager checklist."),
+    Case("caught PRs blocked by owner's final decision", 2, "PRs are blocked by the owner's final decision."),
+    Case("caught PRs blocked by maintainer's explicit approval", 2,
+         "PRs are blocked by the maintainer's explicit approval."),
+    Case("caught PRs blocked by team lead's sign-off", 2, "PRs are blocked by the team lead's sign-off."),
+    Case("caught PRs blocked by owner this time", 2, "PRs are blocked by the owner this time."),
+    Case("caught PRs blocked by owner and CI", 2, "PRs are blocked by the owner and the CI."),
+    Case("caught PRs blocked by owner of CI", 2, "PRs are blocked by the owner of the CI."),
+    Case("caught PRs blocked by owner not checks", 2, "PRs are blocked by the owner, not the checks."),
+    Case("caught PRs blocked by owner then dash about checks", 2,
+         "PRs are blocked by the owner — checks are irrelevant."),
+    Case("caught PRs blocked by reviewer until checks", 2, "PRs are blocked by the reviewer until checks."),
+    Case("caught PRs blocked by owner over three words before a gate", 2,
+         "PRs are blocked by the owner four words long tests."),
+    Case("caught French PRs blocked by mainteneur du dépôt", 2,
+         "Les PR sont bloquées par le mainteneur du dépôt."),
+    Case("cleared PRs blocked by our CI", 0, "PRs are blocked by our CI."),
     # Independent review of 337c85b: a gate's own words are not a hold, but the rest of its
     # sentence still qualifies a merge-method rule anywhere in the file, in any layout.
     Case("caught PRs blocked by the maintainer then method rule", 2,
@@ -1096,8 +1131,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 859 or len({case.name for case in ALL_CASES}) != 859:
-    raise RuntimeError("Merge fixture inventory must contain 859 unique cases")
+if len(ALL_CASES) != 882 or len({case.name for case in ALL_CASES}) != 882:
+    raise RuntimeError("Merge fixture inventory must contain 882 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

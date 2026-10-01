@@ -232,17 +232,26 @@ PR_BLOCKER_PERSON = (r'(?:(?:la\s+)?(?:décision|validation|approbation|relectur
                      + DECIDER_PREFIX + r'(?:(?:core|security)\s+)?'
                      r'(?:me|us|moi|nous|' + DECIDER_BASE + r's?|' + ROLE_BASE + r's?|(?:tech|team)-leads?|leads?|teams?'
                      r'|mainteneu(?:r|rs|se|ses)|propriétaires?|responsables?|administrat(?:eur|rice)s?'
-                     r'|relecteu(?:r|rs|se|ses)|relectrices?|équipes?|chefs?)'
-                     r'(?:[’\x27]s?\s+(?:decisions?|review|approval|call|sign-?off|go-ahead|go|ok(?:ay)?|say-so|word|request|green\s+light))?'
-                     r'|(?:my|our|mon|ma|notre|nos|mes)\s+(?:decisions?|call|say-so|word|go-ahead|approval|décisions?|validation|accord)')
+                     r'|relecteu(?:r|rs|se|ses)|relectrices?|équipes?|chefs?)')
+# The speaker's own decision: 'blocked by my decision', not 'blocked by our CI'.
+PR_BLOCKER_MINE = r'(?:my|our|mon|ma|notre|nos|mes)\s+(?:decisions?|call|say-so|word|go-ahead|approval|décisions?|validation|accord)\b'
 PR_BLOCKER_GATE = (r'(?:times?|ci|checks?|tests?|builds?|lint|pipelines?|jobs?|workflows?|polic(?:y|ies)'
                    r'|rules?|status|runs?|vérifications?|règles?|protection|requirements?|enforce\w*|counts?|notifications?)')
-# Only fixed gate modifiers may intervene: never skip 'until', 'if' or another condition.
-# A hyphen before a gate/tool names a thing; an em dash before a condition still names a person.
+# Words that end the noun phrase after a person: a condition, relative, preposition,
+# coordination, determiner or verb. 'the reviewer until checks pass' never reaches 'checks'.
+PR_PHRASE_END = (r'(?:until|till|unless|if|while|when\w*|wh(?:o|om|ose|ich)|that|pending|for|since|because|and|or|but|nor|so'
+                 r'|as|on|in|at|to|with\w*|after|before|via|per|from|of|about|than|by|is|are|was|were|be|been|has|have|had'
+                 r'|will|may|can|must|should|would|could|the|a|an|this|these|those|some|any|all|every|each|no'
+                 r'|jusqu\w*|tant|pendant|sauf|si|qui|que|et|ou|mais|avec|sans|après|avant|pour|sur|dans|du|de|des|d'
+                 r'|le|la|les|l|un|une|ce|cet|cette|ces)\b')
+# The phrase's head (its last word, at most three words in) decides: a gate or tool head names a
+# thing ('team unit tests', 'reviewer assignment queue', 'the owner's CI'); any other head, or a
+# longer phrase, names the person ('the owner's final decision'). An unclassified phrase stays a
+# hold. A hyphen joins words; an em dash or comma ends the phrase.
+PR_GATE_HEAD = (r'(?:(?:\s+|-)(?!' + PR_PHRASE_END + r')\w+){0,2}(?:\s+|-)(?:' + PR_BLOCKER_GATE + r'|' + TOOL_WORD + r')\b'
+                r'(?![’\x27-])(?=\s*(?:$|[^\w\s])|\s+' + PR_PHRASE_END + r')')
 PR_BLOCKER = (r'(?:(?:the|a|an|my|our|your|their|his|her|le|la|les|un|une|du|des|mon|ma|mes|ton|ta|tes|notre|nos|votre|vos|leur|leurs|son|sa|ses)\s+|l[’\x27])?'
-              r'(?:(?:' + PR_BLOCKER_PERSON + r')\b(?![’\x27](?:s\b|\s))'
-              r'(?!(?:\s+|-)(?:(?:review|approval|protection|branch|enforced|required|merge|policy)\s+){0,2}'
-              r'(?:' + PR_BLOCKER_GATE + r'|' + TOOL_WORD + r')\b)'
+              r'(?:' + PR_BLOCKER_MINE + r'|(?:' + PR_BLOCKER_PERSON + r')\b(?:[’\x27]s?(?=\s+\w))?(?![’\x27])(?!' + PR_GATE_HEAD + r')'
               r'|(?:(?:feature|deploy|deployment|holiday|release|code|merge|security|legal)(?:\s+|-))?'
               r'(?:freezes?|holds?|embargo(?:es)?|gels?)\b(?![’\x27](?:s\b|\s)|-)' + TOOL_NOUN + r')')
 PR_BLOCKED = (r'^\W*(?:(?:all|every|any|the|open|pending|toutes|tous|les)\s+){0,2}' + PR_NOUN
