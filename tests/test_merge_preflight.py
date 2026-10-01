@@ -549,6 +549,343 @@ TEXT_CASES = (
     Case("caught owner's go split across items", 2, "- Merging stays closed until the owner’s\n- go to proceed."),
     Case("caught freeze dependencies lockfiles and merges", 2, "Freeze dependencies, lockfiles and merges."),
     Case("caught freeze dependencies slash merges", 2, "Freeze dependencies/merges."),
+    # #13 increment 2: reservations without a reserve verb, labels, ask-first, named roles and PR states.
+    Case("caught merge label only after my approval", 2, "- Merge PRs: only after my approval"),
+    Case("caught integration label only after my approval", 2, "Integration: only after my approval."),
+    Case("caught landing label only after my approval", 2, "Landing a PR: only after my approval."),
+    Case("caught PR label hold until my return", 2, "PRs: hold until my return."),
+    Case("caught merge nothing until my return", 2, "Merge nothing until my return."),
+    Case("caught table row ask me first", 2, "| Action | Rule |\n|---|---|\n| Merge PRs | ask me first |"),
+    Case("caught list items ask me first", 2, "- Merge PRs\n- ask me first"),
+    Case("caught only the owner merges", 2, "Only the owner merges PRs."),
+    Case("caught only I may merge", 2, "Only I may merge."),
+    Case("caught nobody but me merges", 2, "Nobody but me merges PRs."),
+    Case("caught merging is my call", 2, "Merging is my call."),
+    Case("caught merging is the owner's decision", 2, "Merging is the owner's decision."),
+    Case("caught I handle all merges myself", 2, "I handle all merges myself."),
+    Case("caught merges go through me", 2, "Merges go through me."),
+    Case("caught route every merge through me", 2, "Route every merge through me."),
+    Case("caught French only the owner merges", 2, "Seul le propriétaire fusionne les PR."),
+    Case("caught French PRs merged by me", 2, "Les PR sont fusionnées par moi."),
+    Case("caught French let me merge", 2, "Laisse-moi fusionner."),
+    Case("caught freeze main until I approve", 2, "Freeze main until I approve."),
+    Case("caught hold main until I approve", 2, "Hold main until I approve."),
+    Case("caught all PRs are blocked", 2, "All PRs are blocked."),
+    Case("caught main branch is paused", 2, "The main branch is paused."),
+    Case("caught merging reserved for the release manager", 2, "Merging is reserved for the release manager."),
+    Case("caught ask a reviewer before merging", 2, "Ask a reviewer before merging."),
+    Case("caught PRs not on hold but frozen", 2, "PRs are not on hold but frozen."),
+    Case("caught French PRs not waiting but frozen", 2, "Les PR ne sont pas en attente mais gelées."),
+    Case("caught list items only after my return", 2, "- Merge only after my\n- return"),
+    Case("caught merges are my responsibility", 2, "Merges are my responsibility."),
+    Case("caught PRs are merged by the owner", 2, "PRs are merged by the owner."),
+    Case("cleared only squash merges", 0, "Only squash merges are allowed."),
+    Case("cleared only the bot merges dependency updates", 0, "Only the bot merges dependency updates after CI."),
+    Case("cleared only human-written PRs are merged", 0, "Only human-written PRs are merged."),
+    Case("cleared only merge PRs that pass CI", 0, "Only merge PRs that pass CI."),
+    Case("cleared merging is my favourite part", 0, "Merging is my favourite part of the job."),
+    Case("cleared merging is your call once CI is green", 0, "Merging is your call once CI is green."),
+    Case("cleared merging is a team decision", 0, "Merging is a team decision."),
+    Case("cleared route build logs through the CI server", 0, "Route build logs through the CI server."),
+    Case("cleared merges go through the merge queue", 0, "Merges go through the merge queue."),
+    Case("cleared route every merge through the merge queue", 0, "Route every merge through the merge queue."),
+    Case("cleared merges go through CI", 0, "Merges go through CI."),
+    Case("cleared PRs merged by the bot", 0, "PRs are merged by the bot after CI."),
+    Case("cleared merge PRs opened by me", 0, "Merge PRs opened by me after CI."),
+    Case("cleared squash merge by default", 0, "Squash merge by default."),
+    Case("cleared French only the bot merges", 0, "Seul le bot fusionne les mises à jour."),
+    Case("cleared French PRs merged by the bot", 0, "Les PR sont fusionnées par le bot."),
+    Case("cleared French leave me a comment", 0, "Laisse-moi un commentaire après la fusion."),
+    Case("cleared freeze the lockfile before merging", 0, "Freeze the lockfile before merging."),
+    Case("cleared freeze main dependencies", 0, "Freeze main dependencies before the release."),
+    Case("cleared pause main menu animations", 0, "Pause main menu animations."),
+    Case("cleared hold the main thread lock", 0, "Hold the main thread lock briefly."),
+    Case("cleared main branch is not paused", 0, "The main branch is not paused."),
+    Case("cleared branch protection is paused", 0, "Branch protection is paused."),
+    Case("cleared PRs are not on hold plain", 0, "PRs are not on hold."),
+    Case("cleared PRs not on hold but ready", 0, "PRs are not on hold but ready."),
+    Case("cleared PRs are not blocked", 0, "PRs are not blocked."),
+    Case("cleared PRs blocked by failing checks", 0, "PRs are blocked by failing checks."),
+    Case("cleared PRs blocked until CI passes", 0, "PRs are blocked until CI passes."),
+    Case("cleared all PRs are squash merged", 0, "All PRs are squash merged."),
+    Case("cleared ask a reviewer for style feedback", 0, "Ask a reviewer for feedback on style."),
+    Case("cleared merge once a reviewer approves", 0, "Merge once a reviewer approves."),
+    Case("cleared merge after CI then ask the bot first", 0, "Merge PRs after CI; ask the bot first."),
+    Case("cleared list items ask the bot first", 0, "- Merge PRs\n- ask the bot first"),
+    Case("cleared merge label squash only", 0, "Merge PRs: squash only."),
+    Case("cleared merge label only after CI", 0, "Merge PRs: only after CI passes."),
+    Case("cleared integration tests label", 0, "Integration tests: only after my approval."),
+    Case("cleared continuous integration label", 0, "Continuous integration: only after my approval."),
+    Case("cleared return value then merge after review", 0, "Document the return value; merge after review."),
+    Case("cleared release manager merges on Fridays", 0, "The release manager merges PRs on Fridays."),
+    Case("cleared I review them myself afterwards", 0, "Merge PRs; I review them myself afterwards."),
+    Case("cleared label item then I write the docs myself", 0, "- Merge PRs\n- I write the docs myself"),
+    Case("cleared label item then releases are my call", 0, "- Merge PRs\n- Releases are my call"),
+    Case("cleared label item then questions go through me", 0, "- Merges\n- Questions go through me"),
+    Case("cleared main branch protection is paused", 0, "Main branch protection is paused."),
+    Case("cleared main loop is paused", 0, "The main loop is paused on breakpoints."),
+    Case("cleared branch builds are paused", 0, "Branch builds are paused."),
+    Case("cleared consult the reviewer guide before merging", 0, "Consult the reviewer guide before merging."),
+    # #13 increment 2, review round 1: emphasis, contractions, more states and roles, split items.
+    Case("caught emphasized merging label", 2, "- **Merging**: only after my approval."),
+    Case("caught underscored merge label", 2, "__Merge PRs__: only after my approval."),
+    Case("caught PRs blocked until further notice", 2, "All PRs are blocked until further notice."),
+    Case("caught PRs blocked while the release runs", 2, "All PRs are blocked while the release is in progress."),
+    Case("caught only the owner is allowed to merge", 2, "Only the owner is allowed to merge PRs."),
+    Case("caught only the owner has permission to merge", 2, "Only the owner has permission to merge."),
+    Case("caught French only the owner has the right to merge", 2, "Seul le propriétaire a le droit de fusionner les PR."),
+    Case("caught I'll handle all merges myself", 2, "I'll handle all merges myself."),
+    Case("caught typographic I'll handle all merges myself", 2, "I’ll handle all merges myself."),
+    Case("caught we'll merge PRs ourselves", 2, "We'll merge PRs ourselves."),
+    Case("caught merging is restricted to me", 2, "Merging is restricted to me."),
+    Case("caught merging is limited to maintainers", 2, "Merging is limited to maintainers."),
+    Case("caught freeze code-span main", 2, "Freeze `main` until I approve."),
+    Case("caught now freeze main", 2, "Now freeze main."),
+    Case("caught only emphasized I may merge", 2, "Only **I** may merge."),
+    Case("caught merging is emphasized my call", 2, "Merging is **my** call."),
+    Case("caught all PRs are emphasized on hold", 2, "All PRs are **on hold**."),
+    Case("caught do emphasized not merge", 2, "Do **not** merge."),
+    Case("caught all PRs are held", 2, "All PRs are held."),
+    Case("caught PRs are on pause", 2, "PRs are on pause."),
+    Case("caught all PRs are parked", 2, "All PRs are parked."),
+    Case("caught PRs aren't on hold but frozen", 2, "PRs aren't on hold but frozen."),
+    Case("caught PRs no longer on hold but frozen", 2, "PRs are no longer on hold but frozen."),
+    Case("caught PRs not on hold anymore but frozen", 2, "PRs are not on hold anymore but frozen."),
+    Case("caught main branch is on hold", 2, "The main branch is on hold."),
+    Case("caught main branch has been paused", 2, "The main branch has been paused."),
+    Case("caught French main branch paused", 2, "La branche main est en pause."),
+    Case("caught French PRs paused", 2, "Les PR sont en pause."),
+    Case("caught French merges go through me", 2, "Les fusions passent par moi."),
+    Case("caught French freeze main until my approval", 2, "Gèle main jusqu'à mon accord."),
+    Case("caught French it is me who merges", 2, "C'est moi qui fusionne les PR."),
+    Case("caught merges always go through me", 2, "Merges always go through me."),
+    Case("caught nobody merges except the owner", 2, "Nobody merges PRs except the owner."),
+    Case("caught let me merge", 2, "Let me merge."),
+    Case("caught French let me merge without hyphen", 2, "Laisse moi fusionner."),
+    Case("caught table row ask me before", 2, "| Action | Rule |\n|---|---|\n| Merge PRs | ask me before |"),
+    Case("caught merging is the tech lead's call", 2, "Merging is the tech lead's call."),
+    Case("caught merging is the code owner's decision", 2, "Merging is the code owner's decision."),
+    Case("caught French list items merge requires my approval", 2, "- Fusion des PR\n- exige mon accord"),
+    Case("caught list items merge requires my approval", 2, "- The merge of PRs\n- requiert my approval"),
+    Case("caught list items before merging ask a reviewer", 2, "- Before merging any PR\n- ask a reviewer"),
+    Case("caught list items before merging ask the owner", 2, "- Before merging any PR, ask\n- the owner"),
+    Case("caught list items consult the release manager", 2, "- Before you merge a PR\n- consult the release manager"),
+    Case("caught list items merging reserved to the owner", 2, "- Merging PRs is reserved\n- to the owner"),
+    Case("caught list items merging is up to the owner", 2, "- Merging is up\n- to the owner"),
+    Case("caught list items nothing merged without the owner", 2, "- Nothing is merged\n- without the owner"),
+    Case("caught ask your tech lead before merging", 2, "Ask your tech lead before merging."),
+    Case("caught only an admin merges", 2, "Only an admin merges."),
+    Case("caught French merging reserved to the release manager", 2,
+         "La fusion est réservée au responsable des versions."),
+    Case("caught merging is handled by the owner", 2, "Merging is handled by the owner."),
+    Case("caught merge nothing before my return", 2, "Merge nothing before my return."),
+    Case("caught merge nothing before my approval", 2, "Merge nothing before my approval."),
+    Case("caught lock main for the migration", 2, "Lock main for the duration of the migration."),
+    Case("caught lock main temporarily", 2, "Lock the main branch temporarily while the migration runs."),
+    Case("cleared builds on main are paused", 0, "Builds on main are paused."),
+    Case("cleared branch protection on main is paused", 0, "Branch protection on main is paused while we migrate."),
+    Case("cleared Renovate on the main branch is paused", 0, "Renovate on the main branch is paused."),
+    Case("cleared debugger main is paused", 0, "When the debugger hits a breakpoint, main is paused."),
+    Case("cleared PRs failing CI are blocked", 0, "PRs failing CI are blocked."),
+    Case("cleared draft PRs are blocked", 0, "Draft PRs are blocked."),
+    Case("cleared PRs blocked for 24 hours", 0, "PRs are blocked for 24 hours after opening."),
+    Case("cleared PRs blocked until checks pass", 0, "PRs are blocked until checks pass."),
+    Case("cleared PRs merged by a maintainer after review", 0, "PRs are merged by a maintainer after review."),
+    Case("cleared PRs merged by the reviewer once approved", 0, "Once approved, PRs are merged by the reviewer."),
+    Case("cleared PRs merged by the release manager on Fridays", 0, "PRs are merged by the release manager on Fridays."),
+    Case("cleared ask a maintainer first about a big feature", 0,
+         "Before starting work on a big feature, ask a maintainer first; small fixes can be merged directly."),
+    Case("cleared list items merging main then ask first", 0,
+         "- Fork the repo and create a branch from main\n- Keep your branch up to date by merging main\n"
+         "- For large changes, ask a maintainer first"),
+    Case("cleared merge conflicts ask the reviewer first", 0, "Merge conflicts: ask the reviewer first."),
+    Case("cleared stuck merge queue ping first", 0, "If the merge queue is stuck, ping the release manager first, then retry."),
+    Case("cleared integration needs admin consent", 0, "Integration: needs admin consent in Entra ID."),
+    Case("cleared integration after the Slack admin approves", 0, "Integration: only after the Slack admin approves the app."),
+    Case("cleared consult CODEOWNERS before merging", 0, "Consult CODEOWNERS before merging to see who reviews what."),
+    Case("cleared consult the reviewers' guide before merging", 0, "Consult the reviewers' guide before merging."),
+    Case("cleared merge via the admin panel", 0, "Merge via the admin panel if the button is greyed out."),
+    Case("cleared merges go through the reviewer queue", 0, "Merges go through the reviewer queue."),
+    Case("cleared only code owners approve merge requests", 0, "Only code owners can approve merge requests."),
+    Case("cleared only reviewers resolve merge conflicts", 0, "Only reviewers should resolve merge conflicts."),
+    Case("cleared only we use squash merges", 0, "Only we use squash merges in this repo."),
+    Case("cleared merged PRs are my responsibility to monitor", 0, "Merged PRs are my responsibility to monitor."),
+    Case("cleared the reviewer's call between squash and rebase", 0, "Merges: the reviewer's call between squash and rebase."),
+    Case("cleared merge commit is up to the reviewer", 0, "Squash vs. merge commit is up to the reviewer."),
+    Case("cleared merging restricted to squash merges", 0, "Merging is restricted to squash merges."),
+    Case("cleared check our return codes before merging", 0, "Check our return codes before merging."),
+    Case("cleared our return-code checklist", 0, "Merging requires our return-code checklist."),
+    Case("cleared we merge our own PRs ourselves", 0, "We merge our own PRs ourselves once CI is green."),
+    Case("cleared I merge my own PRs myself", 0, "I merge my own PRs myself."),
+    Case("cleared PRs aren't on hold", 0, "PRs aren't on hold."),
+    Case("cleared lock the main branch for force pushes", 0, "Lock the main branch for force pushes."),
+    Case("cleared lock main require signed commits", 0, "Lock main: require signed commits."),
+    # Independent review of 0816ddf: 'held to' a standard and a check explanation after
+    # punctuation name no merge hold; their held neighbors stay caught.
+    Case("cleared PRs held to the same standard", 0, "PRs are held to the same standard and approved after CI."),
+    Case("cleared PRs blocked colon failing checks", 0, "PRs are blocked: failing checks."),
+    Case("cleared PRs blocked parenthesis failing checks", 0, "PRs are blocked (failing checks)."),
+    Case("cleared PRs blocked semicolon the tests fail", 0, "PRs are blocked; the tests fail."),
+    Case("caught integration needs my approval", 2, "Integration: needs my approval."),
+    Case("caught integration PRs need my approval before the app", 2,
+         "Integration: PRs need my approval before connecting the app."),
+    Case("caught PRs blocked colon waiting for my approval", 2, "PRs are blocked: waiting for my approval."),
+    Case("caught PRs blocked comma until I return", 2, "All PRs are blocked, until I return."),
+    Case("caught PRs held for my approval", 2, "PRs are held for my approval."),
+    Case("caught integration my approval then tokens clause", 2,
+         "Integration: needs my approval; rotate tokens monthly."),
+    Case("caught integration ask me first then services sentence", 2,
+         "Integration: ask me first. Services restart after."),
+    # Independent review of 06ae000: each exception clears only its reviewed idiom, so these
+    # holds next to it stay caught.
+    Case("caught PRs held in the queue until I approve", 2, "PRs are held in the queue until I approve."),
+    Case("caught PRs held up until I approve", 2, "All PRs are held up until I approve them."),
+    Case("caught PRs held to my approval", 2, "PRs are held to my approval."),
+    Case("caught PRs blocked colon CI is down", 2, "All PRs are blocked: CI is down."),
+    Case("caught PRs blocked comma CI included", 2, "PRs are blocked, CI included."),
+    Case("caught integration my approval even for app changes", 2,
+         "Integration: needs my approval, even for app changes."),
+    Case("caught integration ask me first then deploy the app", 2,
+         "Integration: ask me first, then deploy the app."),
+    Case("caught integration app approval then ask me first", 2,
+         "Integration: needs my approval for the app. Ask me first."),
+    Case("caught PRs held in review pending my approval", 2, "All PRs are held in review pending my approval."),
+    Case("caught PR heading integration approval and service checks", 2,
+         "## Pull requests\nIntegration: only after my approval and after the service checks pass."),
+    Case("caught PRs blocked checks passed awaiting the owner", 2,
+         "PRs are blocked: checks passed, awaiting the owner's decision."),
+    Case("caught PRs held by the merge queue until I approve", 2, "PRs are held by the merge queue until I approve."),
+    Case("caught PRs held by the merge queue then wait for me", 2,
+         "PRs are held by the merge queue until checks pass, then wait for me."),
+    Case("caught integration PRs need my approval to connect the app", 2,
+         "Integration: PRs need my approval to connect the app."),
+    Case("caught integration app approval then hold all PRs", 2,
+         "Integration: needs my approval for the app. Hold all PRs until I say go."),
+    # Independent review of 69e25ee: a PR gate is read like a cleared rule, so a heading,
+    # lead-in, later sentence or later unit still holds it; an app approval is no exception.
+    Case("caught integration app approval then same for PRs", 2,
+         "Integration: needs my approval for the app. Same for PRs."),
+    Case("caught integration service OK then no PR without it", 2,
+         "Integration: needs my OK for the service. Pas de PR sans cela."),
+    Case("caught lead-in until I approve over merge queue gate", 2,
+         "Until I approve:\n- PRs are held by the merge queue until checks pass."),
+    Case("caught merge queue gate then I merge", 2, "PRs are held by the merge queue until checks pass. Then I merge."),
+    Case("caught PRs held to a high bar until I approve", 2, "PRs are held to a high bar until I approve."),
+    Case("caught PRs held to the standard below I approve", 2,
+         "PRs are held to the standard below: I approve each one."),
+    Case("caught PRs held to standards and held until I approve", 2,
+         "Pull requests are held to quality standards, and held until I approve."),
+    Case("caught integration paused until my OK for the service", 2, "Integration: paused until my OK for the service."),
+    Case("caught integration my approval for every service", 2, "Integration: needs my approval for every service."),
+    Case("caught freeze heading over integration app approval", 2, "# Freeze\nIntegration: needs my approval for the app."),
+    Case("caught freeze heading over PRs blocked failing checks", 2,
+         "## Freeze until I approve\nPRs are blocked: failing checks."),
+    Case("caught PRs blocked failing checks then wait paragraph", 2,
+         "PRs are blocked: failing checks.\n\nWait for my approval."),
+    Case("caught PRs held to the standard then wait paragraph", 2,
+         "PRs are held to the same standard.\n\nWait for my go before merging."),
+    Case("caught PRs blocked failing checks then I merge", 2, "PRs are blocked: failing checks. I merge when ready."),
+    Case("cleared CI heading over PRs blocked by failing checks", 0, "## CI\nPRs are blocked by failing checks."),
+    # Independent review of 337c85b: a gate's own words are not a hold, but the rest of its
+    # sentence still qualifies a merge-method rule anywhere in the file, in any layout.
+    Case("caught PRs blocked by the maintainer then method rule", 2,
+         "All PRs are blocked by the maintainer until further notice.\n\n"
+         "Do not use squash merges; use merge commits."),
+    Case("caught method rule then PRs blocked by the maintainer", 2,
+         "Do not use squash merges; use merge commits.\n\n"
+         "All PRs are blocked by the maintainer until further notice."),
+    Case("caught PRs blocked by the owner section beside method section", 2,
+         "## Pull requests\nAll PRs are blocked by the owner for now.\n\n"
+         "## Merge method\nDo not use squash merges; use merge commits."),
+    Case("caught PRs held in the queue until Friday item beside method item", 2,
+         "- PRs are held in the queue until Friday.\n- Do not use squash merges; use merge commits."),
+    Case("caught PRs held in the queue table row beside method row", 2,
+         "| Rule | Detail |\n|---|---|\n| Queue | PRs are held in the queue until Friday. |\n"
+         "| Method | Do not use squash merges; use merge commits. |"),
+    Case("caught nested PRs blocked by the maintainer beside nested method rule", 2,
+         "- Pull requests\n  - All PRs are blocked by the maintainer until further notice.\n"
+         "- Merging\n  - Do not use squash merges; use merge commits."),
+    Case("caught method rule then later PRs held in the queue", 2,
+         "## Merging\nDo not use squash merges; use merge commits.\n\nPRs are held in the queue until Friday."),
+    Case("caught bold PRs held in the queue then method rule", 2,
+         "**PRs are held in the queue until Friday.**\n\nDo not use squash merges; use merge commits."),
+    Case("caught until the maintainer is back PRs blocked then method rule", 2,
+         "Until the maintainer is back, PRs are blocked.\n\nNever create a merge commit; use squash merges."),
+    Case("caught PRs held to the standard and wait then method rule", 2,
+         "PRs are held to the same standard, and wait for the maintainer.\n\n"
+         "Never create a merge commit; use squash merges."),
+    Case("caught PRs blocked by failing checks owner final say then method rule", 2,
+         "PRs are blocked by failing checks, and the owner has the final say.\n\n"
+         "Never create a merge commit; use squash merges."),
+    Case("caught owner holds all PRs they are blocked then method rule", 2,
+         "The owner holds all PRs; they are blocked.\n\nDo not use squash merges; use merge commits."),
+    Case("caught PRs held up until the owner is back then upstream rule", 2,
+         "PRs are held up until the owner is back.\n\n- Never merge from the upstream remote."),
+    Case("caught French PRs blocked by the maintainer then method rule", 2,
+         "Les PR sont bloquées par le mainteneur jusqu’à nouvel ordre.\n\n"
+         "Do not use squash merges; use merge commits."),
+    # Codex review of ec5c0bc: the words before a gate verb are the gate's subject, not its
+    # mechanics, so an owner's wait or decision there still qualifies a method rule.
+    Case("caught PRs wait for the owner's final say blocked by CI then method rule", 2,
+         "PRs must wait for the owner's final say and are blocked by CI.\n\n"
+         "Do not use squash merges; use merge commits."),
+    Case("caught method rule then PRs wait for the owner's final say blocked by CI", 2,
+         "Do not use squash merges; use merge commits.\n\n"
+         "PRs must wait for the owner's final say and are blocked by CI."),
+    Case("caught PRs subject to the owner's decision blocked by checks then method rule", 2,
+         "PRs remain subject to the owner's decision and are blocked by failing checks.\n\n"
+         "Do not use squash merges; use merge commits."),
+    Case("caught method rule then PRs subject to the owner's decision blocked by checks", 2,
+         "Do not use squash merges; use merge commits.\n\n"
+         "PRs remain subject to the owner's decision and are blocked by failing checks."),
+    Case("caught PRs await the owner's final say blocked by CI then method rule", 2,
+         "All PRs await the owner's final say and are blocked by CI.\n\n"
+         "Do not use squash merges; use merge commits."),
+    Case("caught method rule then PRs await the owner's final say blocked by CI", 2,
+         "Do not use squash merges; use merge commits.\n\n"
+         "All PRs await the owner's final say and are blocked by CI."),
+    Case("cleared PRs wait for CI and are blocked by failing checks", 0,
+         "PRs wait for CI and are blocked by failing checks."),
+    Case("cleared PRs blocked until CI passes then method rule", 0,
+         "PRs are blocked until CI passes.\n\nDo not use squash merges; use merge commits."),
+    Case("cleared method section then CI section PRs blocked by failing checks", 0,
+         "## Merging\nDo not use squash merges; use merge commits.\n\n## CI\nPRs are blocked by failing checks."),
+    Case("cleared PRs held to the standard then method rule", 0,
+         "PRs are held to the same standard.\n\nDo not use squash merges; use merge commits."),
+    Case("cleared PRs blocked failing checks item beside method item", 0,
+         "- PRs are blocked: failing checks.\n- Never create a merge commit; use squash merges."),
+    # Accepted false 2s: stopping costs one question, a false 0 an unwanted merge. Asking code
+    # owners by name reads as asking people; a merge done 'myself' reads as a reservation; a
+    # hold until CI passes and a frozen main anywhere in a sentence read as holds. A speaker's
+    # approval of an app under an 'Integration:' label and a merge queue that holds PRs until
+    # checks pass read as holds: the exceptions tried for them cleared real holds nearby.
+    Case("conservative integration my approval to connect the app", 2, "Integration: needs my approval to connect the app."),
+    Case("conservative integration my approval for the Slack app", 2, "Integration: needs my approval for the Slack app."),
+    Case("conservative PRs held by the merge queue until checks pass", 2,
+         "PRs are held by the merge queue until checks pass."),
+    Case("conservative integration app approval then PRs merge after CI", 2,
+         "Integration: needs my approval to connect the app. PRs may merge after CI."),
+    Case("conservative check with the code owners before merging", 2,
+         "Before merging, check with the code owners listed in CODEOWNERS."),
+    Case("conservative we merge dependency updates ourselves", 2, "We merge dependency updates ourselves on Fridays."),
+    Case("conservative I rebase and merge small fixes myself", 2, "I usually rebase and merge small fixes myself."),
+    Case("conservative hold PRs until CI passes", 2, "Hold PRs until CI passes."),
+    # The rest of a gate sentence beside a method rule is read for a hold, so an approval word
+    # there stops, even for CI: the gate words are the only ones set aside.
+    Case("conservative PRs held to the standard and approved after CI beside method rule", 2,
+         "PRs are held to the same standard and approved after CI.\n\n"
+         "Do not use squash merges; use merge commits."),
+    # The words before a gate verb stay readable, so a CI wait written there reads like an
+    # owner's wait beside a method rule; a paragraph after a gate is read as the gate's section.
+    Case("conservative PRs wait for CI blocked by failing checks then method rule", 2,
+         "PRs wait for CI and are blocked by failing checks.\n\n"
+         "Do not use squash merges; use merge commits."),
+    Case("conservative PRs are waiting for CI blocked by failing checks then method rule", 2,
+         "PRs are waiting for CI and are blocked by failing checks.\n\n"
+         "Do not use squash merges; use merge commits."),
+    Case("conservative CI section PRs blocked by failing checks then checks paragraph", 2,
+         "## CI\nPRs are blocked by failing checks.\n\nChecks run automatically."),
+    Case("conservative main is frozen in a screenshot", 2, "Main is frozen in the screenshot below."),
 )
 
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
@@ -586,8 +923,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 466 or len({case.name for case in ALL_CASES}) != 466:
-    raise RuntimeError("Merge fixture inventory must contain 466 unique cases")
+if len(ALL_CASES) != 710 or len({case.name for case in ALL_CASES}) != 710:
+    raise RuntimeError("Merge fixture inventory must contain 710 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
@@ -658,6 +995,96 @@ for number, fixture in enumerate(ALL_CASES, 1):
 
 
 class ScanTimeTests(unittest.TestCase):
+    def test_repeated_classification_work_is_bounded_per_scan(self) -> None:
+        spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        searches = []
+        free = module.FREE
+
+        class Counted:
+            def search(self, text):
+                searches.append(text)
+                return free.search(text)
+
+        module.FREE = Counted()
+        # Count real regex work, including False results, with a fresh cache per scan.
+        for scan in range(2):
+            with self.subTest(scan=scan):
+                searches.clear()
+                self.assertEqual(module.scan_text("- merge\n- go\n" * 40), 0)
+                self.assertEqual(len(searches), 2)
+
+    def test_repeated_run_items_add_no_per_item_work(self) -> None:
+        # test_alternating_list_run_stays_bounded repeats these two items 10000 times;
+        # per-item stripping and run matching made it the slowest gated scan (#13).
+        item = "- merge\n- go\n"
+        work = []
+        for factor in (1, 2):
+            spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            # Every item adds at least one character, so both scans fill the run
+            # window and the counts compare full windows.
+            repeats = factor * (module.RUN_WINDOW + 1)
+            calls = []
+            strip_markers = module.strip_markers
+
+            class Counted:
+                def __init__(self, pattern):
+                    self.pattern = pattern
+
+                def search(self, text, *args):
+                    calls.append(text)
+                    return self.pattern.search(text, *args)
+
+            module.strip_markers = lambda value: calls.append(value) or strip_markers(value)
+            module.RUN_WORDS = {key: Counted(pattern) for key, pattern in module.RUN_WORDS.items()}
+            module.RUN_BRANCHES = tuple((Counted(pattern), *rest) for pattern, *rest in module.RUN_BRANCHES)
+            self.assertEqual(module.scan_text(item * repeats), 0)
+            work.append(len(calls))
+        self.assertEqual(work[0], work[1])
+
+    def test_repeated_classifications_keep_context_and_state(self) -> None:
+        rule = "No rebase merges; use squash merges."
+        cases = (
+            ("different context", "- merge\n- go\n" * 8 + "\n## Never\n\n- merge\n"),
+            ("same joined text", rule + "\n\nNo rebase\n\nmerges; use squash merges."),
+            ("repeated section", "## Rules\n\n" + rule + "\n\n## Rules\n\n" + rule
+             + "\n\nEach one is manual."),
+            ("many distinct units", "\n\n".join("Entry %d." % n for n in range(160))
+             + "\n\nDo not merge pull requests."),
+        )
+        for name, text in cases:
+            with self.subTest(case=name):
+                spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                self.assertEqual(module.scan_text(text), 2)
+
+    def test_each_distinct_normalized_reading_is_scanned_once(self) -> None:
+        cases = (
+            ("- merge\n- go\n", 0, 1),
+            ("Autonomous merge sus\u200bpended — request dated 2026-09-27", 1, 2),
+            ("Autonomous\u200bmerge suspended — request dated 2026-09-27", 1, 2),
+            ("Autonomous\u200bmerge sus\u200bpended — request dated 2026-09-27", 2, 2),
+        )
+        for text, expected, reading_count in cases:
+            with self.subTest(text=text):
+                spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                calls = []
+                scan_normalized = module.scan_normalized
+
+                def counted(reading):
+                    calls.append(reading)
+                    return scan_normalized(reading)
+
+                module.scan_normalized = counted
+                self.assertEqual(module.scan_text(text), expected)
+                self.assertEqual(len(calls), reading_count)
+
     def test_long_invisible_run_stays_linear(self) -> None:
         # A quadratic hidden-split scan took over 10 s on this input; linear takes milliseconds.
         spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
@@ -675,3 +1102,23 @@ class ScanTimeTests(unittest.TestCase):
         start = time.monotonic()
         self.assertEqual(module.scan_text("- merge\n- go\n" * 10000), 0)
         self.assertLess(time.monotonic() - start, 3)
+
+    def test_list_without_connective_tries_no_run_branch(self) -> None:
+        # Reading 'Nothing is merged without ...' on every '- first' item made this list 1.9x
+        # slower than before. Without its connective no branch can match, so none is tried.
+        spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        searches = []
+
+        class Counted:
+            def __init__(self, pattern):
+                self.pattern = pattern
+
+            def search(self, text):
+                searches.append(self.pattern.pattern)
+                return self.pattern.search(text)
+
+        module.RUN_BRANCHES = tuple((Counted(pattern), *rest) for pattern, *rest in module.RUN_BRANCHES)
+        self.assertEqual(module.scan_text("- merge no one\n- first\n- first\n" * 200), 0)
+        self.assertEqual(len(searches), 0)
