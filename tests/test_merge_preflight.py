@@ -1015,6 +1015,32 @@ class ScanTimeTests(unittest.TestCase):
                 self.assertEqual(module.scan_text("- merge\n- go\n" * 40), 0)
                 self.assertEqual(len(searches), 2)
 
+    def test_repeated_run_items_add_no_per_item_work(self) -> None:
+        # The CI-list input repeats two items 10000 times; per-item stripping and
+        # run matching made it the slowest gated scan (#50).
+        work = []
+        for repeats in (40, 80):
+            spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            calls = []
+            strip_markers = module.strip_markers
+
+            class Counted:
+                def __init__(self, pattern):
+                    self.pattern = pattern
+
+                def search(self, text, *args):
+                    calls.append(text)
+                    return self.pattern.search(text, *args)
+
+            module.strip_markers = lambda value: calls.append(value) or strip_markers(value)
+            module.RUN_WORDS = {key: Counted(pattern) for key, pattern in module.RUN_WORDS.items()}
+            module.RUN_BRANCHES = tuple((Counted(pattern), *rest) for pattern, *rest in module.RUN_BRANCHES)
+            self.assertEqual(module.scan_text("- merge\n- go\n" * repeats), 0)
+            work.append(len(calls))
+        self.assertEqual(work[0], work[1])
+
     def test_repeated_classifications_keep_context_and_state(self) -> None:
         rule = "No rebase merges; use squash merges."
         cases = (

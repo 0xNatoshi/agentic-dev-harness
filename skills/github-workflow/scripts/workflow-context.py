@@ -640,6 +640,18 @@ def strip_markers(value):
     return DATED.sub('', EXAMPLE.sub('', EMPHASIS.sub('', re.sub(r'\s+', ' ', value))))
 
 
+def run_class(text):
+    """The text the run patterns read and its RUN_WORDS classes."""
+    text = strip_markers(text)
+    return text, ''.join(key for key, pattern in RUN_WORDS.items() if pattern.search(text))
+
+
+def run_match(joined, last_two, candidates):
+    """Whether a candidate branch matches the run's last sentence or its last two items."""
+    return any(pattern.search(last_two if pair else joined) for pattern, pair, tail in candidates
+               if tail is None or tail.search(joined))
+
+
 def units(lines, hold_found, heading_found=lambda level: None):
     """Yield (context, unit) for each Markdown block and its wrapped lines.
 
@@ -663,6 +675,9 @@ def units(lines, hold_found, heading_found=lambda level: None):
     run_classes = collections.deque()  # their RUN_WORDS classes
     run_words = collections.Counter()  # RUN_WORDS classes across the run
     run_size, run_held = 0, False
+    # Pure per-text work, so repeated items and run windows are read once.
+    classify = functools.lru_cache(maxsize=128)(run_class)
+    held = functools.lru_cache(maxsize=128)(run_match)
 
     def context(extra=(), near=()):
         """Heading path, then lead-ins and extra cut to CONTEXT_LIMIT, then near items uncut."""
@@ -681,12 +696,11 @@ def units(lines, hold_found, heading_found=lambda level: None):
             return
         # Sized on the text the patterns read, so padding or example markers
         # cannot push an earlier item out of the window.
-        text = strip_markers(text)
+        text, words = classify(text)
         # Keep at least RUN_WINDOW characters of earlier items before the new one.
         while len(run) > 1 and run_size - len(run[0]) - 1 >= RUN_WINDOW:
             run_size -= len(run.popleft()) + 1
             run_words.subtract(run_classes.popleft())
-        words = ''.join(key for key, pattern in RUN_WORDS.items() if pattern.search(text))
         run.append(text)
         run_classes.append(words)
         run_size += len(text) + 1
@@ -700,8 +714,8 @@ def units(lines, hold_found, heading_found=lambda level: None):
             return
         present = {key for key, count in run_words.items() if count}
         decider_only = not RUN_ENDS_ANY.intersection(words)
-        candidates = [(pattern, pair, tail if decider_only else None) for pattern, needed, ends, tail, pair in RUN_BRANCHES
-                      if needed <= present and not (decider_only and ends.isdisjoint(words))]
+        candidates = tuple((pattern, pair, tail if decider_only else None) for pattern, needed, ends, tail, pair in RUN_BRANCHES
+                           if needed <= present and not (decider_only and ends.isdisjoint(words)))
         if not candidates:
             return
         joined = ' '.join(run)
@@ -709,8 +723,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
         start = max(joined.rfind('.', 0, cut), joined.rfind('!', 0, cut), joined.rfind('?', 0, cut)) + 1
         last_two = joined[max(start, cut - len(run[-2])):]
         joined = joined[start:]
-        if any(pattern.search(last_two if pair else joined) for pattern, pair, tail in candidates
-               if tail is None or tail.search(joined)):
+        if held(joined, last_two, candidates):
             run_held = True
             hold_found()
 
@@ -1053,13 +1066,14 @@ def scan_normalized(text):
     level, section = 0, None  # current heading level; level of the cleared rule's section
     # Cache only pure classification; every unit still updates the scan state.
     restriction = functools.lru_cache(maxsize=128)(free_restriction)
+    strip = functools.lru_cache(maxsize=128)(strip_markers)
     for context, unit in units(outside, lambda: held.append(True), headings.append):
         if headings:
             level = headings.pop()
             if section is not None and level <= section:
                 section = None  # a sibling or parent heading ends the cleared rule's section
-        unit = strip_markers(unit)
-        context = strip_markers(context)
+        unit = strip(unit)
+        context = strip(context)
         result = restriction(context, unit)
         if result is True:
             return 2
