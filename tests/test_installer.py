@@ -1012,6 +1012,88 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
         self.assertEqual(snapshot(self.target), after)
 
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_the_selected_skill_directory_or_one_inside_it_that_cannot_be_searched_or_listed_blocks(self):
+        before = self.v52_layout()
+
+        def blocked(path, command, retry):
+            # Each mode keeps owner write, so only the search or list check can block.
+            for mode, action in ((0o600, "searched"), (0o300, "listed")):
+                with self.subTest(command=command[0], path=str(path), mode=f"{mode:04o}"):
+                    path.chmod(mode)
+                    try:
+                        result = self.run_installer(*command)
+                        self.assert_refused(result, 2)
+                        error = json.loads(result.stderr)
+                        self.assertIn(f"{path} cannot be {action} (mode {mode:04o}), so the installer cannot inspect what "
+                                      f"it holds; add owner read and search (execute) permission to {path}, then {retry}",
+                                      error["error"])
+                        self.assertEqual(error["details"], {"path": str(path), "mode": f"{mode:04o}"})
+                    finally:
+                        path.chmod(0o755)
+
+        output = self.base / "blocked-plan.json"
+        for path in (self.target, self.target / "templates"):
+            blocked(path, ("plan", "--runtime", "claude", "--home", self.home, "--checksums", self.checksums,
+                           "--output", output), "plan again")
+            self.assertFalse(output.exists())
+            self.assertEqual(snapshot(self.target), before)
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        inside = next(path for path in sorted(self.target.iterdir()) if path.is_dir())
+        for path in (self.target, inside):
+            blocked(path, ("rollback", "--receipt", receipt_path, "--maintenance-confirmed"), "run rollback again")
+            self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+            self.assertFalse((self.state() / "CURRENT").exists())
+            self.assertEqual(snapshot(self.target), after)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_a_second_codex_root_that_cannot_be_searched_or_listed_blocks_plan(self):
+        self.v52_layout(self.home / ".agents" / "skills" / "github-workflow")
+        second = self.home / ".codex" / "skills"
+        (second / "other-skill").mkdir(parents=True)
+        output = self.base / "blocked-plan.json"
+        for mode, action in ((0o444, "searched"), (0o300, "listed")):
+            with self.subTest(mode=f"{mode:04o}"):
+                second.chmod(mode)
+                try:
+                    result = self.run_installer("plan", "--runtime", "codex", "--home", self.home, "--checksums",
+                                                self.checksums, "--output", output)
+                    self.assert_refused(result, 2)
+                    self.assertIn(f"{second} cannot be {action} (mode {mode:04o})", json.loads(result.stderr)["error"])
+                    self.assertFalse(output.exists())
+                finally:
+                    second.chmod(0o755)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_rollback_blocks_a_folder_its_retired_duplicate_cannot_be_searched_back_into(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        vendor = self.home / ".codex" / "skills" / "vendor"
+        legacy = vendor / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt_path = Path(json.loads(result.stdout)["receipt"])
+        receipt = receipt_path.read_bytes()
+        after = snapshot(target)
+        # Owner write without search: a write-only check would let the renames start and fail at the move back.
+        vendor.chmod(0o644)
+        try:
+            rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(rollback, 2)
+            self.assertIn(f"{vendor} cannot be searched (mode 0644), so the installer cannot inspect what it holds; "
+                          f"add owner read and search (execute) permission to {vendor}, then run rollback again",
+                          json.loads(rollback.stderr)["error"])
+        finally:
+            vendor.chmod(0o755)
+        self.assertEqual(receipt_path.read_bytes(), receipt)
+        self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+        self.assertEqual(snapshot(target), after)
+        self.assertFalse(legacy.exists())
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+
     def test_rerun_recover_sets_a_stale_restoration_copy_aside(self):
         before, parked = self.crash_after_parking()
         shutil.rmtree(parked)
@@ -1096,6 +1178,45 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("put back as found", json.loads(stderr)["error"])
         self.assertEqual(snapshot(self.target), edited)
         self.assertNotEqual(edited, before)
+        self.assertFalse((self.state() / "CURRENT").exists())
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "pauses the installer with a named pipe; POSIX modes")
+    def test_a_directory_made_unlistable_during_apply_restores_the_original_state(self):
+        before = self.v52_layout()
+        other = self.home / ".claude" / "skills" / "other-skill"
+        other.mkdir()
+        plan = self.plan()
+        pipe = self.base / "trace.fifo"
+        os.mkfifo(pipe)
+        process = subprocess.Popen([sys.executable, "-B", str(self.installer), "apply", "--plan", str(plan), "--checksums",
+                                    str(self.checksums), "--maintenance-confirmed"], cwd=self.base,
+                                   env=self.environment({"DEV_HARNESS_INSTALL_TEST_TRACE": str(pipe)}),
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+        reader = None
+        try:
+            # Paused at apply:staged, after every check and before the first rename: only the discovery that
+            # follows the renames can meet the unlistable directory.
+            for _ in range(600):
+                if list(self.state().glob("*/staged/github-workflow")) or process.poll() is not None:
+                    break
+                time.sleep(0.05)
+            self.assertIsNone(process.poll(), "the installer did not pause before its first rename")
+            other.chmod(0o300)
+            try:
+                reader = os.open(str(pipe), os.O_RDONLY | os.O_NONBLOCK)
+                stdout, stderr = process.communicate(timeout=120)
+            finally:
+                other.chmod(0o755)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+            if reader is not None:
+                os.close(reader)
+        self.assertEqual(process.returncode, 1, stdout + stderr)
+        self.assertIn(f"{other} cannot be listed (mode 0300)", json.loads(stderr)["error"])
+        self.assertIn("the original state was restored", json.loads(stderr)["error"])
+        self.assertEqual(snapshot(self.target), before)
         self.assertFalse((self.state() / "CURRENT").exists())
 
     def test_recover_uses_the_recorded_config_root(self):

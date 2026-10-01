@@ -251,13 +251,15 @@ def inaccessible(path: Path, action: str, retry: str = "plan again") -> Blocked:
                    f"add owner read and search (execute) permission to {path}, then {retry}", {"path": str(path), "mode": mode})
 
 
-def inventory(root: Path) -> dict | None:
+def inventory(root: Path, retry: str | None = None) -> dict | None:
     """Relative POSIX path -> type, mode and, for files, SHA-256 and size. None when absent.
 
     The root itself is the `.` entry, so its mode takes part in every drift and restoration check.
 
     A link, junction or special file anywhere in the tree blocks: its target is outside what an
     exact rollback can own.
+    With retry, given by a command checking before any rename, a directory in the tree that cannot be
+    listed or searched blocks with its fix (#54); inside a transaction the error stays an OSError.
     """
     if not exists(root):
         return None
@@ -269,13 +271,25 @@ def inventory(root: Path) -> dict | None:
     pending = [(root, "")]
     while pending:
         directory, prefix = pending.pop()
-        with os.scandir(str(directory)) as listing:
+        try:
+            listing = os.scandir(str(directory))
+        except PermissionError:
+            if retry is None:
+                raise
+            raise inaccessible(directory, "listed", retry) from None
+        with listing:
             for item in listing:
                 relative = prefix + item.name
                 path = directory / item.name
-                if is_link(path):
+                try:
+                    # Listing needs read permission only; reaching an entry also needs search permission.
+                    linked, status = is_link(path), os.lstat(str(path))
+                except PermissionError:
+                    if retry is None:
+                        raise
+                    raise inaccessible(directory, "searched", retry) from None
+                if linked:
                     raise Blocked(f"Link or junction inside the tree: {path}", {"path": str(path)})
-                status = os.lstat(str(path))
                 if stat.S_ISDIR(status.st_mode):
                     entries[relative] = {"type": "dir", "mode": stat.S_IMODE(status.st_mode)}
                     pending.append((path, relative + "/"))
@@ -689,7 +703,7 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
     package = load_package(package_source)
     verification = verify_package(package, checksums)
     package_files = package.skill_files()
-    before = inventory(locations.target)
+    before = inventory(locations.target, "plan again")
     classification = {name: classify(name, entry, package_files) for name, entry in (before or {}).items()}
     preserved = [name for name, kind in classification.items() if kind in PRESERVED]
     kept = [name for name, kind in classification.items() if kind == "directory"]
@@ -735,7 +749,7 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
                                       "give each retired file's retired_copy and backup location, and a rollback_command "
                                       "that runs the package installer's verified copy kept in that directory"},
         "duplicates": duplicates,
-        "duplicate_inventories": {path: inventory(Path(path)) for path in duplicates},
+        "duplicate_inventories": {path: inventory(Path(path), "plan again") for path in duplicates},
         "legacy_commands": [str(path) for path in locations.legacy if exists(path)],
         "interrupted": str(locations.state / "CURRENT") if exists(locations.state / "CURRENT") else None,
     }
@@ -1170,14 +1184,21 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         "moves": moves,
     })
     attempt(operation, locations.state)
-    discovered = discoverable(locations.roots)
-    if len(discovered) != 1 or not same_path(discovered[0], str(locations.target)):
+    try:
+        discovered, unreadable = discoverable(locations.roots), None
+    except Blocked as error:
+        # A directory made unreadable after the checks hides whether another copy exists: the renames are
+        # undone as for a second copy, never left in place behind an exit 2 (#54).
+        discovered, unreadable = None, error
+    if unreadable or len(discovered) != 1 or not same_path(discovered[0], str(locations.target)):
         operation.record["discovered"] = discovered
         try:
             operation.undo()
         except (Failure, OSError) as error:
             raise Incomplete(f"Exactly one discoverable copy was not established and restoration is incomplete: {error}")
         finish(locations.state)
+        if unreadable:
+            raise Refused(f"{unreadable}; the original state was restored", unreadable.details)
         raise Refused("Exactly one discoverable copy was not established; the original state was restored", discovered)
     classification = plan["classification"]
     receipt_path = transaction / "receipt.json"
@@ -1302,14 +1323,26 @@ def command_rollback(options) -> dict:
         # Each retired duplicate returns to its original root, or below its nearest existing ancestor (#54).
         # The retired copy itself is not checked: its inventory records its mode, so one that lost owner
         # write no longer matches and the verified backup is restored instead.
+        # Top-down with lstat, as in check(): a directory that cannot be searched is named, never taken for an
+        # absent one, and the parent the duplicate returns through must be searchable as well as writable.
         restoring = []
         for duplicate in receipt["duplicates"]:
             original = Path(duplicate["path"])
-            parent = next((path for path in original.parents if exists(path)), None)
+            parent = None
+            for path in reversed([original, *original.parents]):
+                try:
+                    os.lstat(str(path))
+                except (FileNotFoundError, NotADirectoryError):
+                    break
+                except PermissionError:
+                    raise inaccessible(path.parent, "searched", "run rollback again") from None
+                parent = path
+            if parent == original:
+                parent = original.parent
             if parent is not None:
                 restoring.append((parent, f"so the retired duplicate {original} cannot be moved back into it"))
         locations.require_movable(recorded, "run rollback again", restoring)
-        active = inventory(locations.target)
+        active = inventory(locations.target, "run rollback again")
         origin = receipt["after"]
         if (recorded is not None and not recorded & stat.S_IWUSR and isinstance(active, dict)
                 and isinstance(active.get("."), dict) and active["."].get("mode") == recorded | stat.S_IWUSR):
