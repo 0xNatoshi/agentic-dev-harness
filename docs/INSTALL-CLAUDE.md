@@ -88,3 +88,9 @@ The receipt lists exact retired paths, including the command if qualified. Avoid
 ## Rollback
 
 Compare every target against its installed hash. Restore backups or reverse diffs only without overwriting later work; otherwise merge. Remove a newly created file only when it still matches the installed copy and is unused. Reverify imports/instructions/skill after restoration.
+
+## Recover an interrupted installer transaction
+
+After stopping every Claude and Codex session, run recovery from a separate terminal in the verified extracted package. For an interrupted `install.py apply`, prefer `py -3 .\install.py recover --plan "<saved-plan.json>" --maintenance-confirmed`. For an interrupted `install.py rollback`, use `py -3 .\install.py recover --receipt "<saved-receipt.json>" --maintenance-confirmed`. Keep the saved plan, receipt and transaction data. The installer checks for active consumers and blocks when their state cannot be established.
+
+The plan or receipt reuses the recorded configuration root even when `CLAUDE_CONFIG_DIR` or `--home` has changed. `recover --runtime claude` resolves the current locations; its `nothing to recover` result covers only the state directory reported by that invocation. Recovery restores the before-state of an interrupted installer transaction. Profile and skill edits made manually still use the verified backups above.

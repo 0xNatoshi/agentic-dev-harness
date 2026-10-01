@@ -785,6 +785,46 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(Path(report["stale_restore_copies"][0]).is_dir())
         self.assertEqual(snapshot(self.target), before)
 
+    def test_recover_without_a_transaction_names_the_codex_home_as_the_cause(self):
+        # An existing state directory without CURRENT, as left by an earlier completed transaction.
+        state = self.home / ".agents" / "dev-harness-install"
+        state.mkdir(parents=True)
+        report = self.recover("codex")
+        self.assertEqual(report["result"], "nothing to recover")
+        self.assertEqual(report["state_root"], str(state))
+        self.assertIn("another home directory (--home)", report["hint"])
+        self.assertIn("--plan", report["hint"])
+        self.assertIn("--receipt", report["hint"])
+        self.assertNotIn("CODEX_HOME", report["hint"])
+
+    def test_recover_killed_after_setting_a_stale_copy_aside_still_reports_it(self):
+        before, parked = self.crash_after_parking()
+        shutil.rmtree(parked)
+        failed = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed",
+                                    env={"DEV_HARNESS_INSTALL_TEST_FAULT": "apply:undo-restore"})
+        self.assert_refused(failed, 3)
+        killed = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed",
+                                    env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:undo-restore:set-aside:done"})
+        self.assertEqual(killed.returncode, 70, killed.stderr)
+        report = self.recover()
+        self.assertEqual(len(report["stale_restore_copies"]), 1)
+        self.assertTrue(Path(report["stale_restore_copies"][0]).is_dir())
+        self.assertEqual(snapshot(self.target), before)
+
+    def test_stale_copy_report_omits_an_aside_path_that_was_never_used(self):
+        before, parked = self.crash_after_parking()
+        shutil.rmtree(parked)
+        failed = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed",
+                                    env={"DEV_HARNESS_INSTALL_TEST_FAULT": "apply:undo-restore"})
+        self.assert_refused(failed, 3)
+        refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_FAULT": "apply:undo-restore:set-aside"})
+        self.assert_refused(refused, 3)
+        report = self.recover()
+        self.assertEqual(len(report["stale_restore_copies"]), 1)
+        self.assertTrue(Path(report["stale_restore_copies"][0]).is_dir())
+        self.assertEqual(snapshot(self.target), before)
+
     @unittest.skipIf(os.name == "nt", "pauses the installer with a named pipe")
     def test_target_changed_during_apply_is_put_back_as_found(self):
         before = self.v52_layout()
@@ -832,6 +872,12 @@ class InstallerTests(unittest.TestCase):
         default = self.recover()
         self.assertEqual(default["result"], "nothing to recover")
         self.assertFalse((self.home / ".claude").exists())
+        # "Nothing to recover" must not read as all clear: it names what was checked and the recovery route.
+        self.assertEqual(default["config_root"], str(self.home / ".claude"))
+        self.assertEqual(default["state_root"], str(self.home / ".claude" / "dev-harness-install"))
+        self.assertIn("--plan", default["hint"])
+        self.assertIn("--receipt", default["hint"])
+        self.assertIn("CLAUDE_CONFIG_DIR", default["hint"])
         report = self.run_installer("recover", "--plan", output, "--maintenance-confirmed")
         self.assertEqual(report.returncode, 0, report.stderr)
         self.assertEqual(json.loads(report.stdout)["result"], "restored")
