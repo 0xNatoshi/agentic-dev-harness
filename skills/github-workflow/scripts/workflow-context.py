@@ -109,6 +109,9 @@ def normalize(text, joiner=''):
     for c in set(text):
         if invisible(c):
             table[ord(c)] = joiner
+        elif c in '\u2014\u2015':
+            # An em dash or horizontal bar separates words even unspaced, unlike a hyphen that joins them.
+            table[ord(c)] = ' - '
         elif unicodedata.category(c) == 'Pd' or c == '\u2212':
             table[ord(c)] = '-'
     return text.translate(table).replace('\r\n', '\n').replace('\r', '\n').casefold()
@@ -227,39 +230,54 @@ FAILURE_EXPLANATION = (r'\s*(?:the\s+)?(?:(?:failing|failed|red)\s+' + CHECK_NOU
                        + r'\s+(?:fail|fails|failed|(?:are|is)\s+(?:red|failing)))\s*(?:\)\s*)?$')
 # A named human or explicit freeze is a hold; a role modifying a gate or thing is not.
 # A possessive decision still names the human; a tool noun after it ('review queue') does not.
+# 'lead time' names a delay, not a lead.
 PR_BLOCKER_PERSON = (r'(?:(?:la\s+)?(?:décision|validation|approbation|relecture)\s+'
                      r'(?:du|de\s+la|de\s+l[’\x27]|des)\s*)?'
                      + DECIDER_PREFIX + r'(?:(?:core|security)\s+)?'
-                     r'(?:me|us|moi|nous|' + DECIDER_BASE + r's?|' + ROLE_BASE + r's?|(?:tech|team)-leads?|leads?|teams?'
+                     r'(?:me|us|moi|nous|' + DECIDER_BASE + r's?|' + ROLE_BASE + r's?|(?:tech|team)-leads?|leads?(?!\s+times?\b)|teams?'
                      r'|mainteneu(?:r|rs|se|ses)|propriétaires?|responsables?|administrat(?:eur|rice)s?'
                      r'|relecteu(?:r|rs|se|ses)|relectrices?|équipes?|chefs?)')
 # The speaker's own decision: 'blocked by my decision', not 'blocked by our CI'.
 PR_BLOCKER_MINE = r'(?:my|our|mon|ma|notre|nos|mes)\s+(?:decisions?|call|say-so|word|go-ahead|approval|décisions?|validation|accord)\b'
-PR_BLOCKER_GATE = (r'(?:times?|ci|checks?|tests?|builds?|lint|pipelines?|jobs?|workflows?|polic(?:y|ies)'
-                   r'|rules?|status|runs?|vérifications?|règles?|protection|requirements?|enforce\w*|counts?|notifications?)')
+PR_BLOCKER_GATE = (r'(?:ci|checks?|checkers?|tests?|builds?|lint\w*|pipelines?|jobs?|workflows?|polic(?:y|ies)|gates?'
+                   r'|failures?|scans?|coverage|(?<=github\s)actions|rules?|status|runs?|vérifications?|règles?|protection'
+                   r'|requirements?|enforce\w*|counts?|notifications?)')
 # Words that end the noun phrase after a person: a condition, relative, preposition,
-# coordination, determiner or verb. 'the reviewer until checks pass' never reaches 'checks'.
+# coordination, determiner, verb or time adverb. 'the reviewer until checks pass' never reaches 'checks'.
 PR_PHRASE_END = (r'(?:until|till|unless|if|while|when\w*|wh(?:o|om|ose|ich)|that|pending|for|since|because|and|or|but|nor|so'
                  r'|as|on|in|at|to|with\w*|after|before|via|per|from|of|about|than|by|is|are|was|were|be|been|has|have|had'
                  r'|will|may|can|must|should|would|could|the|a|an|this|these|those|some|any|all|every|each|no'
+                 r'|today|tonight|now|again|still|right|currently'
                  r'|jusqu\w*|tant|pendant|sauf|si|qui|que|et|ou|mais|avec|sans|après|avant|pour|sur|dans|du|de|des|d'
                  r'|le|la|les|l|un|une|ce|cet|cette|ces)\b')
-# The phrase's head (its last word, at most three words in) decides: a gate or tool head names a
+FREEZE_NOUN = r'(?:freezes?|holds?|embargo(?:es)?|gels?)'
+# A modifier is one word; a hyphenated compound ('end-to-end') is one word, so a phrase end inside
+# it ends nothing. A standalone freeze or hold word is never a modifier: 'the team's freeze rules'
+# names the freeze, not a gate.
+PR_MODIFIER = r'(?!(?:' + PR_PHRASE_END + r'|' + FREEZE_NOUN + r'\b)(?!-))\w+(?:-\w+)*'
+# The phrase's head (its last word, at most four words in) decides: a gate or tool head names a
 # thing ('team unit tests', 'reviewer assignment queue', 'the owner's CI'); any other head, or a
 # longer phrase, names the person ('the owner's final decision'). An unclassified phrase stays a
-# hold. A hyphen joins words; an em dash or comma ends the phrase.
-PR_GATE_HEAD = (r'(?:(?:\s+|-)(?!' + PR_PHRASE_END + r')\w+){0,2}(?:\s+|-)(?:' + PR_BLOCKER_GATE + r'|' + TOOL_WORD + r')\b'
+# hold. A hyphen joins words; a comma ends the phrase, and so does an em dash, which normalize() spaces.
+PR_GATE_HEAD = (r'(?:\s+|-)(?:' + PR_MODIFIER + r'\s+){0,3}(?:\w+-)*(?:' + PR_BLOCKER_GATE + r'|' + TOOL_WORD + r')\b'
                 r'(?![’\x27-])(?=\s*(?:$|[^\w\s])|\s+' + PR_PHRASE_END + r')')
-PR_BLOCKER = (r'(?:(?:the|a|an|my|our|your|their|his|her|le|la|les|un|une|du|des|mon|ma|mes|ton|ta|tes|notre|nos|votre|vos|leur|leurs|son|sa|ses)\s+|l[’\x27])?'
-              r'(?:' + PR_BLOCKER_MINE + r'|(?:' + PR_BLOCKER_PERSON + r')\b(?:[’\x27]s?(?=\s+\w))?(?![’\x27])(?!' + PR_GATE_HEAD + r')'
-              r'|(?:(?:feature|deploy|deployment|holiday|release|code|merge|security|legal)(?:\s+|-))?'
-              r'(?:freezes?|holds?|embargo(?:es)?|gels?)\b(?![’\x27](?:s\b|\s)|-)' + TOOL_NOUN + r')')
+# Determiners, including quantifiers ('both maintainers', 'the other maintainers').
+PR_DETERMINER = (r'(?:(?:the|a|an|my|our|your|their|his|her|all|both|any|some|either|each|other|two|three'
+                 r'|le|la|les|un|une|du|des|mon|ma|mes|ton|ta|tes|notre|nos|votre|vos|leur|leurs|son|sa|ses)\s+|l[’\x27])')
+# 'Code owner review' is GitHub's branch-protection gate, not a person's decision.
+PR_BLOCKER = (PR_DETERMINER + r'{0,2}'
+              r'(?:' + PR_BLOCKER_MINE + r'|(?!code\s+owners?\s+reviews?\b)(?:' + PR_BLOCKER_PERSON + r')\b'
+              r'(?:[’\x27]s?(?=\s+\w))?(?![’\x27])(?!' + PR_GATE_HEAD + r')'
+              # Up to two modifiers name the freeze ('the current release freeze', 'the year-end freeze').
+              r'|(?:(?!' + PR_PHRASE_END + r')\w+(?:\s+|-)){0,2}'
+              + FREEZE_NOUN + r'\b(?![’\x27](?:s\b|\s)|-(?!(?:period|window)\b))' + TOOL_NOUN + r')')
 PR_BLOCKED = (r'^\W*(?:(?:all|every|any|the|open|pending|toutes|tous|les)\s+){0,2}' + PR_NOUN
-              + r'\s+(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:(?:now|currently|temporarily|all|actuellement|désormais)\s+)?'
+              + r'\s+(?:are|is|remain|stay|restent|reste|sont|est)\s+'
+              r'(?:(?:now|currently|temporarily|all|still|again|actuellement|désormais|encore|toujours)\s+)?'
               r'(?:blocked|bloquée?s?)\b(?=\s*$|\s*[,;:)](?!' + FAILURE_EXPLANATION + r')'
               r'|\s+(?:until|till|while|jusqu\w*|tant|pendant|for\s+now|today|pour\s+le\s+moment)\b'
               r'(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:(?:failing|green)\s+)?' + CHECK_NOUN + r'\b)'
-              r'|\s+(?:by|pending|par)\s+'
+              r'|\s+(?:(?:again|still|now|currently|encore|toujours)\s+)?(?:by|pending|par)\s+'
               r'(?:(?:(?:a|an|code)\s+)?(?:review|revue|relecture)\s+(?:by|par)\s+)?' + PR_BLOCKER + r')')
 # A PR state that PR_HELD reads as a gate, not a hold: 'held to the same standard', 'blocked by failing checks'.
 PR_GATE = re.compile(r'(?P<gate_prefix>' + PR_NOUN + r'[^.!?]{0,80}?)\b(?:held|blocked|bloquée?s?)\b')
