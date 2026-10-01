@@ -1291,6 +1291,13 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse(legacy_source.exists())
             receipt_path = Path(json.loads(result.stdout)["receipt"])
             receipt = receipt_path.read_bytes()
+            # A recorded location that is not a path is refused, not read as an older receipt.
+            malformed = json.loads(receipt)
+            malformed["duplicates"][0]["resolved"] = None
+            receipt_path.write_text(json.dumps(malformed), encoding="utf-8")
+            rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(rollback, 1)
+            self.assertIn(f"no valid location for the retired duplicate {legacy}", json.loads(rollback.stderr)["error"])
             # A receipt without the resolved path cannot show that the link is unchanged, so it blocks.
             older_receipt = json.loads(receipt)
             del older_receipt["duplicates"][0]["resolved"]
@@ -1298,7 +1305,10 @@ class InstallerTests(unittest.TestCase):
             content = receipt_path.read_bytes()
             rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
             self.assert_refused(rollback, 2)
-            self.assertEqual(json.loads(rollback.stderr)["details"]["link"], str(self.home / ".codex"))
+            error = json.loads(rollback.stderr)
+            self.assertEqual(error["details"]["link"], str(self.home / ".codex"))
+            self.assertIn("or, if it still points there, roll back with the installer that wrote this receipt",
+                          error["error"])
             self.assertEqual(receipt_path.read_bytes(), content)
             self.assertFalse(legacy_source.exists())
             receipt_path.write_bytes(receipt)

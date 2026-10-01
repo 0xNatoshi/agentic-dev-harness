@@ -1383,22 +1383,25 @@ def command_rollback(options) -> dict:
             if parent is not None:
                 restoring.append((parent, f"so the retired duplicate {original} cannot be moved back into it"))
             # The copy must go back to the directory it was retired from. A link or junction added or retargeted
-            # on the way since apply (inside the skill root, at a secondary root or at its config root) would
-            # send it elsewhere; a link that still resolves to the same place, as with dotfiles, is accepted.
+            # on the way since apply (inside the skill root, at a secondary root, at its config root or above)
+            # would send it elsewhere; a link that still resolves to the same place, as with dotfiles, is accepted.
             retired_from = duplicate.get("resolved")
+            if "resolved" in duplicate and not isinstance(retired_from, str):
+                raise Refused(f"The receipt records no valid location for the retired duplicate {original}; rollback refused")
             skill_root = next((path for path in locations.roots if path in original.parents), None)
-            if not isinstance(retired_from, str) and skill_root is not None:
-                # Older receipts do not record where the copy was. Nothing in them shows where a link at its
-                # skill root or at the directory holding that root (the config root for <config>/skills)
-                # pointed at apply, so such a link blocks. Discovery never follows links below a root, so
-                # the copy was retired from its path below the root's resolution.
+            if retired_from is None and skill_root is not None:
+                # Older receipts, such as those of installer 1.0.0, do not record where the copy was. Nothing in
+                # them shows where a link at its skill root or at the directory holding that root (the config
+                # root for <config>/skills) pointed at apply, so such a link blocks. Discovery never follows
+                # links below a root, so the copy was retired from its path below the root's resolution.
                 linked = next((path for path in (skill_root.parent, skill_root)
                                if os.path.isdir(str(path.parent)) and is_link(path)), None)
                 if linked is not None:
                     raise Blocked(f"{linked} is a link or junction, and this receipt predates the record of where each "
                                   f"retired duplicate was, so rollback cannot confirm that {original} would return to "
                                   f"the folder it was retired from; replace {linked} with the folder it pointed to at "
-                                  "apply, then run rollback again", {"path": str(original), "link": str(linked)})
+                                  "apply, then run rollback again, or, if it still points there, roll back with the "
+                                  "installer that wrote this receipt", {"path": str(original), "link": str(linked)})
                 retired_from = os.path.join(os.path.realpath(str(skill_root)), os.path.relpath(str(original), str(skill_root)))
             resolved = os.path.realpath(str(original))
             if isinstance(retired_from, str) and os.path.normcase(resolved) != os.path.normcase(retired_from):
