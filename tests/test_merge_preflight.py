@@ -1093,6 +1093,19 @@ TEXT_CASES = (
          "- PRs are blocked by the\n  —owner—CI is green."),
     Case("caught wrapped PRs blocked by owner with an em dash opening the last line", 2,
          "PRs are blocked by the\n—owner."),
+    # Round 10: a spaced dash opening a line is a list marker, never an indent under its siblings.
+    Case("caught em dash item Never then hyphen item merge", 2, "— Never\n- merge PRs"),
+    Case("caught horizontal bar item Never then hyphen item merge", 2, "― Never\n- merge PRs"),
+    Case("caught em dash item Never then asterisk item merge", 2, "— Never\n* merge PRs"),
+    Case("caught em dash item Never then numbered item merge", 2, "— Never\n1. merge PRs"),
+    Case("caught em dash item Don't unless I approve then hyphen item merge", 2,
+         "— Don't, unless I approve\n- merge"),
+    Case("caught em dash item after a heading line then hyphen item merge", 2,
+         "Rules\n— Don't, unless I approve\n- merge"),
+    Case("caught hyphen items Do not then em dash item merge", 2,
+         "- Do not do the following\n- Not now\n— merge"),
+    Case("caught quoted em dash item Never then quoted hyphen item merge", 2, "> — Never\n> - merge PRs"),
+    Case("caught em dash item Never with a tab then hyphen item merge", 2, "—\tNever\n- merge PRs"),
     Case("caught PRs blocked by release manager's freeze policy", 2,
          "PRs are blocked by the release manager's freeze policy."),
     Case("caught PRs blocked by release manager's code freeze policy", 2,
@@ -1261,8 +1274,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 974 or len({case.name for case in ALL_CASES}) != 974:
-    raise RuntimeError("Merge fixture inventory must contain 974 unique cases")
+if len(ALL_CASES) != 983 or len({case.name for case in ALL_CASES}) != 983:
+    raise RuntimeError("Merge fixture inventory must contain 983 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
@@ -1412,6 +1425,10 @@ class ScanTimeTests(unittest.TestCase):
             # Otherwise the spaced reading is scanned too, wherever the dash is.
             ("- merge\n- go\n" * 40 + "a—b", 0, 2),
             ("PRs are blocked by the owner—CI is green.", 2, 2),
+            # A spaced dash opening a line also adds it, since it may be a list marker; one inside a line does not.
+            ("- merge\n- go\n" * 40 + "— go\n", 0, 2),
+            ("> — Squash merges only.\n", 0, 2),
+            ("- merge\n- go\n" * 40 + "a — b\n", 0, 1),
             # Two invisible-character readings times two dash readings.
             ("a\N{ZERO WIDTH SPACE}b—c", 0, 4),
         )

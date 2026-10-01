@@ -100,9 +100,12 @@ def invisible(c):
     return category == 'Cf' or (category == 'Cc' and c not in '\t\n\r') or bool(IGNORABLE.match(c))
 
 
-# Only an unspaced em dash can stand for a hyphen, so only text with one gets the hyphen reading:
-# the spaced dash of the canonical marker costs no extra scan.
+# Only an unspaced em dash can stand for a hyphen, so only text with one, or with a dash opening a line,
+# gets the hyphen reading: the spaced dash of the canonical marker costs no extra scan.
 UNSPACED_EM_DASH = re.compile('\\S[\u2014\u2015]|[\u2014\u2015]\\S')
+# A dash opening a line may be a list marker, as on main, or open a wrapped continuation, so it gets
+# both readings: as ' - ' alone it would indent the line under its '- ' siblings and split their list.
+LINE_EM_DASH = re.compile('(?m)^[ \t>]*[\u2014\u2015]')
 
 
 def readings(text):
@@ -111,7 +114,8 @@ def readings(text):
     Invisible characters may split a word or separate two words: text with one is read with them
     removed and with them spaced. An em dash or horizontal bar usually separates words even unspaced,
     unlike a hyphen that joins them, so it reads as ' - '; an unspaced one may also stand for a hyphen
-    ('Laisse—moi fusionner'), and that reading comes first. Text without either has one reading.
+    ('Laisse—moi fusionner'), and one opening a line for a list marker, and that reading comes first.
+    Text without either has one reading.
     """
     # A spaced soft hyphen is read as a dash; elsewhere it is invisible.
     text = unicodedata.normalize('NFKC', re.sub('(?<=\\s)\u00ad|\u00ad(?=\\s)', '-', text))
@@ -124,8 +128,11 @@ def readings(text):
         table.update(dict.fromkeys(map(ord, hidden), joiner))
         folded.append(text.translate(table).replace('\r\n', '\n').replace('\r', '\n').casefold())
     # Translation, line endings and casefolding leave em dashes in place, so the NFKC pass and each
-    # translation serve both dash readings.
-    em_dashes = ('-', ' - ') if UNSPACED_EM_DASH.search(text) else (' - ',)
+    # translation serve both dash readings. Line starts are found in the folded readings, where every
+    # line ending is a newline and no invisible character stands before the dash.
+    hyphen = ('\u2014' in text or '\u2015' in text) and (
+        UNSPACED_EM_DASH.search(text) or any(LINE_EM_DASH.search(reading) for reading in folded))
+    em_dashes = ('-', ' - ') if hyphen else (' - ',)
     return list(dict.fromkeys(reading.replace('\u2014', em_dash).replace('\u2015', em_dash)
                               for em_dash in em_dashes for reading in folded))
 
