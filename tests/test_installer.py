@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 import warnings
 import zipfile
 
@@ -1040,7 +1041,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(snapshot(self.target), before)
         receipt_path = self.installed()
         after = snapshot(self.target)
-        inside = next(path for path in sorted(self.target.iterdir()) if path.is_dir())
+        inside = self.target / "agents"
         for path in (self.target, inside):
             blocked(path, ("rollback", "--receipt", receipt_path, "--maintenance-confirmed"), "run rollback again")
             self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
@@ -1073,6 +1074,46 @@ class InstallerTests(unittest.TestCase):
                     self.assertEqual(receipt_path.read_bytes(), receipt)
                     self.assertFalse((self.state() / "CURRENT").exists())
                     self.assertEqual(snapshot(self.target), after)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_a_directory_above_the_plan_that_cannot_be_searched_blocks_apply(self):
+        before = self.v52_layout()
+        plans = self.base / "plans"
+        plans.mkdir()
+        plan = self.plan().replace(plans / "plan.json")
+        plans.chmod(0o600)
+        try:
+            result = self.apply(plan)
+            self.assert_refused(result, 2)
+            error = json.loads(result.stderr)
+            self.assertIn(f"{plans} cannot be searched (mode 0600), so the installer cannot inspect what it holds; "
+                          f"add owner read and search (execute) permission to {plans}, then run apply again", error["error"])
+            self.assertEqual(error["details"], {"path": str(plans), "mode": "0600"})
+        finally:
+            plans.chmod(0o755)
+        self.assertFalse((self.state() / "CURRENT").exists())
+        self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX owners and modes")
+    def test_the_fix_for_an_inaccessible_directory_follows_its_owner_and_mode(self):
+        spec = importlib.util.spec_from_file_location("harness_installer_hints", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        folder = self.base / "denied"
+        folder.mkdir(mode=0o700)
+        folder.chmod(0o700)
+        # The owner already has read and search permission, so its mode is not what denies access.
+        blocked = installer.inaccessible(folder, "listed")
+        self.assertIn(f"{folder} cannot be listed (mode 0700), so the installer cannot inspect what it holds; its owner "
+                      "already has read and search permission, so an access control list or system privacy setting "
+                      f"denies access: allow this process to read and search {folder}, then plan again", str(blocked))
+        # A directory another user owns: only that owner or an administrator can change its mode.
+        owner = folder.stat().st_uid
+        with mock.patch.object(installer.os, "geteuid", return_value=owner + 1):
+            blocked = installer.inaccessible(folder, "searched", "run rollback again")
+        self.assertIn(f"{folder} belongs to another user (uid {owner}): have its owner or an administrator give you "
+                      "read and search (execute) access to it, or its ownership, then run rollback again", str(blocked))
+        self.assertEqual(blocked.details, {"path": str(folder), "mode": "0700"})
 
     @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
     def test_a_second_codex_root_that_cannot_be_searched_or_listed_blocks_plan(self):
@@ -1213,36 +1254,59 @@ class InstallerTests(unittest.TestCase):
         other = self.home / ".claude" / "skills" / "other-skill"
         other.mkdir()
         plan = self.plan()
-        pipe = self.base / "trace.fifo"
-        os.mkfifo(pipe)
-        process = subprocess.Popen([sys.executable, "-B", str(self.installer), "apply", "--plan", str(plan), "--checksums",
-                                    str(self.checksums), "--maintenance-confirmed"], cwd=self.base,
-                                   env=self.environment({"DEV_HARNESS_INSTALL_TEST_TRACE": str(pipe)}),
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
-        reader = None
-        try:
-            # Paused at apply:staged, after every check and before the first rename: only the discovery that
-            # follows the renames can meet the unlistable directory.
-            for _ in range(600):
-                if list(self.state().glob("*/staged/github-workflow")) or process.poll() is not None:
-                    break
-                time.sleep(0.05)
-            self.assertIsNone(process.poll(), "the installer did not pause before its first rename")
-            other.chmod(0o300)
+
+        def paused_apply(name, fault=None):
+            pipe = self.base / name
+            os.mkfifo(pipe)
+            env = {"DEV_HARNESS_INSTALL_TEST_TRACE": str(pipe)}
+            if fault:
+                env["DEV_HARNESS_INSTALL_TEST_FAULT"] = fault
+            process = subprocess.Popen([sys.executable, "-B", str(self.installer), "apply", "--plan", str(plan),
+                                        "--checksums", str(self.checksums), "--maintenance-confirmed"], cwd=self.base,
+                                       env=self.environment(env), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True, encoding="utf-8")
+            reader = None
             try:
-                reader = os.open(str(pipe), os.O_RDONLY | os.O_NONBLOCK)
-                stdout, stderr = process.communicate(timeout=120)
+                # Paused at apply:staged, after every check and before the first rename: only the discovery that
+                # follows the renames can meet the unlistable directory.
+                for _ in range(600):
+                    staged = list(self.state().glob("*/staged/github-workflow"))
+                    if staged or process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                self.assertIsNone(process.poll(), "the installer did not pause before its first rename")
+                self.assertTrue(staged, "the installer did not stage the new copy within 30 seconds")
+                other.chmod(0o300)
+                try:
+                    reader = os.open(str(pipe), os.O_RDONLY | os.O_NONBLOCK)
+                    stdout, stderr = process.communicate(timeout=120)
+                finally:
+                    other.chmod(0o755)
             finally:
-                other.chmod(0o755)
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.communicate()
-            if reader is not None:
-                os.close(reader)
-        self.assertEqual(process.returncode, 1, stdout + stderr)
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+                if reader is not None:
+                    os.close(reader)
+            return process.returncode, stdout + stderr, stderr
+
+        code, output, stderr = paused_apply("trace.fifo")
+        self.assertEqual(code, 1, output)
         self.assertIn(f"{other} cannot be listed (mode 0300)", json.loads(stderr)["error"])
         self.assertIn("the original state was restored", json.loads(stderr)["error"])
+        self.assertEqual(snapshot(self.target), before)
+        self.assertFalse((self.state() / "CURRENT").exists())
+        # An undo that fails after that discovery names the unlistable directory and the recovery command.
+        code, output, stderr = paused_apply("trace-undo.fifo", "apply:undo-park")
+        self.assertEqual(code, 3, output)
+        error = json.loads(stderr)["error"]
+        self.assertIn(f"{other} cannot be listed (mode 0300)", error)
+        self.assertIn("restoration incomplete", error)
+        self.assertIn("run `recover`", error)
+        journals = [json.loads(path.read_text(encoding="utf-8")) for path in self.state().glob("*/journal.json")]
+        self.assertTrue(any("undo_error" in journal for journal in journals), journals)
+        recover = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+        self.assertEqual(recover.returncode, 0, recover.stderr)
         self.assertEqual(snapshot(self.target), before)
         self.assertFalse((self.state() / "CURRENT").exists())
 

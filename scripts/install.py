@@ -246,14 +246,25 @@ def exists(path: Path) -> bool:
 def inaccessible(path: Path, action: str, retry: str = "plan again") -> Blocked:
     """A directory the OS refused to search or list, named with the fix instead of an error on one of its children (#54).
 
-    Read and search permission are both named: either alone leaves the directory uninspectable."""
+    Read and search permission are both named: either alone leaves the directory uninspectable. On POSIX the
+    fix follows the owner and mode: a directory another user owns (one created with sudo) or one whose owner
+    already has both permissions (an ACL or a macOS privacy control) is not fixed by the owner's mode."""
     try:
-        mode = f"{stat.S_IMODE(os.stat(str(path)).st_mode):04o}"
+        status = os.stat(str(path))
     except OSError:
-        mode = None
+        status = None
+    mode = f"{stat.S_IMODE(status.st_mode):04o}" if status else None
     shown = f" (mode {mode})" if mode else ""
-    return Blocked(f"{path} cannot be {action}{shown}, so the installer cannot inspect what it holds; "
-                   f"add owner read and search (execute) permission to {path}, then {retry}", {"path": str(path), "mode": mode})
+    fix = f"add owner read and search (execute) permission to {path}"
+    if status and os.name != "nt":
+        if status.st_uid != os.geteuid():
+            fix = (f"{path} belongs to another user (uid {status.st_uid}): have its owner or an administrator give you "
+                   "read and search (execute) access to it, or its ownership")
+        elif status.st_mode & (stat.S_IRUSR | stat.S_IXUSR) == stat.S_IRUSR | stat.S_IXUSR:
+            fix = (f"its owner already has read and search permission, so an access control list or system privacy "
+                   f"setting denies access: allow this process to read and search {path}")
+    return Blocked(f"{path} cannot be {action}{shown}, so the installer cannot inspect what it holds; {fix}, then {retry}",
+                   {"path": str(path), "mode": mode})
 
 
 def searchable_part(path: Path, retry: str) -> Path | None:
@@ -1075,6 +1086,18 @@ def finish(state: Path) -> None:
     sync_directory(state)
 
 
+def undo_or_report(operation: Operation, failure: object) -> None:
+    """Restore the origin state after failure, or record why not and report an incomplete restoration."""
+    try:
+        operation.undo()
+    except (Failure, OSError) as error:
+        operation.record["undo_error"] = str(error)
+        write_json(operation.path, operation.record)
+        raise Incomplete(f"{failure}; restoration incomplete: {error}. Recovery data kept in {operation.path.parent}; "
+                         "run `recover` with the same --plan or --receipt",
+                         getattr(error, "details", None))
+
+
 def attempt(operation: Operation, state: Path) -> None:
     """Run an operation; on failure restore the origin state or report an incomplete restoration."""
     try:
@@ -1085,14 +1108,7 @@ def attempt(operation: Operation, state: Path) -> None:
         failure = Refused(f"Rename failed: {error}")
     else:
         return
-    try:
-        operation.undo()
-    except (Failure, OSError) as error:
-        operation.record["undo_error"] = str(error)
-        write_json(operation.path, operation.record)
-        raise Incomplete(f"{failure}; restoration incomplete: {error}. Recovery data kept in {operation.path.parent}; "
-                         "run `recover` with the same --plan or --receipt",
-                         getattr(error, "details", None))
+    undo_or_report(operation, failure)
     finish(state)
     raise Refused(f"{failure}; the original state was restored and verified", failure.details)
 
@@ -1111,7 +1127,7 @@ def command_plan(options) -> dict:
 
 
 def command_apply(options) -> dict:
-    plan = read_json(Path(options.plan))
+    plan = read_json(Path(options.plan), "run apply again")
     if plan.get("plan_format") != 1:
         raise Refused("Unsupported plan format")
     locations = Locations(plan["runtime"], plan["home"], plan.get("config_root"))
@@ -1214,14 +1230,12 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         discovered, unreadable = None, error
     if unreadable or len(discovered) != 1 or not same_path(discovered[0], str(locations.target)):
         operation.record["discovered"] = discovered
-        try:
-            operation.undo()
-        except (Failure, OSError) as error:
-            raise Incomplete(f"Exactly one discoverable copy was not established and restoration is incomplete: {error}")
+        failure = unreadable or "Exactly one discoverable copy was not established"
+        undo_or_report(operation, failure)
         finish(locations.state)
         if unreadable:
             raise Refused(f"{unreadable}; the original state was restored", unreadable.details)
-        raise Refused("Exactly one discoverable copy was not established; the original state was restored", discovered)
+        raise Refused(f"{failure}; the original state was restored", discovered)
     classification = plan["classification"]
     receipt_path = transaction / "receipt.json"
     receipt = {
