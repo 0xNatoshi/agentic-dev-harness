@@ -1074,6 +1074,18 @@ TEXT_CASES = (
          "> 1) PRs are blocked by the owner—CI is green."),
     Case("caught wrapped quoted ordered item PRs blocked by owner then unspaced em dash", 2,
          "> 1) PRs are blocked by the\n>    owner—CI is green."),
+    Case("caught wrapped PRs blocked by owner then unspaced em dash after a heading and blank line", 2,
+         "# Rules\n\nPRs are blocked by the\nowner—CI is green."),
+    Case("caught wrapped PRs blocked by owner then unspaced em dash right after a heading", 2,
+         "# Rules\nPRs are blocked by the\nowner—CI is green."),
+    Case("caught wrapped PRs blocked by owner then unspaced em dash after a setext heading", 2,
+         "Rules\n=====\nPRs are blocked by the\nowner—CI is green."),
+    Case("caught wrapped list item PRs blocked by owner then unspaced em dash after a sibling", 2,
+         "- Tests run on CI\n- PRs are blocked by the\n  owner—CI is green."),
+    Case("caught wrapped PRs blocked by maintainer then unspaced em dash after an unpunctuated paragraph", 2,
+         "Read the guide\n\nPRs are blocked by the\nmaintainer—status: frozen."),
+    Case("caught wrapped quoted PRs blocked by owner then unspaced em dash after a quoted note", 2,
+         "> Note\n>\n> PRs are blocked by the\n> owner—CI is green."),
     Case("caught PRs blocked by release manager's freeze policy", 2,
          "PRs are blocked by the release manager's freeze policy."),
     Case("caught PRs blocked by release manager's code freeze policy", 2,
@@ -1242,8 +1254,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 965 or len({case.name for case in ALL_CASES}) != 965:
-    raise RuntimeError("Merge fixture inventory must contain 965 unique cases")
+if len(ALL_CASES) != 971 or len({case.name for case in ALL_CASES}) != 971:
+    raise RuntimeError("Merge fixture inventory must contain 971 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
@@ -1414,12 +1426,11 @@ class ScanTimeTests(unittest.TestCase):
         cases = (
             # An ambiguous hyphen reading ends the scan before the check runs.
             ("Laisse—moi fusionner.", 2, 0, 0),
-            # Both invisible-character joiners give the same reading here: one check, and the one
-            # sentence and its one line are the same part.
+            # Both invisible-character joiners give the same reading here: one check, and one sentence.
             ("PRs are blocked by the " + "x " * 2000 + "—b", 0, 1, 1),
-            # Only the dash sentence and its dash line are read, not every line or sentence.
-            ("- merge\n- go\n" * 40 + "a—b", 0, 1, 2),
-            ("Merge x—y. " * 50, 0, 1, 2),
+            # Each distinct sentence is searched once: 80 list items give 3 searches, 50 sentences give 3.
+            ("- merge\n- go\n" * 40 + "a—b", 0, 1, 3),
+            ("Merge x—y. " * 50, 0, 1, 3),
             # Distinct invisible-character readings are each checked.
             ("a\N{ZERO WIDTH SPACE}b—c", 0, 2, 2),
         )

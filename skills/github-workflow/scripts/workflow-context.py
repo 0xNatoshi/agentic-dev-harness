@@ -1091,27 +1091,34 @@ def free_restriction(context, unit):
     return 'cleared' if mechanics_only(unit) else True
 
 
-def scan_normalized(text):
+def unmanaged_lines(text):
+    """Unquoted lines outside the managed block, '' for each delimiter, or None for a malformed block."""
     outside = []
     managed = False
     # Only newlines end Markdown lines; str.splitlines would also split on U+2028 or \x1e.
     for line in text.split('\n'):
         if START.match(line):
             if managed:
-                return 2
+                return None
             managed = True
             outside.append('')
         elif END.match(line):
             if not managed:
-                return 2
+                return None
             managed = False
             outside.append('')
         elif not managed:
             outside.append(line)
     if managed:
+        return None
+    return [unquote(line) for line in outside]
+
+
+def scan_normalized(text):
+    outside = unmanaged_lines(text)
+    if outside is None:
         return 2
     # Whitespace joining recognizes a marker or date wrapped over several lines.
-    outside = [unquote(line) for line in outside]
     joined = re.sub(r'\s+', ' ', '\n'.join(outside))
     joined = EXAMPLE.sub('', joined)
     found = False
@@ -1216,21 +1223,25 @@ def hidden_splits(text):
     return count
 
 
-def dash_separates_hold(marked):
-    """Whether a sentence or line holding an em dash, marked U+0000, reads as a PR hold when the dash separates words.
+def dash_separates_hold(reading):
+    """Whether a spaced em-dash reading holds a PR in a way its hyphen reading may not show.
 
-    This only selects the full spaced-reading scan, so it may over-select. It reads each sentence holding
-    a dash, as free_restriction tests PR_HELD per sentence, and each of its lines holding one, as a line
-    may open an imperative; like units(), it first drops blockquote prefixes and a list marker from each
-    line ('> 1) PRs are blocked by the owner—CI is green.'). Each distinct part is tested once.
+    It reads the Markdown units scan_normalized reads, so a hold after a heading or an unpunctuated
+    block starts its own unit here too ('# Rules\\n\\nPRs are blocked by the\\nowner—CI is green.').
+    It tests PR_HELD on each sentence, as free_restriction does first, and reports a hold that
+    units() finds across list items or table rows. This only selects the full scan of the reading,
+    so it skips the other restriction checks. Each distinct sentence is tested once.
     """
+    lines = unmanaged_lines(reading)
+    if lines is None:
+        return True
+    held = []
     parts = set()
-    for sentence in re.split(r'[.!?]', marked):
-        if '\x00' in sentence:
-            lines = [LIST_ITEM.sub('', unquote(line), 1) for line in sentence.split('\n')]
-            parts.add(' '.join(lines))
-            parts.update(line for line in lines if '\x00' in line)
-    return any(PR_HELD.search(strip_markers(part.replace('\x00', '-'))) for part in parts)
+    for _, unit in units(lines, lambda: held.append(True)):
+        if held:
+            return True
+        parts.update(re.split(r'[.!?]', strip_markers(unit)))
+    return bool(held) or any(PR_HELD.search(part) for part in parts)
 
 
 def scan_text(text):
@@ -1241,15 +1252,12 @@ def scan_text(text):
     # join them: check each distinct reading. Text without them has a single reading.
     choices = reading_choices(text)
     hyphen = dict.fromkeys(normalize(text, joiner, em_dash) for joiner, em_dash in choices if em_dash == '-')
-    # normalize() maps source control characters to the joiner, so U+0000 marks only an em dash here,
-    # and replacing it with '-' gives the spaced reading normalize(text, joiner).
-    marked = dict.fromkeys(normalize(text, joiner, ' \x00 ') for joiner, em_dash in choices if em_dash != '-')
     # Text with an unspaced em dash: every dash is first read as a hyphen, as before the spaced reading
     # existed ('Laisse—moi fusionner'). A full second scan doubles the cost of any file with one such
-    # dash, so the spaced reading is scanned only when the hyphen readings are not ambiguous and a
-    # sentence holding a dash reads as a PR hold once the dash separates words
-    # ('PRs are blocked by the owner—CI is green'). The generator keeps that check lazy.
-    spaced = (reading.replace('\x00', '-') for reading in marked if not hyphen or dash_separates_hold(reading))
+    # dash, so the spaced reading is scanned only when the hyphen readings are not ambiguous and it
+    # holds a PR ('PRs are blocked by the owner—CI is green'). The generator keeps that check lazy.
+    spaced = dict.fromkeys(normalize(text, joiner, em_dash) for joiner, em_dash in choices if em_dash != '-')
+    spaced = (reading for reading in spaced if not hyphen or dash_separates_hold(reading))
     results = []
     for readings in (hyphen, spaced):
         for reading in readings:
