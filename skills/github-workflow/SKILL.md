@@ -234,10 +234,11 @@ Use chore/agent-workflow-update and the same PR delivery. The policy applicable 
 4. Run the init placeholder check, covering README.md, LICENSE*, .yml/.yaml and absent CI, distinguishing exit 1 from errors.
 5. Show the diff and summarize added/modified rules.
 
-**Package v6.5.0; active repository template v6.4.** This package adds technical initiative, incidental issue capture, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement.
+**Development package v6.6.0; active repository template v6.4.** This package adds technical initiative, incidental issue capture, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement.
 
 ## What's new
 
+- **v6.6.0 / template v6.4 (unreleased)**: installer retirement and rollback diagnostics, read-only POSIX root preconditions and expanded merge-hold recognition. Published v6.5.0 tags and distribution assets remain unchanged.
 - **v6.5.0 / template v6.4**: proactive technical judgment, deduplicated incidental issues, useful next-action reporting and durable issue/PR/code reasoning across Codex, Claude Code and Hermes. Shared profiles record verified agent attribution and observed model/provider provenance. Shared profiles and the skill also require review convergence: targeted rechecks, a root-design checkpoint after repeated unresolved cycles and delivery once ready. Existing delivery and authorization safeguards remain applicable.
 - **v6.4.0**: versioned source repository, neutral profile source, reproducible packages, portable regression checks and issue/PR handoff guidance. Runtime guards and the active repository template retain their behavior.
 - **v6.3.1**: English personal instructions, skill, references and distribution files; README.md and English installer names. Runtime guards, licenses, role files and authentic template history retain their bytes. French remains the conversation language; historical aliases/test inputs remain exact data.

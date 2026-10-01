@@ -1,4 +1,4 @@
-# Hermes development adaptation — v6.5.0
+# Hermes development adaptation — v6.6.0
 
 When Hermes is targeted, back up its SOUL and replace only the development section, preserving unrelated sections, providers, permissions and settings. Configure the verified canonical skill through `skills.external_dirs` using this machine's real path. A Claude-only installation does not authorize modifying Hermes. Maintained files use English; conversation follows the user's language preference.
 

@@ -1,4 +1,4 @@
-# Personal Claude Desktop Code installation on Windows — v6.5.0
+# Personal Claude Desktop Code installation on Windows — v6.6.0
 
 Use these steps from the extracted ZIP produced by `python3 scripts/build.py`. Paths below are relative to that package root, not this guide's source location in the repository.
 
@@ -55,11 +55,11 @@ Run this first. It answers "is this computer already current, and what must chan
 
 Report the outcome per checkpoint; do not collapse them into one verdict.
 
-Keep the original ZIP and its separately delivered `dev-harness-v6.5.0-SHA256SUMS.txt` beside the extracted package. From the extracted package root, this read-only example uses those actual sibling files; adjust their locations if necessary:
+Keep the original ZIP and its separately delivered `dev-harness-v6.6.0-SHA256SUMS.txt` beside the extracted package. From the extracted package root, this read-only example uses those actual sibling files; adjust their locations if necessary:
 
 ```powershell
-$packageZip = (Resolve-Path '..\dev-harness-v6.5.0-codex-claude.zip' -ErrorAction Stop).Path
-$checksums = (Resolve-Path '..\dev-harness-v6.5.0-SHA256SUMS.txt' -ErrorAction Stop).Path
+$packageZip = (Resolve-Path '..\dev-harness-v6.6.0-codex-claude.zip' -ErrorAction Stop).Path
+$checksums = (Resolve-Path '..\dev-harness-v6.6.0-SHA256SUMS.txt' -ErrorAction Stop).Path
 & $installerPython @installerPythonArgs .\install.py verify-package $packageZip --checksums $checksums
 if ($LASTEXITCODE -ne 0) { throw 'Package verification failed; stop the update' }
 & $installerPython @installerPythonArgs .\install.py verify-package . --checksums $checksums
@@ -68,7 +68,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Extracted package verification failed; stop th
 
 The installer is standard-library Python and declares Python 3.8+ support; interpreter versions actually exercised are listed in STATUS.md. Use the same verified package and checksum file for planning and apply. Keep private plans, receipts and backups outside repositories and every skill discovery root.
 
-1. **Package** — use the shipped `install.py verify-package` commands above with the separately supplied `dev-harness-v6.5.0-SHA256SUMS.txt`. They check the archive and the extracted files against the same manifest digest, sizes and hashes, and reject extra, missing or unsafe paths. ZIP input also checks the archive digest; extracted-directory input reports that the archive digest was not checked in that invocation. Record the package version and that distinction. Hash agreement proves integrity against the supplied expectations, not independent provenance. A mismatch is `blocked`, and no later checkpoint is trustworthy.
+1. **Package** — use the shipped `install.py verify-package` commands above with the separately supplied `dev-harness-v6.6.0-SHA256SUMS.txt`. They check the archive and the extracted files against the same manifest digest, sizes and hashes, and reject extra, missing or unsafe paths. ZIP input also checks the archive digest; extracted-directory input reports that the archive digest was not checked in that invocation. Record the package version and that distinction. Hash agreement proves integrity against the supplied expectations, not independent provenance. A mismatch is `blocked`, and no later checkpoint is trustworthy.
 2. **Instruction files** — compare `$claudeHome\CLAUDE.md` with `configurations/claude-desktop/CLAUDE.md`, and `$claudeHome\AGENTS.md` with `configurations/claude-desktop/AGENTS.md`. Keep exactly one relative @AGENTS.md import resolving to its neighbor, plus unrelated imports. Preferences merged on purpose are `personalized`.
 3. **`github-workflow` skill** — resolve `$claudeHome\skills\github-workflow`. A real directory is compared file by file with `skills/github-workflow/`. A link or junction is **not** replaced: resolve its canonical directory, record the link target and its owner, and compare there. One canonical directory can serve several applications at once and is then checked once for all of them. Evidence is the file count, every SHA-256 and the three license templates; extra `.bak` or history files are retained customizations.
 4. **Claude imports and registration** — confirm the imports that load in the effective profile and that `/github-workflow` resolves. `agents/openai.yaml` and the Codex role TOMLs do not configure Claude subagents.
@@ -78,12 +78,12 @@ When every checkpoint is `current` or `personalized`, no package update is neede
 
 ## Back up and compare versions
 
-Before editing, create private `%LOCALAPPDATA%\dev-harness\backups\v6.5.0-claude-<timestamp>` and record its absolute path:
+Before editing, create private `%LOCALAPPDATA%\dev-harness\backups\v6.6.0-claude-<timestamp>` and record its absolute path:
 
 ```powershell
 $backupParent = Join-Path $env:LOCALAPPDATA 'dev-harness\backups'
 New-Item -ItemType Directory -Path $backupParent -Force -ErrorAction Stop | Out-Null
-$backupRoot = Join-Path $backupParent ('v6.5.0-claude-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
+$backupRoot = Join-Path $backupParent ('v6.6.0-claude-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
 if (Test-Path -LiteralPath $backupRoot) { throw 'Backup path already exists' }
 New-Item -ItemType Directory -Path $backupRoot -ErrorAction Stop | Out-Null
 $backupRoot
@@ -91,7 +91,7 @@ $backupRoot
 
 Back up every targeted file/link with its type/tree: CLAUDE.md, AGENTS.md, complete skill, canonical-source link and any targeted older command. Inventory relative paths, types, link targets, SHA-256 and count. Verify backup types/links/counts/hashes by readback before editing. A local receipt records absolute paths, before/after hashes, provenance/version, created/retired files and merge diffs. Keep secrets/unrelated profile files out of the export and preserve earlier backups. Report the exact backup path.
 
-The **personal package is v6.5.0; the active repository template is v6.4**. This package includes initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill. Project adoption remains a separate PR after its current task. Compare markers and actual bytes with authentic sources. Preserve newer/unknown versions and merge compatible additions without downgrading. For v6.4.0 or older with an exact base, compare historical base / local file / package file per file. Preserve local customizations, restrictions and imports. Without a verified base, capture and manually compare local content instead of fabricating history. Preserve authentic destination v5.1/v5.2 snapshots absent from this package.
+The **personal package is v6.6.0; the active repository template is v6.4**. This package includes initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill. Project adoption remains a separate PR after its current task. Compare markers and actual bytes with authentic sources. Preserve newer/unknown versions and merge compatible additions without downgrading. For v6.4.0 or older with an exact base, compare historical base / local file / package file per file. Preserve local customizations, restrictions and imports. Without a verified base, capture and manually compare local content instead of fabricating history. Preserve authentic destination v5.1/v5.2 snapshots absent from this package.
 
 ## Merge instructions
 
