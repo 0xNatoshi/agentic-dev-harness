@@ -1261,6 +1261,7 @@ class InstallerTests(unittest.TestCase):
             env = {"DEV_HARNESS_INSTALL_TEST_TRACE": str(pipe)}
             if fault:
                 env["DEV_HARNESS_INSTALL_TEST_FAULT"] = fault
+            earlier = set(self.state().glob("*/staged/github-workflow"))
             process = subprocess.Popen([sys.executable, "-B", str(self.installer), "apply", "--plan", str(plan),
                                         "--checksums", str(self.checksums), "--maintenance-confirmed"], cwd=self.base,
                                        env=self.environment(env), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1268,9 +1269,10 @@ class InstallerTests(unittest.TestCase):
             reader = None
             try:
                 # Paused at apply:staged, after every check and before the first rename: only the discovery that
-                # follows the renames can meet the unlistable directory.
+                # follows the renames can meet the unlistable directory. A copy staged by an earlier run is not
+                # this run's pause.
                 for _ in range(600):
-                    staged = list(self.state().glob("*/staged/github-workflow"))
+                    staged = [path for path in self.state().glob("*/staged/github-workflow") if path not in earlier]
                     if staged or process.poll() is not None:
                         break
                     time.sleep(0.05)
