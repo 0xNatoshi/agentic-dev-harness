@@ -1162,6 +1162,61 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(rollback.returncode, 0, rollback.stderr)
         self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
 
+    def test_rollback_blocks_a_folder_replaced_by_a_link_its_retired_duplicate_would_return_through(self):
+        if not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        vendor = self.home / ".codex" / "skills" / "vendor"
+        legacy = vendor / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt_path = Path(json.loads(result.stdout)["receipt"])
+        receipt = receipt_path.read_bytes()
+        after = snapshot(target)
+        # The emptied folder is replaced by a link to a directory outside every skill root.
+        elsewhere = self.base / "elsewhere"
+        elsewhere.mkdir()
+        vendor.rmdir()
+        os.symlink(elsewhere, vendor, target_is_directory=True)
+        try:
+            rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(rollback, 2)
+            self.assertIn(f"{vendor} is a link or junction, so the retired duplicate {legacy} would be restored outside "
+                          f"{vendor.parent}; replace it with a directory or remove it, then run rollback again",
+                          json.loads(rollback.stderr)["error"])
+            self.assertEqual(list(elsewhere.iterdir()), [])
+        finally:
+            # A Windows directory symlink is removed as a directory.
+            if os.name == "nt":
+                os.rmdir(vendor)
+            else:
+                os.unlink(vendor)
+        self.assertEqual(receipt_path.read_bytes(), receipt)
+        self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+        self.assertEqual(snapshot(target), after)
+        vendor.mkdir()
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+
+    def test_a_failed_undo_the_journal_cannot_record_still_reports_its_cause_and_recover(self):
+        spec = importlib.util.spec_from_file_location("harness_installer_undo", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        journal = self.base / "transaction" / "journal.json"
+        operation = mock.Mock(path=journal, record={})
+        operation.undo.side_effect = OSError("disk full while undoing")
+        # The cause that stopped the undo (a full disk, an unwritable state directory) also stops the journal.
+        with mock.patch.object(installer, "write_json", side_effect=OSError("disk full while journaling")):
+            with self.assertRaises(installer.Incomplete) as caught:
+                installer.undo_or_report(operation, installer.Blocked("The original blocker"))
+        self.assertEqual(str(caught.exception),
+                         "The original blocker; restoration incomplete: disk full while undoing (the journal could not "
+                         f"record it: disk full while journaling). Recovery data kept in {journal.parent}; run `recover` "
+                         "with the same --plan or --receipt before any other step")
+        self.assertEqual(operation.record, {"undo_error": "disk full while undoing"})
+
     def test_rerun_recover_sets_a_stale_restoration_copy_aside(self):
         before, parked = self.crash_after_parking()
         shutil.rmtree(parked)

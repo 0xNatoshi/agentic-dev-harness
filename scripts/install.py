@@ -1092,10 +1092,16 @@ def undo_or_report(operation: Operation, failure: object) -> None:
         operation.undo()
     except (Failure, OSError) as error:
         operation.record["undo_error"] = str(error)
-        write_json(operation.path, operation.record)
-        raise Incomplete(f"{failure}; restoration incomplete: {error}. Recovery data kept in {operation.path.parent}; "
-                         "run `recover` with the same --plan or --receipt",
-                         getattr(error, "details", None))
+        journal = ""
+        try:
+            write_json(operation.path, operation.record)
+        except OSError as unrecorded:
+            # The same cause (a full disk, an unwritable state directory) can stop the undo and the journal:
+            # the original failure and the recovery instruction are still reported (#54).
+            journal = f" (the journal could not record it: {unrecorded})"
+        raise Incomplete(f"{failure}; restoration incomplete: {error}{journal}. Recovery data kept in "
+                         f"{operation.path.parent}; run `recover` with the same --plan or --receipt before any "
+                         "other step", getattr(error, "details", None))
 
 
 def attempt(operation: Operation, state: Path) -> None:
@@ -1369,6 +1375,16 @@ def command_rollback(options) -> dict:
                 parent = original.parent
             if parent is not None:
                 restoring.append((parent, f"so the retired duplicate {original} cannot be moved back into it"))
+            # Discovery never follows links, so a folder replaced by a link after apply would send the copy
+            # outside its root. Only the root and its ancestors are checked by check().
+            root = next((root for root in locations.roots if root in original.parents), None)
+            for part in [parent, *parent.parents] if parent is not None and root is not None else []:
+                if root not in part.parents:
+                    break
+                if is_link(part):
+                    raise Blocked(f"{part} is a link or junction, so the retired duplicate {original} would be restored "
+                                  f"outside {root}; replace it with a directory or remove it, then run rollback again",
+                                  {"path": str(part)})
         locations.require_movable(recorded, "run rollback again", restoring)
         active = inventory(locations.target, "run rollback again")
         origin = receipt["after"]
