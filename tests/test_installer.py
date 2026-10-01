@@ -915,20 +915,22 @@ class InstallerTests(unittest.TestCase):
             with self.subTest(path=str(path)):
                 mode = stat.S_IMODE(os.stat(path).st_mode)
                 path.chmod(0o555)
-                self.addCleanup(path.chmod, mode)
-                output = self.base / "blocked-plan.json"
-                result = self.run_installer("plan", "--runtime", "codex", "--home", self.home, "--checksums", self.checksums,
-                                            "--output", output)
-                self.assert_refused(result, 2)
-                error = json.loads(result.stderr)
-                self.assertIn(f"{path} has no owner write permission (mode 0555), {reason}; "
-                              f"add owner write permission to {path}, then plan again", error["error"])
-                self.assertEqual(error["details"], {"path": str(path), "mode": "0555"})
-                self.assertFalse(output.exists())
-                # apply plans again, so it blocks before retiring the duplicate instead of failing at that rename.
-                self.assert_refused(self.apply(plan, "--retire-duplicate", legacy), 2)
-                self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
-                path.chmod(mode)
+                # Restored here, not by addCleanup: the final apply moves the duplicate away.
+                try:
+                    output = self.base / "blocked-plan.json"
+                    result = self.run_installer("plan", "--runtime", "codex", "--home", self.home, "--checksums",
+                                                self.checksums, "--output", output)
+                    self.assert_refused(result, 2)
+                    error = json.loads(result.stderr)
+                    self.assertIn(f"{path} has no owner write permission (mode 0555), {reason}; "
+                                  f"add owner write permission to {path}, then plan again", error["error"])
+                    self.assertEqual(error["details"], {"path": str(path), "mode": "0555"})
+                    self.assertFalse(output.exists())
+                    # apply plans again, so it blocks before retiring the duplicate instead of failing at that rename.
+                    self.assert_refused(self.apply(plan, "--retire-duplicate", legacy), 2)
+                    self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+                finally:
+                    path.chmod(mode)
                 self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
         result = self.apply(plan, "--retire-duplicate", legacy)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -973,20 +975,24 @@ class InstallerTests(unittest.TestCase):
         for path, mode, action in cases:
             with self.subTest(path=str(path), mode=f"{mode:04o}"):
                 path.chmod(mode)
-                self.addCleanup(path.chmod, 0o755)
-                output = self.base / "blocked-plan.json"
-                result = self.run_installer("plan", "--runtime", "claude", "--home", self.home, "--checksums", self.checksums,
-                                            "--output", output)
-                self.assert_refused(result, 2)
-                error = json.loads(result.stderr)
-                self.assertIn(f"{path} cannot be {action} (mode {mode:04o}), so the installer cannot inspect what it holds; "
-                              f"add owner read and search (execute) permission to {path}, then plan again", error["error"])
-                self.assertEqual(error["details"], {"path": str(path), "mode": f"{mode:04o}"})
-                self.assertFalse(output.exists())
-                path.chmod(0o755)
+                # Restored before the next case even when an assertion fails, so one failure does not cascade.
+                try:
+                    output = self.base / "blocked-plan.json"
+                    result = self.run_installer("plan", "--runtime", "claude", "--home", self.home, "--checksums",
+                                                self.checksums, "--output", output)
+                    self.assert_refused(result, 2)
+                    error = json.loads(result.stderr)
+                    self.assertIn(f"{path} cannot be {action} (mode {mode:04o}), so the installer cannot inspect what it "
+                                  f"holds; add owner read and search (execute) permission to {path}, then plan again",
+                                  error["error"])
+                    self.assertEqual(error["details"], {"path": str(path), "mode": f"{mode:04o}"})
+                    self.assertFalse(output.exists())
+                finally:
+                    path.chmod(0o755)
                 self.assertEqual(snapshot(self.target), before)
         plan = self.plan()
         skills.chmod(0o444)
+        self.addCleanup(skills.chmod, 0o755)
         self.assert_refused(self.apply(plan), 2)
         skills.chmod(0o755)
         self.assertFalse((self.state() / "CURRENT").exists())
