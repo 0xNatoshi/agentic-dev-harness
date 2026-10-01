@@ -640,15 +640,54 @@ def unquote(line):
     return line.expandtabs(4)
 
 
-def trim(blocks):
-    """Keep the newest blocks that fit the context limit, and at least one."""
-    kept, size = [], 0
-    for block in reversed(blocks):
-        if kept and size + len(block) > CONTEXT_LIMIT:
-            break
-        kept.append(block)
-        size += len(block) + 1
-    return kept[::-1]
+class Lead:
+    """Unterminated blocks that introduce what follows: the newest that fit the context limit, and at least one.
+
+    Many short blocks would make a walk over the kept blocks cost up to CONTEXT_LIMIT steps for every
+    unit, so the kept blocks carry running sizes and a cached join instead.
+    """
+
+    def __init__(self):
+        self.blocks = collections.deque()
+        self.starts = set()  # where each kept block starts, counted over every block ever added
+        self.end = 0         # where the next block starts
+        self.size = 0        # kept blocks, one separator each
+        self.text = ''       # their join, cut to CONTEXT_LIMIT
+
+    def add(self, blocks):
+        for block in blocks:
+            self.starts.add(self.end)
+            self.end += len(block) + 1
+            self.size += len(block) + 1
+            self.blocks.append(block)
+        # Every block after the oldest needs its separator inside the limit, so the kept blocks
+        # are the longest such suffix, as a walk from the newest block would keep them.
+        while len(self.blocks) > 1 and self.size > CONTEXT_LIMIT + 1:
+            self.starts.discard(self.end - self.size)
+            self.size -= len(self.blocks.popleft()) + 1
+        self.text = ' '.join(self.blocks)[-CONTEXT_LIMIT:]
+
+    def clear(self):
+        self.blocks.clear()
+        self.starts.clear()
+        self.size = 0
+        self.text = ''
+
+    def tail(self, extra):
+        """The kept blocks then extra, as a walk from the newest part that stops at CONTEXT_LIMIT cuts them."""
+        parts, size = [], 0
+        for part in reversed(list(extra)):
+            if size >= CONTEXT_LIMIT:
+                break
+            parts.append(part)
+            size += len(part) + 1
+        own = ' '.join(reversed(parts))
+        if size >= CONTEXT_LIMIT or not self.blocks:
+            return own[-CONTEXT_LIMIT:]
+        # The walk stops at the first block that brings the size to CONTEXT_LIMIT. When the size lands
+        # exactly on it, the walk keeps one character less: the separator before that block.
+        cut = CONTEXT_LIMIT - 1 if self.end - (CONTEXT_LIMIT - size) in self.starts else CONTEXT_LIMIT
+        return (self.text + ' ' + own if parts else self.text)[-cut:]
 
 
 def label(text):
@@ -747,7 +786,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
     lead-in item of the same list or a negated lead-in row of the same table.
     """
     headings = []  # (level, text) of the current heading path
-    lead = []      # unterminated blocks that introduce what follows
+    lead = Lead()  # unterminated blocks that introduce what follows
     items = []     # (indent, text) of the open list item chain
     intros = set()  # indents whose list holds a negated lead-in item so far
     header = None  # first row of the current table
@@ -765,13 +804,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
     def context(extra=(), near=()):
         """Heading path, then lead-ins and extra cut to CONTEXT_LIMIT, then near items uncut."""
         path = ' '.join(t for _, t in headings)[-CONTEXT_LIMIT:]
-        parts, size = [], 0
-        for part in reversed(lead + list(extra)):
-            if size >= CONTEXT_LIMIT:
-                break
-            parts.append(part)
-            size += len(part) + 1
-        return ' '.join([path, ' '.join(reversed(parts))[-CONTEXT_LIMIT:], *near]).strip()
+        return ' '.join([path, lead.tail(extra), *near]).strip()
 
     def extend_run(text):
         nonlocal run_size, run_held
@@ -818,7 +851,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
         run_size = 0
 
     def flush():
-        nonlocal block, kind, lead, items, header, row_intro
+        nonlocal block, kind, items, header, row_intro
         if not block:
             return None
         text = ' '.join(part.strip() for part in block)
@@ -850,7 +883,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
             return context(t for i, t in items if i < indent), text
         if items:
             # Unterminated open items still introduce the block after the list.
-            lead = trim(lead + [t for _, t in items if not terminated(t)])
+            lead.add(t for _, t in items if not terminated(t))
             items = []
             intros.clear()
         if current == 'row':
@@ -867,16 +900,20 @@ def units(lines, hold_found, heading_found=lambda level: None):
         end_run()
         pair = context(), text
         body = re.sub(r'<!--|-->', ' ', text).strip() if current == 'comment' else text
-        lead = [] if terminated(body) else trim(lead + [body])
+        if terminated(body):
+            lead.clear()
+        else:
+            lead.add([body])
         return pair
 
     def enter_heading(level, text):
-        nonlocal lead, items, header, row_intro
+        nonlocal items, header, row_intro
         while headings and headings[-1][0] >= level:
             headings.pop()
         pair = context(), text
         headings.append((level, text[:CONTEXT_LIMIT]))
-        lead, items, header, row_intro = [], [], None, False
+        lead.clear()
+        items, header, row_intro = [], None, False
         intros.clear()
         end_run()
         heading_found(level)

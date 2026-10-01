@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import importlib.util
 import json
 from pathlib import Path
+import random
 import re
 from tempfile import TemporaryDirectory
 import time
@@ -1421,6 +1422,51 @@ class ScanTimeTests(unittest.TestCase):
             self.assertEqual(module.scan_text(item * repeats), 0)
             work.append(len(calls))
         self.assertEqual(work[0], work[1])
+
+    def test_lead_in_blocks_and_context_match_a_walk_over_every_block(self) -> None:
+        # Many short lead-in blocks made a walk over the kept blocks cost up to CONTEXT_LIMIT
+        # steps per unit (#62). Lead keeps running sizes instead and must keep and cut exactly
+        # what the walk did, including sizes that land on the limit.
+        spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        limit = module.CONTEXT_LIMIT
+
+        def trim(blocks):
+            kept, size = [], 0
+            for block in reversed(blocks):
+                if kept and size + len(block) > limit:
+                    break
+                kept.append(block)
+                size += len(block) + 1
+            return kept[::-1]
+
+        def tail(blocks, extra):
+            parts, size = [], 0
+            for part in reversed(blocks + extra):
+                if size >= limit:
+                    break
+                parts.append(part)
+                size += len(part) + 1
+            return " ".join(reversed(parts))[-limit:]
+
+        # Most sizes plus a separator divide the limit, so running sizes land on it exactly.
+        sizes = (0, 1, 2, 5, 9, 19, 29, 59, 99, 199, 299, limit - 2, limit - 1, limit, limit + 1, 2 * limit)
+        rng = random.Random(62)
+        lead, kept = module.Lead(), []
+        for step in range(3000):
+            choice = rng.random()
+            if choice < 0.05:
+                lead.clear()
+                kept = []
+            elif choice < 0.55:
+                blocks = [str(step % 10) * rng.choice(sizes) for _ in range(rng.choice((1, 1, 1, 2, 3)))]
+                lead.add(blocks)
+                kept = trim(kept + blocks)
+            extra = [chr(97 + step % 26) * rng.choice(sizes) for _ in range(rng.choice((0, 0, 1, 2)))]
+            with self.subTest(step=step):
+                self.assertEqual(list(lead.blocks), kept)
+                self.assertEqual(lead.tail(extra), tail(kept, extra))
 
     def test_repeated_classifications_keep_context_and_state(self) -> None:
         rule = "No rebase merges; use squash merges."
