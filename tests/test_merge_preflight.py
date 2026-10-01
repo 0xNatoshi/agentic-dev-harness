@@ -1482,7 +1482,8 @@ class ScanTimeTests(unittest.TestCase):
         rng = random.Random(62)
         found = collections.Counter()
         for step in range(4000):
-            # Fillers longer than CROSS_PAUSE's 120-character span, or a sentence end, keep the words apart.
+            # The 140-character filler or a sentence end keeps the words apart; shorter fillers stay
+            # within CROSS_PAUSE's 120-character span.
             words = [rng.choice(merges), "x " * rng.choice((0, 5, 40, 70)), rng.choice(pauses)]
             if rng.random() < 0.5:
                 words.reverse()
@@ -1491,8 +1492,9 @@ class ScanTimeTests(unittest.TestCase):
             found[cross] += 1
             with self.subTest(step=step, text=text):
                 self.assertEqual(bool(module.STRONG_PAUSE_CUE.search(text) and module.CROSS_PAUSE.search(text)), cross)
-        # The guarded search both matches and fails often enough for the comparison to mean something.
-        self.assertGreater(min(found.values()), 300, found)
+        # The guarded search both matches and fails often enough for the comparison to mean something;
+        # a missing outcome counts as zero.
+        self.assertGreater(min(found[True], found[False]), 300, found)
 
     def test_repeated_classifications_keep_context_and_state(self) -> None:
         rule = "No rebase merges; use squash merges."
