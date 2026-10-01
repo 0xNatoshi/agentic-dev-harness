@@ -217,16 +217,29 @@ PR_STATE = (r'(?:on\s+hold|on\s+pause|en\s+pause|paused|suspended|frozen|parked|
             r'|en\s+attente|suspendue?s?|gelée?s?)')
 # 'All PRs are blocked' holds them; 'Draft PRs are blocked', 'PRs are blocked by failing checks'
 # or '... until CI passes' describe a gate. So the PRs open the clause, with at most a
-# quantifier, and the state ends it or a time or event condition that is not a check follows.
+# quantifier, and the state ends it, a human or freeze blocks it, or a time or event
+# condition that is not a check follows.
 # After punctuation, only a failure explanation that ends the sentence describes a gate:
 # 'PRs are blocked: failing checks.' but not 'All PRs are blocked: CI is down.'
 FAILURE_EXPLANATION = (r'\s*(?:the\s+)?(?:(?:failing|failed|red)\s+' + CHECK_NOUN + r'|' + CHECK_NOUN
                        + r'\s+(?:fail|fails|failed|(?:are|is)\s+(?:red|failing)))\s*(?:\)\s*)?$')
+# A named human or explicit freeze is a hold; a role modifying a gate or thing is not.
+# A possessive decision still names the human; a tool noun after it ('review queue') does not.
+PR_BLOCKER = (r'(?:(?:the|a|an|my|our|your|their|his|her|le|la|les|un|une|du|des|mon|ma|mes|ton|ta|tes|notre|nos|votre|vos|leur|leurs|son|sa|ses)\s+|l[’\x27])?'
+              r'(?:(?:me|us|moi|nous|' + DECIDER_BASE + r's?|' + ROLE_BASE + r's?|(?:tech|team)-leads?|leads?|teams?'
+              r'|mainteneu(?:r|rs|se|ses)|propriétaires?|responsables?(?:\s+des?\s+(?:versions?|releases?|livraisons?))?'
+              r'|relecteu(?:r|rs|se|ses)|relectrices?|équipes?|chefs?)'
+              r'(?:[’\x27]s?\s+(?:decisions?|review|approval|call|sign-?off|go-ahead|go|ok(?:ay)?|say-so|word|green\s+light))?'
+              r'|(?:(?:release|code)\s+)?freeze|hold|embargo|gel)\b(?![’\x27](?:s\b|\s)|-)'
+              r'(?!\s+(?:time|ci|checks?|tests?|builds?|lint|pipelines?|jobs?|workflows?|polic(?:y|ies)'
+              r'|rules?|status|runs?|vérifications?|règles?)\b)' + TOOL_NOUN)
 PR_BLOCKED = (r'^\W*(?:(?:all|every|any|the|open|pending|toutes|tous|les)\s+){0,2}' + PR_NOUN
               + r'\s+(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:(?:now|currently|temporarily|all|actuellement|désormais)\s+)?'
               r'(?:blocked|bloquée?s?)\b(?=\s*$|\s*[,;:)](?!' + FAILURE_EXPLANATION + r')'
               r'|\s+(?:until|till|while|jusqu\w*|tant|pendant|for\s+now|today|pour\s+le\s+moment)\b'
-              r'(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:(?:failing|green)\s+)?' + CHECK_NOUN + r'\b))')
+              r'(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:(?:failing|green)\s+)?' + CHECK_NOUN + r'\b)'
+              r'|\s+(?:by|pending|par|en\s+attente\s+(?:de|du|des|d[’\x27]))\s+'
+              r'(?:(?:review|revue|relecture)\s+(?:by|par)\s+)?' + PR_BLOCKER + r')')
 # A PR state that PR_HELD reads as a gate, not a hold: 'held to the same standard', 'blocked by failing checks'.
 PR_GATE = re.compile(r'(?P<gate_prefix>' + PR_NOUN + r'[^.!?]{0,80}?)\b(?:held|blocked|bloquée?s?)\b')
 # Only a gate's own words, so the rest of its sentence is still read for a hold: 'All PRs are
