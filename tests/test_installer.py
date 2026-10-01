@@ -496,6 +496,35 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(snapshot(self.target), changed)
         self.assertFalse((self.state() / "CURRENT").exists())
 
+    def test_apply_refuses_a_changed_retirement_preview(self):
+        # The operator approves the retirement preview in the saved plan (#43). Apply retires from a fresh
+        # plan, so a preview that was edited or truncated after planning must stop it before any mutation.
+        tampering = {
+            "emptied retirements": ("retirements", lambda value: value.update(retirements=[])),
+            "one retirement hidden": ("retirements", lambda value: value["retirements"].pop()),
+            "retirements removed": ("retirements", lambda value: value.pop("retirements")),
+            "copy location moved": ("retirement_copies",
+                                    lambda value: value["retirement_copies"].update(state_root=str(self.base / "elsewhere"))),
+            "copy location removed": ("retirement_copies", lambda value: value.pop("retirement_copies")),
+            "retirement list emptied": ("retirement_list", lambda value: value.update(retirement_list=[])),
+        }
+        for label, (key, change) in tampering.items():
+            with self.subTest(label):
+                # Each case starts from the same layout, even after a case that was wrongly applied.
+                for path in (self.target, self.state()):
+                    shutil.rmtree(path, ignore_errors=True)
+                before = self.v52_layout()
+                plan = self.plan()
+                value = json.loads(plan.read_text(encoding="utf-8"))
+                change(value)
+                plan.write_text(json.dumps(value), encoding="utf-8")
+                result = self.apply(plan)
+                self.assert_refused(result, 1)
+                self.assertEqual(json.loads(result.stderr)["details"], [key])
+                self.assertEqual(snapshot(self.target), before)
+                self.assertFalse((self.state() / "CURRENT").exists())
+                self.assertEqual(list(self.state().rglob("receipt.json")), [])
+
     def test_plan_from_the_previous_installer_version_is_drift(self):
         # A 1.0.0 plan does not show the retirement details, so it must be made again.
         before = self.v52_layout()
@@ -507,7 +536,7 @@ class InstallerTests(unittest.TestCase):
         plan.write_text(json.dumps(value), encoding="utf-8")
         result = self.apply(plan)
         self.assert_refused(result, 1)
-        self.assertEqual(json.loads(result.stderr)["details"], ["installer_version"])
+        self.assertEqual(json.loads(result.stderr)["details"], ["installer_version", "retirements", "retirement_copies"])
         self.assertEqual(snapshot(self.target), before)
         self.assertFalse((self.state() / "CURRENT").exists())
 

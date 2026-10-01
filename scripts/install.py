@@ -648,7 +648,8 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
         "retirement_list": RETIREMENT_LIST,
         "before": before,
         "classification": classification,
-        # Derived from before and classification, so neither key is a drift key.
+        # Derived from before and classification, but still drift keys: the operator approves this preview,
+        # and apply retires from a fresh plan, so an edited or truncated preview must stop apply (#43).
         "retirements": retirements(classification, before),
         "retirement_copies": {"state_root": str(locations.state), "transaction": None,
                               "note": "The transaction directory is allocated at apply; the apply output and receipt "
@@ -662,8 +663,8 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
     return plan, package
 
 
-DRIFT_KEYS = ("installer_version", "runtime", "home", "config_root", "target", "skill_roots", "state_root", "package", "before", "classification", "duplicates",
-              "duplicate_inventories")
+DRIFT_KEYS = ("installer_version", "runtime", "home", "config_root", "target", "skill_roots", "state_root", "package", "retirement_list",
+              "before", "classification", "retirements", "retirement_copies", "duplicates", "duplicate_inventories")
 
 
 def drift(plan: dict, fresh: dict) -> list:
@@ -1006,7 +1007,8 @@ def command_apply(options) -> dict:
                                    Path(options.checksums))
         changed = drift(plan, fresh)
         if changed:
-            raise Refused("The package, target or duplicates changed since the plan; plan again", changed)
+            raise Refused("The package, target, duplicates or the plan's retirement preview changed since the plan; "
+                          "plan again", changed)
         if fresh["interrupted"]:
             raise Blocked(f"An interrupted transaction is recorded in {fresh['interrupted']}; run `recover` first")
         requested = [os.path.abspath(path) for path in options.retire_duplicate]
