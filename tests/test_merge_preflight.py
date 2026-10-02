@@ -111,6 +111,7 @@ if args[1] == 'repos/fixture/repo/commits/' + MERGE_SHA:
     # The committer email is deliberately absent: the check must never read it.
     print(json.dumps({
         'sha': env('FIXTURE_COMMIT_SHA', MERGE_SHA),
+        'parents': [] if env('FIXTURE_PARENT') == '__none__' else [{'sha': env('FIXTURE_PARENT')}],
         'commit': {
             'author': {'name': env('FIXTURE_COMMIT_NAME', 'octo-fixture'),
                        'email': env('FIXTURE_COMMIT_EMAIL', '1001+octo-fixture@users.noreply.github.com')},
@@ -1374,12 +1375,14 @@ ROUTING_CASES = (
     Case("review routing", 0, mode="reviews", api_calls=1),
     Case("push/fetch mismatch", 2, mode="pages", setup="push_mismatch"),
     Case("published-only veto", 1, setup="published_wait"),
-    Case("unreadable published ref", 2, setup="missing_published_ref"),
+    Case("unreadable published ref", 2, setup="missing_published_ref", stderr=("Command failed: git rev-parse",)),
+    # The recorded decision line must not read as a merge hold.
+    Case("merge author name line clears suspension", 0, "- Merge author name: `Fixture Alias` (owner decision on #21, 2026-01-01)\n"),
 )
 # Server-generated merge author (#21). Fixture values are neutral; PRIVATE values
 # stand for a personal display name or address and must never be echoed.
 NOREPLY = "1001+octo-fixture@users.noreply.github.com"
-PRIVATE = ("Fixture Alias", "person@example.invalid")
+PRIVATE = ("Fixture Alias", "Other Alias", "person@example.invalid")
 VERIFIED_LOCAL_AUTHOR = tuple(
     (f"GIT_{role}_{part}", value)
     for role in ("AUTHOR", "COMMITTER")
@@ -1469,7 +1472,58 @@ IDENTITY_CASES = (
                   stderr="Malformed merge author name"),
     identity_case("identity author name prose", 0, text="Merge author names follow the profile.\n", setup="published_text",
                   stderr="identity: author-name-configured=false"),
-    identity_case("identity unreadable published ref", 2, api_calls=0, setup="missing_published_ref"),
+    identity_case("identity unreadable published ref", 2, api_calls=0, setup="missing_published_ref",
+                  stderr="Command failed: git rev-parse"),
+    identity_case("identity duplicate identical author names", 0, ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
+                  text=ALIAS + ALIAS, setup="published_text", stderr="identity: author-name-configured=true"),
+    identity_case("identity author name with trailing period", 0, ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
+                  text="Merge author name: `Fixture Alias`.\n", setup="published_text",
+                  stderr="identity: profile-name-is-expected=true"),
+    identity_case("identity author name at length limit", 0, ("FIXTURE_PROFILE_NAME", "A" * 100),
+                  text="Merge author name: `" + "A" * 100 + "`\n", setup="published_text",
+                  stderr="identity: profile-name-is-expected=true"),
+    identity_case("identity author name over length limit", 2, api_calls=0,
+                  text="Merge author name: `" + "A" * 101 + "`\n", setup="published_text",
+                  stderr="Malformed merge author name"),
+    identity_case("identity configured author name with profile name unset", 2, ("FIXTURE_PROFILE_NAME", "__null__"),
+                  text=ALIAS, setup="published_text", stderr="identity: indeterminate=profile-name-unset"),
+    # Rendered Markdown does not show these as settings: they can neither set nor silently revoke an alias.
+    identity_case("identity author name in code fence", 2, api_calls=0, text="```\n" + ALIAS + "```\n",
+                  setup="published_text", stderr="inside code or an HTML comment"),
+    identity_case("identity author name in tilde fence", 2, api_calls=0, text="~~~~ text\n" + ALIAS + "~~~~\n",
+                  setup="published_text", stderr="inside code or an HTML comment"),
+    identity_case("identity author name commented out", 2, api_calls=0, text="<!--\n" + ALIAS + "-->\n",
+                  setup="published_text", stderr="inside code or an HTML comment"),
+    identity_case("identity author name in inline comment", 2, api_calls=0,
+                  text="<!-- Merge author name: `Fixture Alias` -->\n", setup="published_text",
+                  stderr="inside code or an HTML comment"),
+    identity_case("identity author name in indented code", 2, api_calls=0, text="    " + ALIAS, setup="published_text",
+                  stderr="inside code or an HTML comment"),
+    # After a closed fence and comment, a visible line is a setting again.
+    identity_case("identity author name after closed fence and comment", 0, ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
+                  text="```\nexample\n```\n<!-- note -->\n" + ALIAS, setup="published_text",
+                  stderr="identity: author-name-configured=true"),
+    identity_case("identity numbered author name", 2, api_calls=0, text="1. Merge author name: `Fixture Alias`\n",
+                  setup="published_text", stderr="Malformed merge author name"),
+    identity_case("identity quoted author name", 2, api_calls=0, text="> Merge author name: `Fixture Alias`\n",
+                  setup="published_text", stderr="Malformed merge author name"),
+    identity_case("identity heading author name", 2, api_calls=0, text="## Merge author name: `Fixture Alias`\n",
+                  setup="published_text", stderr="Malformed merge author name"),
+    identity_case("identity table author name", 2, api_calls=0, text="| Merge author name: | `Fixture Alias` |\n",
+                  setup="published_text", stderr="Malformed merge author name"),
+    identity_case("identity hyphenated author name label", 2, api_calls=0,
+                  text="Merge-author-name: `Fixture Alias`\n", setup="published_text",
+                  stderr="Malformed merge author name"),
+    identity_case("identity full-width colon author name", 2, api_calls=0,
+                  text="Merge author name\uff1a `Fixture Alias`\n", setup="published_text",
+                  stderr="Malformed merge author name"),
+    identity_case("identity invisible character in author name label", 2, api_calls=0,
+                  text="Merge author\u200b name: `Fixture Alias`\n", setup="published_text",
+                  stderr="Malformed merge author name"),
+    # A visible exact line cannot hide a second, look-alike one that would replace it.
+    identity_case("identity look-alike beside exact author name", 2, api_calls=0,
+                  text=ALIAS + "1. Merge author name: `Other Alias`\n", setup="published_text",
+                  stderr="Malformed merge author name"),
     identity_case("identity indeterminate outranks blocker", 2, ("FIXTURE_PR_AUTHOR_ID", "2002"),
                   ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
                   stderr=("identity: indeterminate=pr-author-is-merger", "identity: blocker=profile-name")),
@@ -1569,12 +1623,23 @@ IDENTITY_CASES = (
                    setup="published_text", stderr="published: author-name-is-expected=true"),
     published_case("published configured author name replaces login", 1, text=ALIAS, setup="published_text",
                    stderr="published: blocker=author-name-is-expected"),
-    published_case("published conflicting author names", 2, api_calls=0,
+    # A PR cannot authorize its own alias after merge either: only its base, the merge's first parent, counts.
+    published_case("published unpublished author name", 1, ("FIXTURE_COMMIT_NAME", "Fixture Alias"), text=ALIAS,
+                   stderr="published: blocker=author-name-is-expected"),
+    published_case("published author name added by the merge", 1, ("FIXTURE_COMMIT_NAME", "Fixture Alias"),
+                   text=ALIAS, setup="alias_added_by_merge", stderr="published: blocker=author-name-is-expected"),
+    published_case("published author name in managed block", 1, ("FIXTURE_COMMIT_NAME", "Fixture Alias"),
+                   text=MANAGED, setup="published_text", stderr="published: blocker=author-name-is-expected"),
+    published_case("published merge parent not fetched", 2, ("FIXTURE_PARENT", "f" * 40),
+                   stderr="Command failed: git rev-parse"),
+    published_case("published merge commit without parent", 2, ("FIXTURE_PARENT", "__none__"),
+                   stderr="Unexpected commit response"),
+    published_case("published conflicting author names", 2,
                    text=ALIAS + 'Merge author name: `Other Alias`\n', setup="published_text",
                    stderr="Conflicting merge author names"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES + IDENTITY_CASES
-INVENTORY = 995 + len(IDENTITY_CASES)
+INVENTORY = 996 + len(IDENTITY_CASES)
 if len(ALL_CASES) != INVENTORY or len({case.name for case in ALL_CASES}) != INVENTORY:
     raise RuntimeError(f"Merge fixture inventory must contain {INVENTORY} unique cases")
 
@@ -1632,8 +1697,17 @@ class MergePreflightTests(unittest.TestCase):
             self.git("commit", "-qm", "published text")
             self.git("update-ref", "refs/remotes/origin/main", "HEAD")
             write_fixture(self.instructions, "Local clear.\n")
+        elif case.setup == "alias_added_by_merge":
+            # The merge's base has no alias; the default branch after the merge does.
+            environment["FIXTURE_PARENT"] = self.git("rev-parse", "HEAD")
+            self.git("add", "AGENTS.md")
+            self.git("commit", "-qm", "merged alias")
+            self.git("update-ref", "refs/remotes/origin/main", "HEAD")
         elif case.setup == "missing_published_ref":
             self.git("update-ref", "-d", "refs/remotes/origin/main")
+        if case.mode == "published" and "FIXTURE_PARENT" not in environment:
+            # By default the merge was based on the published default branch.
+            environment["FIXTURE_PARENT"] = self.git("rev-parse", "refs/remotes/origin/main")
         write_fixture(self.log, "")
         arguments = [str(self.instructions)] if case.mode == "suspension" else ["fixture", "repo"]
         if case.mode == "reviews":

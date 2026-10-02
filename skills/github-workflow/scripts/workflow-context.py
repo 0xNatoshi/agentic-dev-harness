@@ -1286,7 +1286,11 @@ def scan_text(text):
 
 
 def published_instructions(branch):
-    ref = 'refs/remotes/origin/' + branch
+    return instructions_at('refs/remotes/origin/' + branch)
+
+
+def instructions_at(ref):
+    """AGENTS.md of a local ref or commit, or None when its readable tree has none."""
     command('git', 'rev-parse', '--verify', ref + '^{tree}')
     entry = command('git', 'ls-tree', '-z', ref, '--', 'AGENTS.md')
     if not entry:
@@ -1320,10 +1324,13 @@ MERGE_EVIDENCE = ('query($owner:String!,$name:String!,$number:Int!){repository(o
                   '{viewerPossibleCommitEmails viewerDefaultCommitEmail pullRequest(number:$number)'
                   '{isMergeQueueEnabled isInMergeQueue autoMergeRequest{enabledAt}}}}')
 MERGE_PATH_KEYS = ('merge-queue-enabled', 'pr-in-merge-queue', 'auto-merge-enabled')
-# Any line that looks like the setting must be the exact form, so a typo blocks instead of being ignored;
-# prose such as 'Merge author names follow...' has no label colon and is not a setting.
-AUTHOR_NAME_LIKE = re.compile(r'(?:[-*+]\s+)?[*_`]*merge[\s*_`]+author[\s*_`]+name[\s*_`]*:', re.IGNORECASE)
+# Any line containing the label, after compatibility normalization and with invisible characters, markup
+# and separators between its words ignored, must be the exact form, so a typo or a numbered, quoted, heading
+# or table variant blocks instead of being ignored; prose such as 'Merge author names follow...' has no
+# label colon and is not a setting.
+AUTHOR_NAME_LIKE = re.compile(r'merge[\W_]*author[\W_]*name[\W_]*:', re.IGNORECASE)
 AUTHOR_NAME = re.compile(r'(?:[-*+]\s+)?Merge author name: `([^`]+)`(?:\s+\([^()]*\))?\.?')
+FENCE = re.compile(r' {0,3}(`{3,}|~{3,})')
 AUTHOR_NAME_LIMIT = 100
 
 
@@ -1366,22 +1373,57 @@ def identity_origin(expected):
     return host, full, branch
 
 
-def configured_author_name(branch):
-    """The owner's recorded merge author name, or None for the account login.
+def setting_lines(text):
+    """(line, hidden) for each line outside managed blocks; hidden means code or an HTML comment.
 
-    Only the published default-branch AGENTS.md counts, outside managed blocks:
-    a PR cannot authorize its own alias, and the alias PR itself meets the
-    profile-name decision before merge. Malformed or conflicting lines block.
+    Rendered Markdown does not show such a line as a setting, so it can neither
+    set nor silently revoke one.
     """
-    text = published_instructions(branch)
+    fence = None
+    comment = False
+    for line in outside_managed(text, (text,)).split('\n'):
+        opened = FENCE.match(line)
+        hidden = fence is not None or comment or opened is not None or line.startswith(('    ', '\t'))
+        if fence is not None:
+            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence) \
+                    and not line[opened.end():].strip():
+                fence = None
+        elif opened:
+            fence = opened.group(1)
+        else:
+            position = 0
+            while True:
+                marker = line.find('-->' if comment else '<!--', position)
+                if marker < 0:
+                    break
+                hidden = True
+                comment = not comment
+                position = marker + 3
+        yield line, hidden
+
+
+def configured_author_name(text):
+    """The owner's recorded merge author name in an AGENTS.md text, or None for the account login.
+
+    Callers pass only published text, outside managed blocks: the default branch
+    before merge, the merge commit's first parent after it. A PR therefore cannot
+    authorize its own alias, and the PR recording one meets the profile-name
+    decision. A PR changing an existing alias passes only while the profile still
+    matches the old one, after which later merges block until profile and line
+    agree, so the change still needs the owner. Malformed, hidden or conflicting
+    lines block.
+    """
     if text is None:
         return None
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     names = set()
-    for line in outside_managed(text, (text,)).split('\n'):
-        line = line.strip()
-        if not AUTHOR_NAME_LIKE.match(line):
+    for line, hidden in setting_lines(text):
+        folded = ''.join(c for c in unicodedata.normalize('NFKC', line) if not invisible(c))
+        if not AUTHOR_NAME_LIKE.search(folded):
             continue
+        if hidden:
+            raise EvidenceError('Merge author name line inside code or an HTML comment in published AGENTS.md')
+        line = line.strip()
         found = AUTHOR_NAME.fullmatch(line)
         name = found.group(1) if found else ''
         # A profile display name is printable text; '<name>' is a template placeholder, not a decision.
@@ -1460,7 +1502,7 @@ def identity_mode(args):
     """Pre-merge prediction of the server author; exit 0 prints only the noreply."""
     expected, number, handle = identity_arguments(args, method=True)
     host, full, branch = identity_origin(expected)
-    configured = configured_author_name(branch)
+    configured = configured_author_name(published_instructions(branch))
     viewer = api_json(host, 'user', 'viewer')
     viewer_id = field(viewer, 'id', int, 'viewer')
     account = handle_account(host, handle)
@@ -1491,9 +1533,10 @@ def identity_mode(args):
             findings.append(('blocker', 'profile-name'))
     else:
         findings.append(('indeterminate', 'profile-name-unset'))
-    # The default gh token scopes return an empty list, which shows nothing: the ID noreply of an account
-    # created after the cutoff is always one of its commit emails, --author-email pins it and published
-    # proves the result. A readable list without it is contrary evidence and still blocks.
+    # The default gh token scopes return an empty list, which shows nothing. The ID noreply of an account
+    # created after the cutoff is a documented address of that account; --author-email pins it, and GitHub
+    # has been observed to refuse the merge, not to substitute, when it rejects the requested author email.
+    # published then proves the result. A readable list without the noreply is contrary evidence and blocks.
     if not possible:
         findings.append(('warning', 'possible-commit-emails-unreadable'))
     else:
@@ -1530,8 +1573,7 @@ def identity_mode(args):
 def published_mode(args):
     """Post-merge proof: compare the PR's merge commit with the handle; report booleans and finding keys."""
     expected, number, handle = identity_arguments(args)
-    host, full, branch = identity_origin(expected)
-    configured = configured_author_name(branch)
+    host, full, _ = identity_origin(expected)
     pull = api_json(host, 'repos/' + full + '/pulls/' + number, 'pull request')
     sha = pull.get('merge_commit_sha')
     if pull.get('merged') is not True or not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}', sha):
@@ -1540,6 +1582,13 @@ def published_mode(args):
     commit = api_json(host, 'repos/' + full + '/commits/' + sha, 'commit')
     if commit.get('sha') != sha:
         raise EvidenceError('Unexpected commit response')
+    parents = commit.get('parents')
+    parent = parents[0].get('sha') if isinstance(parents, list) and parents and isinstance(parents[0], dict) else None
+    if not isinstance(parent, str) or not re.fullmatch('[0-9a-f]{40}', parent):
+        raise EvidenceError('Unexpected commit response')
+    # Judge the merge under the policy it was gated by: the base it merged into, not the default branch now,
+    # which already holds this PR's own AGENTS.md change. The merge must have been fetched.
+    configured = configured_author_name(instructions_at(parent))
     details = commit.get('commit')
     author = details.get('author') if isinstance(details, dict) else None
     name = field(author, 'name', str, 'commit')
