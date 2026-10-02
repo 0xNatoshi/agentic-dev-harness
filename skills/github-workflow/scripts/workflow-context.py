@@ -641,12 +641,10 @@ def content_column(line):
 
     As in CommonMark, one to four spaces after the marker lead to the content; more, or none before the end
     of the line, count as one, since the content is then indented code or starts on a later line."""
-    indent = LIST_ITEM.match(line).group(1)
-    rest = line[len(indent):]
-    marker = 1 if rest[0] in '-*+' else len(rest) - len(rest.lstrip('0123456789')) + 1
-    after = rest[marker:]
-    padding = len(after) - len(after.lstrip())
-    return len(indent) + marker + (padding if 1 <= padding <= 4 and after.strip() else 1)
+    item = LIST_ITEM.match(line)
+    marker = len(item.group(0).rstrip())  # from the match, since its \d also takes non-ASCII digits
+    padding = item.end() - marker
+    return marker + (padding if 1 <= padding <= 4 and line[item.end():].strip() else 1)
 
 
 def unquote(line):
@@ -885,7 +883,12 @@ def units(lines, hold_found, heading_found=lambda level: None):
             parents = [t for _, _, t in items]
             # Added after the cut, so a long parent item cannot push it out.
             near = []
-            if sibling and label(sibling[2]):
+            if sibling and sibling[0] < indent:
+                # Past its sibling's marker but short of its content column, the item is a sibling in CommonMark,
+                # yet its author may have meant a child. Reading it both ways keeps '- No agent may' above
+                # ' - merge PRs' a hold, as when items nested by marker column.
+                parents.append(sibling[2])
+            elif sibling and sibling[0] == indent and label(sibling[2]):
                 near.append(sibling[2][-CONTEXT_LIMIT:])  # '- **Merges:**' labels the next sibling
             if depth in intros and re.search(MERGE_WORD, text):
                 # '- Do not do the following' may govern every later sibling, whatever
@@ -900,6 +903,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
         if items and indent:
             # Indented content continues the list item above it.
             extend_run(text)
+            # Marker columns keep every item a content-column reading would, and the jittered parents too.
             return context(t for i, _, t in items if i < indent), text
         if items:
             # Unterminated open items still introduce the block after the list.
