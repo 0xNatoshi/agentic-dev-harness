@@ -972,15 +972,16 @@ class Lock:
         """Block, before anything changes, when the state directory refuses the transaction directory, journal and
         CURRENT pointer an action writes there (#68).
 
-        An existing writable LOCK opens without write permission on its directory, so the OS is asked directly with
-        a file created and removed at once, which also covers ACLs. A read-only mount already refused the LOCK.
-        Any other failure stays an unexpected error, as in setup."""
+        An existing writable LOCK opens without write permission on its directory, so the OS is asked directly to
+        create a file there, which also covers POSIX ACLs; a Windows ACL that allows files but denies folders still
+        fails later. A read-only mount already refused the LOCK. Only the creation decides: removing the probe and
+        any other failure stay unexpected errors, as in setup."""
         try:
             descriptor, probe = tempfile.mkstemp(prefix=".write-check-", dir=str(self.state))
-            os.close(descriptor)
-            os.unlink(probe)
         except PermissionError:
             raise unwritable(self.state, "so the installer cannot record its transaction in it", self.retry) from None
+        os.close(descriptor)
+        os.unlink(probe)
 
     def __enter__(self) -> "Lock":
         return self
