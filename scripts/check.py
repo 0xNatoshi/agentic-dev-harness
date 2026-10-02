@@ -223,10 +223,13 @@ RETRYING_TEMPFILE = {"mkstemp", "mkdtemp", "NamedTemporaryFile", "TemporaryFile"
 
 
 def check_runtime_tempfile(relative, tree):
+    modules = {"tempfile"}
+    modules.update(alias.asname or alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
+                   for alias in node.names if alias.name == "tempfile")
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "tempfile":
             names = [alias.name for alias in node.names]
-        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "tempfile":
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in modules:
             names = [node.attr]
         else:
             continue
