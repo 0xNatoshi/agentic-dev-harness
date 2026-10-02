@@ -1328,18 +1328,25 @@ class InstallerTests(unittest.TestCase):
                                      env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:committed"})
         self.assertEqual(crashed.returncode, 70, crashed.stderr)
         rolled_back = snapshot(self.target)
-        transaction.chmod(0o500)
-        try:
-            result = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
-        finally:
-            transaction.chmod(0o755)
-        self.assert_refused(result, 2)
-        self.assertEqual(json.loads(result.stderr)["error"],
-                         f"{transaction} cannot be written or searched (mode 0500), so the installer cannot mark its "
-                         f"receipt rolled back in it; add owner write and search (execute) permission to {transaction}, "
-                         "then run recover again")
-        self.assertTrue((state / "CURRENT").exists())
-        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+        # A directory that cannot be searched must not read as an absent receipt, which would drop CURRENT unmarked.
+        refusals = ((0o500, f"{transaction} cannot be written or searched (mode 0500), so the installer cannot mark "
+                            f"its receipt rolled back in it; add owner write and search (execute) permission to "
+                            f"{transaction}, then run recover again"),
+                    (0o600, f"{transaction} cannot be searched (mode 0600), so the installer cannot inspect what it "
+                            f"holds; add owner read and search (execute) permission to {transaction}, then run recover "
+                            "again"))
+        for mode, message in refusals:
+            with self.subTest(committed=f"{mode:04o}"):
+                transaction.chmod(mode)
+                try:
+                    result = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                                "--maintenance-confirmed")
+                finally:
+                    transaction.chmod(0o755)
+                self.assert_refused(result, 2)
+                self.assertEqual(json.loads(result.stderr)["error"], message)
+                self.assertTrue((state / "CURRENT").exists())
+                self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
         self.assertEqual(self.recover()["result"], "already committed")
         self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "rolled back")
         self.assertEqual(snapshot(self.target), rolled_back)
@@ -1370,8 +1377,8 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(snapshot(self.target), before)
 
     def test_a_refused_write_probe_blocks_after_one_attempt(self):
-        # Before Python 3.13, tempfile retries a Windows PermissionError as a name clash up to 2**31 - 1 times, so
-        # a probe in a directory an ACL denies would hang; each probe makes one attempt (#71).
+        # tempfile retries a Windows PermissionError as a name clash, up to 2**31 - 1 times in a Python without the
+        # cpython gh-66305 fix, so a probe in a directory an ACL denies would hang; each probe makes one attempt (#71).
         installer = self.load_installer()
         directory = self.base / "probed"
         directory.mkdir()

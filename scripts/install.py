@@ -302,8 +302,9 @@ def probe_writable(directory: Path, reason: str, retry: str, folders: bool = Fal
     sudo run created); a Windows ACL can allow files but deny folders. Only the creation decides: removing a probe and
     any other failure stay unexpected errors. contents names the fix for an action that also moves what directory
     holds, as permission_fix describes."""
-    # One attempt under a random name, as write_durable names its files: before Python 3.13, tempfile retries a
-    # Windows PermissionError as a name clash up to TMP_MAX (2**31 - 1) times, so a denied probe would hang.
+    # One attempt under a random name, as write_durable names its files: tempfile retries a Windows PermissionError
+    # as a name clash, up to os.TMP_MAX (2**31 - 1) times in a Python without the cpython gh-66305 fix, so a denied
+    # probe would hang.
     probe = directory / f".write-check-{uuid.uuid4().hex}"
     try:
         descriptor = os.open(str(probe), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -1673,9 +1674,11 @@ def command_recover(options) -> dict:
         if record.get("state") == "committed":
             result = {"result": "already committed", "journal": str(journal)}
             if record["operation"] == "rollback" and exists(Path(record["receipt"])):
-                # Only the receipt is left to mark, in a directory a sudo run of apply can own (#71).
+                # Only the receipt is left to mark, in a directory a sudo run of apply can own (#71). Nothing is moved
+                # any more, so write access is the fix. The rollback journal lives below that directory, so one that
+                # cannot be searched already blocked above instead of reading as an absent receipt.
                 probe_writable(Path(record["receipt"]).parent, "so the installer cannot mark its receipt rolled back "
-                               "in it", "run recover again", contents=True)
+                               "in it", "run recover again")
             if record["operation"] == "rollback" and not mark_rolled_back(record, tolerant=True):
                 result["receipt_not_updated"] = record["receipt"]
             if record["operation"] == "apply":
