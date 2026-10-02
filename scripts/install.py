@@ -243,28 +243,43 @@ def exists(path: Path) -> bool:
     return os.path.lexists(str(path))
 
 
-def inaccessible(path: Path, action: str, retry: str = "plan again") -> Blocked:
-    """A directory the OS refused to search or list, named with the fix instead of an error on one of its children (#54).
+def permission_fix(path: Path, needed: int, permission: str, held: str, allow: str) -> tuple[str | None, str]:
+    """The mode of a path the OS refused and the fix for it (#54).
 
-    Read and search permission are both named: either alone leaves the directory uninspectable. On POSIX the
-    fix follows the owner and mode: a directory another user owns (one created with sudo) or one whose owner
-    already has both permissions (an ACL or a macOS privacy control) is not fixed by the owner's mode."""
+    On POSIX the fix follows the owner and mode: a path another user owns (one created with sudo) or one whose
+    owner already has the needed permission (an ACL or a macOS privacy control) is not fixed by the owner's mode."""
     try:
         status = os.stat(str(path))
     except OSError:
         status = None
     mode = f"{stat.S_IMODE(status.st_mode):04o}" if status else None
-    shown = f" (mode {mode})" if mode else ""
-    fix = f"add owner read and search (execute) permission to {path}"
+    fix = f"add owner {permission} permission to {path}"
     if status and os.name != "nt":
         if status.st_uid != os.geteuid():
             fix = (f"{path} belongs to another user (uid {status.st_uid}): have its owner or an administrator give you "
-                   "read and search (execute) access to it, or its ownership")
-        elif status.st_mode & (stat.S_IRUSR | stat.S_IXUSR) == stat.S_IRUSR | stat.S_IXUSR:
-            fix = (f"its owner already has read and search permission, so an access control list or system privacy "
-                   f"setting denies access: allow this process to read and search {path}")
+                   f"{permission} access to it, or its ownership")
+        elif status.st_mode & needed == needed:
+            fix = (f"its owner already has {held} permission, so an access control list or system privacy "
+                   f"setting denies access: allow this process to {allow} {path}")
+    return mode, fix
+
+
+def inaccessible(path: Path, action: str, retry: str = "plan again") -> Blocked:
+    """A directory the OS refused to search or list, named with the fix instead of an error on one of its children (#54).
+
+    Read and search permission are both named: either alone leaves the directory uninspectable."""
+    mode, fix = permission_fix(path, stat.S_IRUSR | stat.S_IXUSR, "read and search (execute)", "read and search",
+                               "read and search")
+    shown = f" (mode {mode})" if mode else ""
     return Blocked(f"{path} cannot be {action}{shown}, so the installer cannot inspect what it holds; {fix}, then {retry}",
                    {"path": str(path), "mode": mode})
+
+
+def unwritable(path: Path, reason: str, retry: str) -> Blocked:
+    """A directory or file the OS refused to write before anything changed, named with the fix (#68)."""
+    mode, fix = permission_fix(path, stat.S_IWUSR, "write", "write", "write to")
+    shown = f" (mode {mode})" if mode else ""
+    return Blocked(f"{path} cannot be written{shown}, {reason}; {fix}, then {retry}", {"path": str(path), "mode": mode})
 
 
 def searchable_part(path: Path, retry: str) -> Path | None:
@@ -896,9 +911,17 @@ def maintenance_boundary(confirmed: bool) -> dict:
 class Lock:
     """Exclusive installer lock, released by the operating system if the process dies."""
 
-    def __init__(self, state: Path) -> None:
-        state.mkdir(parents=True, exist_ok=True)
-        self.stream = open(state / "LOCK", "a+b")
+    def __init__(self, state: Path, retry: str) -> None:
+        lock = state / "LOCK"
+        try:
+            state.mkdir(parents=True, exist_ok=True)
+            self.stream = open(lock, "a+b")
+        except (PermissionError, FileExistsError, NotADirectoryError, IsADirectoryError) as error:
+            # Nothing has changed yet, so a refused setup is a blocked state with its fix, not an uncertain one (#68).
+            blocked = Lock.setup_blocked(state, error, retry)
+            if blocked is None:
+                raise  # A type conflict gone before it could be named stays an unexpected error.
+            raise blocked from None
         try:
             if os.name == "nt":
                 import msvcrt
@@ -909,7 +932,27 @@ class Lock:
                 fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             self.stream.close()
-            raise Blocked(f"Another installer holds {state / 'LOCK'}")
+            raise Blocked(f"Another installer holds {lock}")
+
+    @staticmethod
+    def setup_blocked(state: Path, error: OSError, retry: str) -> Blocked | None:
+        lock = state / "LOCK"
+        # A path of the wrong type is named first: Windows reports a LOCK directory as a permission error, and
+        # mkdir(parents=True) can stop at any ancestor that is a file.
+        for path in (lock, state, *state.parents):
+            if exists(path) and os.path.isdir(str(path)) == (path == lock):
+                kind = "a directory, not the installer's lock file" if path == lock else "not a directory"
+                return Blocked(f"{path} is {kind}, so the installer cannot keep its state there; move it out of the way, "
+                               f"then {retry}", {"path": str(path)})
+        if not isinstance(error, PermissionError):
+            return None
+        # The OS refused a write: to the file itself when it exists (a read-only LOCK), otherwise to the directory
+        # the missing path is created in.
+        failed = Path(error.filename) if error.filename else lock
+        path = failed if exists(failed) else failed.parent
+        reason = ("so the installer cannot take its lock" if path == lock
+                  else "so the installer cannot create its state directory or lock file in it")
+        return unwritable(path, reason, retry)
 
     def __enter__(self) -> "Lock":
         return self
@@ -1161,7 +1204,7 @@ def command_apply(options) -> dict:
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check()
-    with Lock(locations.state):
+    with Lock(locations.state, "run apply again"):
         fresh, package = make_plan(plan["runtime"], plan["home"], plan.get("config_root"), Path(plan["package"]["source"]),
                                    Path(options.checksums))
         changed = drift(plan, fresh)
@@ -1379,7 +1422,7 @@ def command_rollback(options) -> dict:
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check("run rollback again")
-    with Lock(locations.state):
+    with Lock(locations.state, "run rollback again"):
         if exists(locations.state / "CURRENT"):
             raise Blocked(f"An interrupted transaction is recorded in {locations.state / 'CURRENT'}; run `recover` first")
         # A receipt field is untrusted input: only an integer mode is quoted back in guidance.
@@ -1543,7 +1586,7 @@ def command_recover(options) -> dict:
                            "`recover --plan <plan>` or `recover --receipt <receipt>`, which reuse the recorded directories.")
     if not exists(locations.state):
         return nothing
-    with Lock(locations.state):
+    with Lock(locations.state, "run recover again"):
         current = locations.state / "CURRENT"
         if not exists(current):
             return nothing

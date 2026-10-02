@@ -1076,6 +1076,105 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(snapshot(self.target), after)
 
     @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_an_unwritable_state_location_blocks_the_lock_with_its_fix(self):
+        # The lock is set up before anything changes, so a refused write there is blocked, not an unexpected error (#68).
+        before = self.v52_layout()
+        config, state = self.target.parent.parent, self.state()
+        plan = self.plan()
+        self.assertFalse(state.exists())
+        config.chmod(0o500)
+        try:
+            result = self.apply(plan)
+        finally:
+            config.chmod(0o755)
+        self.assert_refused(result, 2)
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], f"{config} cannot be written (mode 0500), so the installer cannot create its state "
+                                         f"directory or lock file in it; add owner write permission to {config}, then run "
+                                         "apply again")
+        self.assertEqual(error["details"], {"path": str(config), "mode": "0500"})
+        self.assertFalse(state.exists())
+        self.assertEqual(snapshot(self.target), before)
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        lock = state / "LOCK"
+        for command in (("rollback", "--receipt", receipt_path), ("recover", "--runtime", "claude", "--home", self.home)):
+            with self.subTest(command=command[0]):
+                lock.chmod(0o400)
+                try:
+                    result = self.run_installer(*command, "--maintenance-confirmed")
+                finally:
+                    lock.chmod(0o644)
+                self.assert_refused(result, 2)
+                error = json.loads(result.stderr)
+                self.assertEqual(error["error"], f"{lock} cannot be written (mode 0400), so the installer cannot take its "
+                                                 f"lock; add owner write permission to {lock}, then run {command[0]} again")
+                self.assertEqual(error["details"], {"path": str(lock), "mode": "0400"})
+                self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+                self.assertEqual(snapshot(self.target), after)
+
+    def test_a_state_path_of_the_wrong_type_blocks_the_lock(self):
+        # Windows reports opening a LOCK directory as a permission error; both systems name the path in the way (#68).
+        before = self.v52_layout()
+        state = self.state()
+        plan = self.plan()
+        state.write_bytes(b"not a directory\n")
+        result = self.apply(plan)
+        self.assert_refused(result, 2)
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], f"{state} is not a directory, so the installer cannot keep its state there; move "
+                                         "it out of the way, then run apply again")
+        self.assertEqual(error["details"], {"path": str(state)})
+        self.assertEqual(state.read_bytes(), b"not a directory\n")
+        self.assertEqual(snapshot(self.target), before)
+        state.unlink()
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        lock = state / "LOCK"
+        lock.unlink()
+        lock.mkdir()
+        for command in (("rollback", "--receipt", receipt_path), ("recover", "--runtime", "claude", "--home", self.home)):
+            with self.subTest(command=command[0]):
+                result = self.run_installer(*command, "--maintenance-confirmed")
+                self.assert_refused(result, 2)
+                error = json.loads(result.stderr)
+                self.assertEqual(error["error"], f"{lock} is a directory, not the installer's lock file, so the installer "
+                                                 f"cannot keep its state there; move it out of the way, then run "
+                                                 f"{command[0]} again")
+                self.assertEqual(error["details"], {"path": str(lock)})
+                self.assertTrue(lock.is_dir())
+                self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+                self.assertEqual(snapshot(self.target), after)
+
+    def test_a_held_lock_still_reports_the_other_installer(self):
+        # The setup diagnostics of #68 leave the contention message unchanged.
+        self.v52_layout()
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        lock = self.state() / "LOCK"
+        with open(lock, "a+b") as stream:
+            if os.name == "nt":
+                import msvcrt
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                for command in (("rollback", "--receipt", receipt_path),
+                                ("recover", "--runtime", "claude", "--home", self.home)):
+                    with self.subTest(command=command[0]):
+                        result = self.run_installer(*command, "--maintenance-confirmed")
+                        self.assert_refused(result, 2)
+                        self.assertEqual(json.loads(result.stderr)["error"], f"Another installer holds {lock}")
+                        self.assertEqual(snapshot(self.target), after)
+            finally:
+                if os.name == "nt":
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
     def test_the_selected_skill_directory_or_one_inside_it_that_cannot_be_searched_or_listed_blocks(self):
         before = self.v52_layout()
 
