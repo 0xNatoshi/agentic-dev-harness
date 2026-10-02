@@ -1387,6 +1387,8 @@ VERIFIED_LOCAL_AUTHOR = tuple(
 )
 MERGED = (("FIXTURE_PR_STATE", "closed"), ("FIXTURE_PR_MERGED", "true"))
 MERGE_SHA = "0123456789abcdef" * 2 + "01234567"
+ALIAS = "- Merge author name: `Fixture Alias` (owner decision on #21, 2026-01-01)\n"
+MANAGED = "<!-- github-workflow:start v6.4 -->\n- Merge author name: `Fixture Alias` (owner decision on #21, 2026-01-01)\n<!-- github-workflow:end -->\n"
 
 
 # The noreply format is a github.com fact, so the identity fixtures use that origin host.
@@ -1404,7 +1406,7 @@ def published_case(name, expected, *environment, stderr=(), api_calls=3, host="g
 
 
 IDENTITY_CASES = (
-    identity_case("identity compliant", 0, stderr=("identity: profile-name-is-handle=true",
+    identity_case("identity compliant", 0, stderr=("identity: profile-name-is-expected=true",
                   "identity: merge-queue-enabled=false", "identity: pr-in-merge-queue=false",
                   "identity: auto-merge-enabled=false")),
     # gh pr merge enqueues or enables auto-merge on a merge-queue branch; neither author is documented.
@@ -1429,7 +1431,7 @@ IDENTITY_CASES = (
     # A verified local author never covers the server-generated squash author.
     identity_case("identity verified local author with profile alias", 1, *VERIFIED_LOCAL_AUTHOR,
                   ("FIXTURE_PROFILE_NAME", "Fixture Alias"), setup="local_author_verified",
-                  stderr=("identity: blocker=profile-name", "Set the profile display name to the account login exactly")),
+                  stderr=("identity: blocker=profile-name", "differs from the expected author name")),
     identity_case("identity viewer is not handle", 1, ("FIXTURE_VIEWER", "other-account"), ("FIXTURE_VIEWER_ID", "2002"),
                   ("FIXTURE_PR_AUTHOR_ID", "2002"), stderr="identity: blocker=merger-is-handle"),
     identity_case("identity PR author differs from merger", 2, ("FIXTURE_PR_AUTHOR_ID", "2002"),
@@ -1443,6 +1445,31 @@ IDENTITY_CASES = (
                   stderr="identity: blocker=profile-name"),
     identity_case("identity unsupported host", 2, api_calls=0, host="github.example",
                   stderr="support only github.com"),
+    # The owner may record another expected author name in the published AGENTS.md (#21).
+    identity_case("identity configured author name", 0, ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
+                  text=ALIAS, setup="published_text",
+                  stderr=("identity: author-name-configured=true", "identity: profile-name-is-expected=true")),
+    # Once configured, the alias replaces the login: a profile name equal to the login no longer matches.
+    identity_case("identity configured author name replaces login", 1, text=ALIAS, setup="published_text",
+                  stderr=("identity: profile-name-is-expected=false", "identity: blocker=profile-name")),
+    # A PR cannot authorize its own alias: only the published copy counts.
+    identity_case("identity unpublished author name", 1, ("FIXTURE_PROFILE_NAME", "Fixture Alias"), text=ALIAS,
+                  stderr=("identity: author-name-configured=false", "identity: blocker=profile-name")),
+    identity_case("identity author name in managed block", 1, ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
+                  text=MANAGED, setup="published_text", stderr="identity: author-name-configured=false"),
+    identity_case("identity conflicting author names", 2, ("FIXTURE_PROFILE_NAME", "Fixture Alias"), api_calls=0,
+                  text=ALIAS + 'Merge author name: `Other Alias`\n', setup="published_text",
+                  stderr="Conflicting merge author names"),
+    identity_case("identity author name placeholder", 2, api_calls=0, text='Merge author name: `<name>`\n',
+                  setup="published_text", stderr="Malformed merge author name"),
+    identity_case("identity emphasized author name label", 2, api_calls=0, text='**Merge author name:** `Fixture Alias`\n',
+                  setup="published_text", stderr="Malformed merge author name"),
+    identity_case("identity author name with invisible character", 2, api_calls=0,
+                  text='Merge author name: `Fixture\u200bAlias`\n', setup="published_text",
+                  stderr="Malformed merge author name"),
+    identity_case("identity author name prose", 0, text="Merge author names follow the profile.\n", setup="published_text",
+                  stderr="identity: author-name-configured=false"),
+    identity_case("identity unreadable published ref", 2, api_calls=0, setup="missing_published_ref"),
     identity_case("identity indeterminate outranks blocker", 2, ("FIXTURE_PR_AUTHOR_ID", "2002"),
                   ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
                   stderr=("identity: indeterminate=pr-author-is-merger", "identity: blocker=profile-name")),
@@ -1467,11 +1494,12 @@ IDENTITY_CASES = (
     identity_case("identity noreply not a possible commit email", 1, ("FIXTURE_POSSIBLE", "person@example.invalid"),
                   ("FIXTURE_DEFAULT_EMAIL", "person@example.invalid"),
                   stderr="identity: blocker=noreply-not-possible-commit-email"),
-    identity_case("identity possible commit emails unreadable", 2, ("FIXTURE_POSSIBLE", "__null__"),
-                  stderr="identity: indeterminate=possible-commit-emails-unreadable"),
-    # The default gh token scopes return an empty list, which is not a commit-email decision.
-    identity_case("identity possible commit emails empty", 2, ("FIXTURE_POSSIBLE_SHAPE", "[]"),
-                  stderr=("identity: indeterminate=possible-commit-emails-unreadable", "check the token scope")),
+    # The default gh token scopes return an empty list, which shows nothing: the ID noreply is always a commit
+    # email of the account, --author-email pins it and published proves it, so this only warns.
+    identity_case("identity possible commit emails unreadable", 0, ("FIXTURE_POSSIBLE", "__null__"),
+                  stderr="identity: warning=possible-commit-emails-unreadable"),
+    identity_case("identity possible commit emails empty", 0, ("FIXTURE_POSSIBLE_SHAPE", "[]"),
+                  stderr=("identity: warning=possible-commit-emails-unreadable", "default gh token scopes")),
     identity_case("identity default commit email is personal", 0, ("FIXTURE_POSSIBLE", NOREPLY + ",person@example.invalid"),
                   ("FIXTURE_DEFAULT_EMAIL", "person@example.invalid"), stderr="identity: warning=default-commit-email"),
     identity_case("identity legacy account", 2, ("FIXTURE_CREATED", "2017-07-18T12:00:00Z"), stderr="legacy account"),
@@ -1492,7 +1520,7 @@ IDENTITY_CASES = (
                   stderr="identity: indeterminate=profile-name-unset"),
     # The merging account's own record governs; a stale public profile name does not.
     identity_case("identity viewer profile name governs", 0, ("FIXTURE_PUBLIC_NAME", "Fixture Alias"),
-                  stderr="identity: profile-name-is-handle=true"),
+                  stderr="identity: profile-name-is-expected=true"),
     identity_case("identity created date malformed", 2, ("FIXTURE_CREATED", "2020-01-01"), stderr="account response"),
     identity_case("identity created date non-ASCII digits", 2, ("FIXTURE_CREATED", "\u0662\u0660\u0662\u0660-01-01T00:00:00Z"),
                   stderr="account response"),
@@ -1501,10 +1529,10 @@ IDENTITY_CASES = (
     # Exit 1 is a user decision here, so an unexpected failure must not surface as 1.
     identity_case("identity unexpected failure", 2, ("FIXTURE_VIEWER_SHAPE", "deep"), api_calls=1,
                   stderr="Unexpected identity evidence failure"),
-    published_case("published compliant", 0, stderr="published: author-name-is-handle=true"),
+    published_case("published compliant", 0, stderr="published: author-name-is-expected=true"),
     # The observed squash shape: display name as author, noreply email, linked account, web-flow.
     published_case("published display-name author", 1, ("FIXTURE_COMMIT_NAME", "Fixture Alias"),
-                   stderr="published: blocker=author-name-is-handle"),
+                   stderr="published: blocker=author-name-is-expected"),
     published_case("published personal author email", 1, ("FIXTURE_COMMIT_EMAIL", "person@example.invalid"),
                    stderr="published: blocker=author-email-is-noreply"),
     published_case("published author login differs", 1, ("FIXTURE_COMMIT_LOGIN", "other-account"),
@@ -1524,7 +1552,7 @@ IDENTITY_CASES = (
     published_case("published null author", 1, ("FIXTURE_COMMIT_LOGIN", "__null__"),
                    stderr=("published: blocker=author-login-is-handle", "published: blocker=author-id-matches")),
     published_case("published author name case variant", 1, ("FIXTURE_COMMIT_NAME", "Octo-Fixture"),
-                   stderr="published: blocker=author-name-is-handle"),
+                   stderr="published: blocker=author-name-is-expected"),
     published_case("published author email ASCII case", 0, ("FIXTURE_COMMIT_EMAIL", NOREPLY.upper()),
                    stderr="published: author-email-is-noreply=true"),
     published_case("published author email lookalike", 1,
@@ -1537,6 +1565,13 @@ IDENTITY_CASES = (
                    stderr="support only github.com"),
     published_case("published unexpected failure", 2, ("FIXTURE_PR_SHAPE", "deep"), api_calls=1,
                    stderr="Unexpected published evidence failure"),
+    published_case("published configured author name", 0, ("FIXTURE_COMMIT_NAME", "Fixture Alias"), text=ALIAS,
+                   setup="published_text", stderr="published: author-name-is-expected=true"),
+    published_case("published configured author name replaces login", 1, text=ALIAS, setup="published_text",
+                   stderr="published: blocker=author-name-is-expected"),
+    published_case("published conflicting author names", 2, api_calls=0,
+                   text=ALIAS + 'Merge author name: `Other Alias`\n', setup="published_text",
+                   stderr="Conflicting merge author names"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES + IDENTITY_CASES
 INVENTORY = 995 + len(IDENTITY_CASES)
@@ -1589,6 +1624,12 @@ class MergePreflightTests(unittest.TestCase):
             write_fixture(self.instructions, "Autonomous merge suspended — asked on 2026-09-27\n")
             self.git("add", "AGENTS.md")
             self.git("commit", "-qm", "published wait")
+            self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+            write_fixture(self.instructions, "Local clear.\n")
+        elif case.setup == "published_text":
+            # Publish the case text as origin's AGENTS.md; the local copy says nothing.
+            self.git("add", "AGENTS.md")
+            self.git("commit", "-qm", "published text")
             self.git("update-ref", "refs/remotes/origin/main", "HEAD")
             write_fixture(self.instructions, "Local clear.\n")
         elif case.setup == "missing_published_ref":

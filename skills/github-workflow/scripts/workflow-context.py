@@ -1302,9 +1302,10 @@ def published_instructions(branch):
 # only the author email is selectable (GraphQL authorEmail, gh --author-email).
 # The committer is GitHub (web-flow). Local user.name/user.email evidence says
 # nothing about that commit: `identity` predicts it before merge and only
-# `published` proves it afterwards. Names and addresses read from the API stay in
-# memory; output is limited to boolean facts, finding keys and the constructed
-# noreply address.
+# `published` proves it afterwards. The expected author name is the account login
+# unless the owner recorded another one in the published AGENTS.md. Names and
+# addresses read from the API or that file stay in memory; output is limited to
+# boolean facts, finding keys and the constructed noreply address.
 HANDLE = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}')
 PR_NUMBER = re.compile(r'[1-9][0-9]{0,9}')
 CREATED = re.compile(r'([0-9]{4})-([0-9]{2})-([0-9]{2})T')
@@ -1319,6 +1320,11 @@ MERGE_EVIDENCE = ('query($owner:String!,$name:String!,$number:Int!){repository(o
                   '{viewerPossibleCommitEmails viewerDefaultCommitEmail pullRequest(number:$number)'
                   '{isMergeQueueEnabled isInMergeQueue autoMergeRequest{enabledAt}}}}')
 MERGE_PATH_KEYS = ('merge-queue-enabled', 'pr-in-merge-queue', 'auto-merge-enabled')
+# Any line that looks like the setting must be the exact form, so a typo blocks instead of being ignored;
+# prose such as 'Merge author names follow...' has no label colon and is not a setting.
+AUTHOR_NAME_LIKE = re.compile(r'(?:[-*+]\s+)?[*_`]*merge[\s*_`]+author[\s*_`]+name[\s*_`]*:', re.IGNORECASE)
+AUTHOR_NAME = re.compile(r'(?:[-*+]\s+)?Merge author name: `([^`]+)`(?:\s+\([^()]*\))?\.?')
+AUTHOR_NAME_LIMIT = 100
 
 
 def api_json(host, endpoint, label):
@@ -1354,10 +1360,38 @@ def identity_arguments(args, method=False):
 
 
 def identity_origin(expected):
-    host, full, _ = origin_context(expected)
+    host, full, branch = origin_context(expected)
     if host != NOREPLY_HOST:
         raise EvidenceError('Server-author checks support only ' + NOREPLY_HOST + ' origins')
-    return host, full
+    return host, full, branch
+
+
+def configured_author_name(branch):
+    """The owner's recorded merge author name, or None for the account login.
+
+    Only the published default-branch AGENTS.md counts, outside managed blocks:
+    a PR cannot authorize its own alias, and the alias PR itself meets the
+    profile-name decision before merge. Malformed or conflicting lines block.
+    """
+    text = published_instructions(branch)
+    if text is None:
+        return None
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    names = set()
+    for line in outside_managed(text, (text,)).split('\n'):
+        line = line.strip()
+        if not AUTHOR_NAME_LIKE.match(line):
+            continue
+        found = AUTHOR_NAME.fullmatch(line)
+        name = found.group(1) if found else ''
+        # A profile display name is printable text; '<name>' is a template placeholder, not a decision.
+        if (not name or name != name.strip() or len(name) > AUTHOR_NAME_LIMIT or '<' in name or '>' in name
+                or '@' in name or any(not (c == ' ' or c.isprintable()) or invisible(c) for c in name)):
+            raise EvidenceError('Malformed merge author name line in published AGENTS.md')
+        names.add(name)
+    if len(names) > 1:
+        raise EvidenceError('Conflicting merge author names in published AGENTS.md')
+    return names.pop() if names else None
 
 
 def same_ascii(left, right):
@@ -1425,7 +1459,8 @@ def report(mode, facts, findings):
 def identity_mode(args):
     """Pre-merge prediction of the server author; exit 0 prints only the noreply."""
     expected, number, handle = identity_arguments(args, method=True)
-    host, full = identity_origin(expected)
+    host, full, branch = identity_origin(expected)
+    configured = configured_author_name(branch)
     viewer = api_json(host, 'user', 'viewer')
     viewer_id = field(viewer, 'id', int, 'viewer')
     account = handle_account(host, handle)
@@ -1437,7 +1472,7 @@ def identity_mode(args):
     address = noreply(account)
     # The squash author name is the merging account's own profile name; the public users/<handle> record may lag.
     name = viewer.get('name')
-    login = account['login']
+    author = account['login'] if configured is None else configured
 
     facts = [
         ('merger-is-handle', viewer_id == account['id']),
@@ -1448,17 +1483,19 @@ def identity_mode(args):
     findings = [('blocker', key) for key, value in facts[:2] if not value]
     if not facts[2][1]:
         findings.append(('indeterminate', 'pr-author-is-merger'))
+    facts.append(('author-name-configured', configured is not None))
     if isinstance(name, str) and name:
         # Exact, case included: published compares the squash author name the same way.
-        facts.append(('profile-name-is-handle', name == login))
-        if name != login:
+        facts.append(('profile-name-is-expected', name == author))
+        if name != author:
             findings.append(('blocker', 'profile-name'))
     else:
         findings.append(('indeterminate', 'profile-name-unset'))
-    # An empty list is not evidence: every account can commit with its noreply, and the default gh token
-    # scopes return an empty list.
+    # The default gh token scopes return an empty list, which shows nothing: the ID noreply of an account
+    # created after the cutoff is always one of its commit emails, --author-email pins it and published
+    # proves the result. A readable list without it is contrary evidence and still blocks.
     if not possible:
-        findings.append(('indeterminate', 'possible-commit-emails-unreadable'))
+        findings.append(('warning', 'possible-commit-emails-unreadable'))
     else:
         allowed = any(same_ascii(email, address) for email in possible)
         facts.append(('noreply-is-possible-commit-email', allowed))
@@ -1476,10 +1513,12 @@ def identity_mode(args):
     code = report('identity', facts, findings)
     if ('blocker', 'profile-name') in findings:
         print('identity: decision required: the server-generated merge author name follows the profile display '
-              'name, not the handle. Set the profile display name to the account login exactly, case included; no other '
-              'author name has a gated merge path, so the merge stays blocked.', file=sys.stderr)
+              'name, which differs from the expected author name, case included: the account login, or the name the '
+              'owner recorded as `Merge author name:` in the published AGENTS.md outside the managed block. The merge '
+              'stays blocked until they match or the user decides.', file=sys.stderr)
     if not possible:
-        print('identity: possible commit emails are unreadable or empty; check the token scope.', file=sys.stderr)
+        print('identity: possible commit emails are unreadable or empty, as under the default gh token scopes; the '
+              'pinned --author-email and the published check cover the noreply.', file=sys.stderr)
     if any(path):
         print('identity: a merge queue or auto-merge would merge this PR instead of the gated command, with an '
               'undocumented author; no gated path exists while either applies.', file=sys.stderr)
@@ -1491,7 +1530,8 @@ def identity_mode(args):
 def published_mode(args):
     """Post-merge proof: compare the PR's merge commit with the handle; report booleans and finding keys."""
     expected, number, handle = identity_arguments(args)
-    host, full = identity_origin(expected)
+    host, full, branch = identity_origin(expected)
+    configured = configured_author_name(branch)
     pull = api_json(host, 'repos/' + full + '/pulls/' + number, 'pull request')
     sha = pull.get('merge_commit_sha')
     if pull.get('merged') is not True or not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}', sha):
@@ -1511,7 +1551,7 @@ def published_mode(args):
     user = commit.get('author') if isinstance(commit.get('author'), dict) else {}
     login = user.get('login')
     facts = [
-        ('author-name-is-handle', name == account['login']),
+        ('author-name-is-expected', name == (account['login'] if configured is None else configured)),
         ('author-email-is-noreply', same_ascii(email, address)),
         ('author-login-is-handle', isinstance(login, str) and same_ascii(login, account['login'])),
         ('author-id-matches', type(user.get('id')) is int and user['id'] == account['id']),
