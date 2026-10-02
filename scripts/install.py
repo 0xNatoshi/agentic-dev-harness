@@ -973,8 +973,8 @@ class Lock:
         CURRENT pointer an action writes there (#68).
 
         An existing writable LOCK opens without write permission on its directory, so the OS is asked directly to
-        create a file there, which also covers POSIX ACLs; a Windows ACL that allows files but denies folders still
-        fails later. A read-only mount already refused the LOCK. Only the creation decides: removing the probe and
+        create a file there, which also covers POSIX ACLs; a Windows ACL that allows files but denies folders is
+        refused where apply creates its transaction folder. A read-only mount already refused the LOCK. Only the creation decides: removing the probe and
         any other failure stay unexpected errors, as in setup."""
         try:
             descriptor, probe = tempfile.mkstemp(prefix=".write-check-", dir=str(self.state))
@@ -1275,7 +1275,13 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
     before = plan["before"]
     transaction = locations.state / (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8])
     journal = transaction / "journal.json"
-    transaction.mkdir(parents=True)
+    try:
+        transaction.mkdir(parents=True)
+    except PermissionError:
+        # The first write of an apply, so nothing has changed yet. A Windows ACL can allow the files that
+        # require_writable creates in the state directory and still deny this folder (#68).
+        raise unwritable(locations.state, "so the installer cannot create its transaction folder in it",
+                         "run apply again") from None
     begin(locations.state, journal)
     try:
         installer = keep_installer(package, transaction)

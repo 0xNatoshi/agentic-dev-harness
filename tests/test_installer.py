@@ -1237,6 +1237,36 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
         self.assertEqual(snapshot(self.target), after)
 
+    def test_a_state_directory_refusing_folders_blocks_apply_before_any_change(self):
+        # A Windows ACL can allow the files require_writable creates in the state directory and deny the folder
+        # apply then creates for its transaction; the OS refusal is injected on that folder alone (#68).
+        before = self.v52_layout()
+        state = self.state()
+        plan = self.plan()
+        script = ("import pathlib, runpy, sys\n"
+                  "state, create = pathlib.Path(sys.argv[1]), pathlib.Path.mkdir\n"
+                  "def mkdir(self, *arguments, **options):\n"
+                  "    if self.parent == state:\n"
+                  "        raise PermissionError(13, 'Access is denied', str(self))\n"
+                  "    return create(self, *arguments, **options)\n"
+                  "pathlib.Path.mkdir = mkdir\n"
+                  "sys.argv = sys.argv[2:]\n"
+                  "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+        result = subprocess.run([sys.executable, "-B", "-c", script, str(state), str(self.installer), "apply", "--plan",
+                                 str(plan), "--checksums", str(self.checksums), "--maintenance-confirmed"], cwd=self.base,
+                                env=self.environment(), capture_output=True, text=True, encoding="utf-8", timeout=120)
+        self.assert_refused(result, 2)
+        mode = f"{stat.S_IMODE(os.stat(state).st_mode):04o}"
+        fix = (f"add owner write and search (execute) permission to {state}" if os.name == "nt" else
+               f"its owner already has write and search permission, so an access control list or system privacy setting "
+               f"denies access: allow this process to write to and search {state}")
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], f"{state} cannot be written or searched (mode {mode}), so the installer cannot "
+                                         f"create its transaction folder in it; {fix}, then run apply again")
+        self.assertEqual(error["details"], {"path": str(state), "mode": mode})
+        self.assertEqual(sorted(os.listdir(state)), ["LOCK"])
+        self.assertEqual(snapshot(self.target), before)
+
     def test_a_file_at_a_state_ancestor_blocks_apply_and_leaves_recover_nothing(self):
         # The location checks find no link below a file, so the lock names the file in the way (#68).
         plan = self.plan()
