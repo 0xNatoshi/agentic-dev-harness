@@ -1310,6 +1310,11 @@ LIST_COLUMN_CASES = (
     Case("list column quote 2", 0, '> - Notes\n>   - Never\n> - merge PRs'),
     Case("list column mixed families 1", 2, ' - Never\n* merge PRs'),
     Case("list column mixed families 2", 2, ' - Never\n1. merge PRs'),
+    # The content-column chain resets with the marker-column chain: at a heading, after a paragraph and at a
+    # shallower sibling item.
+    Case("list column reset heading", 0, '- Never\n# H\n - merge PRs'),
+    Case("list column reset paragraph", 0, '- Never\n\nDone.\n\n - merge PRs'),
+    Case("list column reset sibling", 0, '- Notes\n  - Never\n- Other\n  - merge PRs'),
 )
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
 # classify U+10D6E as Pd, so its conservative exit is 2 on that interpreter.
@@ -1346,8 +1351,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + LIST_COLUMN_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 1033 or len({case.name for case in ALL_CASES}) != 1033:
-    raise RuntimeError("Merge fixture inventory must contain 1033 unique cases")
+if len(ALL_CASES) != 1036 or len({case.name for case in ALL_CASES}) != 1036:
+    raise RuntimeError("Merge fixture inventory must contain 1036 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
