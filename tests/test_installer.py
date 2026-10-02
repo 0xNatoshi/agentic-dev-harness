@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import importlib.util
 import json
@@ -1089,9 +1090,9 @@ class InstallerTests(unittest.TestCase):
             config.chmod(0o755)
         self.assert_refused(result, 2)
         error = json.loads(result.stderr)
-        self.assertEqual(error["error"], f"{config} cannot be written (mode 0500), so the installer cannot create its state "
-                                         f"directory or lock file in it; add owner write permission to {config}, then run "
-                                         "apply again")
+        self.assertEqual(error["error"], f"{config} cannot be written or searched (mode 0500), so the installer cannot "
+                                         f"create its state directory or lock file in it; add owner write and search "
+                                         f"(execute) permission to {config}, then run apply again")
         self.assertEqual(error["details"], {"path": str(config), "mode": "0500"})
         self.assertFalse(state.exists())
         self.assertEqual(snapshot(self.target), before)
@@ -1112,6 +1113,43 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(error["details"], {"path": str(lock), "mode": "0400"})
                 self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
                 self.assertEqual(snapshot(self.target), after)
+        # A state directory that cannot be searched hides its LOCK, so the fix names search as well as write.
+        state.chmod(0o600)
+        try:
+            result = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+        finally:
+            state.chmod(0o755)
+        self.assert_refused(result, 2)
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], f"{state} cannot be written or searched (mode 0600), so the installer cannot "
+                                         f"create its state directory or lock file in it; add owner write and search "
+                                         f"(execute) permission to {state}, then run recover again")
+        self.assertEqual(error["details"], {"path": str(state), "mode": "0600"})
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+        self.assertEqual(snapshot(self.target), after)
+
+    def test_a_read_only_file_system_blocks_the_lock_and_other_setup_errors_stay_unexpected(self):
+        # A read-only mount raises a plain OSError (EROFS); it is blocked like a refused write (#68).
+        spec = importlib.util.spec_from_file_location("harness_installer_lock", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        state = self.base / "state"
+        state.mkdir()
+        lock = state / "LOCK"
+        refused = OSError(errno.EROFS, "Read-only file system", str(lock))
+        with mock.patch.object(installer, "open", create=True, side_effect=refused):
+            with self.assertRaises(installer.Blocked) as caught:
+                installer.Lock(state, "run apply again")
+        self.assertEqual(str(caught.exception), f"{state} is on a read-only file system, so the installer cannot create "
+                                                "its state directory or lock file; make that file system writable, then "
+                                                "run apply again")
+        self.assertEqual(caught.exception.details, {"path": str(state)})
+        full = OSError(errno.ENOSPC, "No space left on device", str(lock))
+        with mock.patch.object(installer, "open", create=True, side_effect=full):
+            with self.assertRaises(OSError) as caught:
+                installer.Lock(state, "run apply again")
+        self.assertIs(caught.exception, full)
+        self.assertFalse(lock.exists())
 
     def test_a_state_path_of_the_wrong_type_blocks_the_lock(self):
         # Windows reports opening a LOCK directory as a permission error; both systems name the path in the way (#68).

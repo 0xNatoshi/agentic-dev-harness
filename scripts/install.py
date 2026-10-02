@@ -7,6 +7,7 @@ Standard library only; Python 3.8+. Exit codes: 0 done, 1 refused or failed and 
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import io
 import json
@@ -276,10 +277,18 @@ def inaccessible(path: Path, action: str, retry: str = "plan again") -> Blocked:
 
 
 def unwritable(path: Path, reason: str, retry: str) -> Blocked:
-    """A directory or file the OS refused to write before anything changed, named with the fix (#68)."""
-    mode, fix = permission_fix(path, stat.S_IWUSR, "write", "write", "write to")
+    """A directory or file the OS refused to write before anything changed, named with the fix (#68).
+
+    Creating or opening an entry needs write and search permission on its directory, so both are named there."""
+    if os.path.isdir(str(path)):
+        mode, fix = permission_fix(path, stat.S_IWUSR | stat.S_IXUSR, "write and search (execute)", "write and search",
+                                   "write to and search")
+        action = "written or searched"
+    else:
+        mode, fix = permission_fix(path, stat.S_IWUSR, "write", "write", "write to")
+        action = "written"
     shown = f" (mode {mode})" if mode else ""
-    return Blocked(f"{path} cannot be written{shown}, {reason}; {fix}, then {retry}", {"path": str(path), "mode": mode})
+    return Blocked(f"{path} cannot be {action}{shown}, {reason}; {fix}, then {retry}", {"path": str(path), "mode": mode})
 
 
 def searchable_part(path: Path, retry: str) -> Path | None:
@@ -916,11 +925,11 @@ class Lock:
         try:
             state.mkdir(parents=True, exist_ok=True)
             self.stream = open(lock, "a+b")
-        except (PermissionError, FileExistsError, NotADirectoryError, IsADirectoryError) as error:
+        except OSError as error:
             # Nothing has changed yet, so a refused setup is a blocked state with its fix, not an uncertain one (#68).
             blocked = Lock.setup_blocked(state, error, retry)
             if blocked is None:
-                raise  # A type conflict gone before it could be named stays an unexpected error.
+                raise  # Any other failure, or a type conflict gone before it is named, stays an unexpected error.
             raise blocked from None
         try:
             if os.name == "nt":
@@ -944,11 +953,15 @@ class Lock:
                 kind = "a directory, not the installer's lock file" if path == lock else "not a directory"
                 return Blocked(f"{path} is {kind}, so the installer cannot keep its state there; move it out of the way, "
                                f"then {retry}", {"path": str(path)})
+        failed = Path(error.filename) if error.filename else lock
+        if error.errno == errno.EROFS:
+            volume = next((path for path in (failed, *failed.parents) if exists(path)), failed)
+            return Blocked(f"{volume} is on a read-only file system, so the installer cannot create its state directory "
+                           f"or lock file; make that file system writable, then {retry}", {"path": str(volume)})
         if not isinstance(error, PermissionError):
             return None
         # The OS refused a write: to the file itself when it exists (a read-only LOCK), otherwise to the directory
-        # the missing path is created in.
-        failed = Path(error.filename) if error.filename else lock
+        # the missing path is created in. A LOCK in a directory that cannot be searched is not seen as existing.
         path = failed if exists(failed) else failed.parent
         reason = ("so the installer cannot take its lock" if path == lock
                   else "so the installer cannot create its state directory or lock file in it")
