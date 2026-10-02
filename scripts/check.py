@@ -215,6 +215,27 @@ def check_links(name, text, available):
         require(resolved in available or any(n.startswith(resolved.rstrip("/") + "/") for n in available), f"Broken link: {name}: {target}")
 
 
+# Before Python 3.13, these tempfile creators retry a Windows PermissionError as a name clash up to TMP_MAX
+# (2**31 - 1) times, so a write probe in a directory an access control list denies would hang. The installer
+# runtime supports Python 3.8 and later.
+RETRYING_TEMPFILE = {"mkstemp", "mkdtemp", "NamedTemporaryFile", "TemporaryFile", "TemporaryDirectory",
+                     "SpooledTemporaryFile"}
+
+
+def check_runtime_tempfile(relative, tree):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "tempfile":
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "tempfile":
+            names = [node.attr]
+        else:
+            continue
+        for name in names:
+            require(name not in RETRYING_TEMPFILE,
+                    f"{relative}:{node.lineno}: tempfile.{name} can retry a Windows PermissionError for hours before "
+                    "Python 3.13; create the entry once under a uuid name instead")
+
+
 def main():
     release = version()
     package = payloads()
@@ -239,7 +260,9 @@ def main():
         check_emails(relative, python_text(text) if path.suffix == ".py" else text)
         require(not re.search(r"(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{24,}|-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----)", text), f"Possible credential: {relative}")
         if path.suffix == ".py":
-            ast.parse(text, filename=relative)
+            tree = ast.parse(text, filename=relative)
+            if relative == "scripts/install.py":
+                check_runtime_tempfile(relative, tree)
         elif path.suffix == ".toml":
             tomllib.loads(text)
         elif path.suffix == ".json":
