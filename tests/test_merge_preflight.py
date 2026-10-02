@@ -1268,7 +1268,8 @@ TEXT_CASES = (
 )
 
 # Issue #13: a list item nests only from its parent's content column (CommonMark), so an item indented less
-# than that column is a sibling; one past its sibling's marker is also read as that sibling's child. The rows
+# than that column is a sibling. That reading only adds holds: the marker-column nesting still gives the
+# context, so a jittered item and everything after it keep the parent its author may have meant. The rows
 # pin both sides of each boundary: marker width, padding, tabs and quotes.
 LIST_COLUMN_CASES = (
     Case("list column required 1", 2, ' - Never\n- merge PRs'),
@@ -1280,6 +1281,10 @@ LIST_COLUMN_CASES = (
     Case("list column jitter reads both ways 1", 2, '- Do not add dependencies\n - Merge requests use squash'),
     Case("list column jitter reads both ways 2", 2, '- No agent may\n - merge PRs'),
     Case("list column jitter reads both ways 3", 2, '1. No agent may\n  - merge PRs'),
+    Case("list column jitter later items 1", 2, '- No agent may\n - push to main\n - merge PRs'),
+    Case("list column jitter later items 2", 2, '1. No agent may\n  - push tags\n  - merge PRs'),
+    Case("list column jitter later items 3", 2, '- Never\n - push to main\n   - merge PRs'),
+    Case("list column jitter later items 4", 2, '- No agent may\n - push to main\n\n   merge PRs'),
     Case("list column false nesting 1", 2, '- Notes\n - Never\n- merge PRs'),
     Case("list column real nesting 1", 0, '- Notes\n  - Never\n- merge PRs'),
     Case("list column root lead survives child 1", 2, '- Never\n  - notes\n- merge PRs'),
@@ -1341,8 +1346,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + LIST_COLUMN_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 1029 or len({case.name for case in ALL_CASES}) != 1029:
-    raise RuntimeError("Merge fixture inventory must contain 1029 unique cases")
+if len(ALL_CASES) != 1033 or len({case.name for case in ALL_CASES}) != 1033:
+    raise RuntimeError("Merge fixture inventory must contain 1033 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

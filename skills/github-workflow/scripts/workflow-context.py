@@ -801,8 +801,10 @@ def units(lines, hold_found, heading_found=lambda level: None):
     """
     headings = []  # (level, text) of the current heading path
     lead = Lead()  # unterminated blocks that introduce what follows
-    items = []     # (marker column, content column, text) of the open list item chain, one per depth
-    intros = set()  # depths whose list holds a negated lead-in item so far
+    items = []     # (marker column, text) of the open list item chain
+    intros = set()  # marker columns whose list holds a negated lead-in item so far
+    columns = []   # content columns of the open item chain as CommonMark nests it (#13)
+    depths = set()  # depths of that chain whose list holds a negated lead-in item so far
     header = None  # first row of the current table
     row_intro = False  # the current table holds a negated lead-in row so far
     block, kind, indent = [], None, 0
@@ -865,51 +867,52 @@ def units(lines, hold_found, heading_found=lambda level: None):
         run_size = 0
 
     def flush():
-        nonlocal block, kind, items, header, row_intro
+        nonlocal block, kind, items, columns, header, row_intro
         if not block:
             return None
         text = ' '.join(part.strip() for part in block)
         current, first, block, kind = kind, block[0], [], None
         if current == 'item':
-            content = content_column(first)
             text = LIST_ITEM.sub('', text, 1)
             sibling = None
-            # An item nests only from its parent's content column, so ' - Never' above '- merge PRs', or
-            # '- Notes' above ' - Never', are siblings whatever their marker columns (#13).
-            while items and items[-1][1] > indent:
+            while items and items[-1][0] >= indent:
                 sibling = items.pop()
-            depth = len(items)
-            intros.difference_update([i for i in intros if i > depth])
-            parents = [t for _, _, t in items]
+            intros.difference_update([i for i in intros if i > indent])
+            # CommonMark nests an item only from its parent's content column, so ' - Never' above '- merge PRs',
+            # or '- Notes' above ' - Never', are siblings whatever their marker columns (#13). That reading only
+            # adds holds: the marker-column chain above still gives the context, since it keeps every parent
+            # the content-column chain does, and also the one its author may have meant for a jittered item.
+            while columns and columns[-1] > indent:
+                columns.pop()
+            depth = len(columns)
+            depths.difference_update([d for d in depths if d > depth])
+            parents = [t for _, t in items]
             # Added after the cut, so a long parent item cannot push it out.
             near = []
-            if sibling and sibling[0] < indent:
-                # Past its sibling's marker but short of its content column, the item is a sibling in CommonMark,
-                # yet its author may have meant a child. Reading it both ways keeps '- No agent may' above
-                # ' - merge PRs' a hold, as when items nested by marker column.
-                parents.append(sibling[2])
-            elif sibling and sibling[0] == indent and label(sibling[2]):
-                near.append(sibling[2][-CONTEXT_LIMIT:])  # '- **Merges:**' labels the next sibling
-            if depth in intros and re.search(MERGE_WORD, text):
+            if sibling and sibling[0] == indent and label(sibling[1]):
+                near.append(sibling[1][-CONTEXT_LIMIT:])  # '- **Merges:**' labels the next sibling
+            if (indent in intros or depth in depths) and re.search(MERGE_WORD, text):
                 # '- Do not do the following' may govern every later sibling, whatever
                 # comes between, so a merge item after it is ambiguous.
                 hold_found()
             pair = context(parents, near), text
-            items.append((indent, content, text))
+            items.append((indent, text))
+            columns.append(content_column(first))
             if negated_lead(text):
-                intros.add(depth)
+                intros.add(indent)
+                depths.add(depth)
             extend_run(text)
             return pair
         if items and indent:
             # Indented content continues the list item above it.
             extend_run(text)
-            # Marker columns keep every item a content-column reading would, and the jittered parents too.
-            return context(t for i, _, t in items if i < indent), text
+            return context(t for i, t in items if i < indent), text
         if items:
             # Unterminated open items still introduce the block after the list.
-            lead.add(t for _, _, t in items if not terminated(t))
-            items = []
+            lead.add(t for _, t in items if not terminated(t))
+            items, columns = [], []
             intros.clear()
+            depths.clear()
         if current == 'row':
             if row_intro and re.search(MERGE_WORD, text):
                 hold_found()  # '| Do not do the following |' above '| merge PRs |'
@@ -931,14 +934,15 @@ def units(lines, hold_found, heading_found=lambda level: None):
         return pair
 
     def enter_heading(level, text):
-        nonlocal items, header, row_intro
+        nonlocal items, columns, header, row_intro
         while headings and headings[-1][0] >= level:
             headings.pop()
         pair = context(), text
         headings.append((level, text[:CONTEXT_LIMIT]))
         lead.clear()
-        items, header, row_intro = [], None, False
+        items, columns, header, row_intro = [], [], None, False
         intros.clear()
+        depths.clear()
         end_run()
         heading_found(level)
         return pair
@@ -969,7 +973,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
             if pair:
                 yield pair
             if opening:
-                fence = opening.group(1), context(t for _, _, t in items), [opening.group(2).strip()]
+                fence = opening.group(1), context(t for _, t in items), [opening.group(2).strip()]
             elif heading:
                 yield enter_heading(len(heading.group(1)), stripped)
             continue
