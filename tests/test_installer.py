@@ -1128,11 +1128,15 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
         self.assertEqual(snapshot(self.target), after)
 
-    def test_a_read_only_file_system_blocks_the_lock_and_other_setup_errors_stay_unexpected(self):
-        # A read-only mount raises a plain OSError (EROFS); it is blocked like a refused write (#68).
-        spec = importlib.util.spec_from_file_location("harness_installer_lock", self.installer)
+    def load_installer(self):
+        spec = importlib.util.spec_from_file_location("harness_installer_module", self.installer)
         installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(installer)
+        return installer
+
+    def test_a_read_only_file_system_blocks_the_lock_and_other_setup_errors_stay_unexpected(self):
+        # A read-only mount raises a plain OSError (EROFS); it is blocked like a refused write (#68).
+        installer = self.load_installer()
         state = self.base / "state"
         state.mkdir()
         lock = state / "LOCK"
@@ -1319,6 +1323,90 @@ class InstallerTests(unittest.TestCase):
                 self.assertIsNone(snapshot(self.target))
         self.assertEqual(self.recover()["result"], "restored")
         self.assertEqual(snapshot(self.target), after)
+        # A rollback interrupted after its commit leaves only the receipt to mark, in the transaction directory.
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:committed"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        rolled_back = snapshot(self.target)
+        transaction.chmod(0o500)
+        try:
+            result = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+        finally:
+            transaction.chmod(0o755)
+        self.assert_refused(result, 2)
+        self.assertEqual(json.loads(result.stderr)["error"],
+                         f"{transaction} cannot be written or searched (mode 0500), so the installer cannot mark its "
+                         f"receipt rolled back in it; add owner write and search (execute) permission to {transaction}, "
+                         "then run recover again")
+        self.assertTrue((state / "CURRENT").exists())
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+        self.assertEqual(self.recover()["result"], "already committed")
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "rolled back")
+        self.assertEqual(snapshot(self.target), rolled_back)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_an_unwritable_transaction_directory_blocks_recover_of_an_interrupted_apply(self):
+        # An interrupted apply keeps its journal in the transaction directory itself (#71).
+        before, parked = self.crash_after_parking()
+        transaction, state = parked.parent.parent, self.state()
+        journal = state / (state / "CURRENT").read_text(encoding="utf-8").strip()
+        self.assertEqual(journal.parent, transaction)
+        record = journal.read_bytes()
+        transaction.chmod(0o500)
+        try:
+            result = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+        finally:
+            transaction.chmod(0o755)
+        self.assert_refused(result, 2)
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], f"{transaction} cannot be written or searched (mode 0500), so the installer "
+                                         f"cannot record its recovery in it; add owner write and search (execute) "
+                                         f"permission to {transaction}, then run recover again")
+        self.assertEqual(error["details"], {"path": str(transaction), "mode": "0500"})
+        self.assertTrue((state / "CURRENT").exists())
+        self.assertEqual(journal.read_bytes(), record)
+        self.assertIsNone(snapshot(self.target))
+        self.assertEqual(self.recover()["result"], "restored")
+        self.assertEqual(snapshot(self.target), before)
+
+    def test_a_refused_write_probe_blocks_after_one_attempt(self):
+        # Before Python 3.13, tempfile retries a Windows PermissionError as a name clash up to 2**31 - 1 times, so
+        # a probe in a directory an ACL denies would hang; each probe makes one attempt (#71).
+        installer = self.load_installer()
+        directory = self.base / "probed"
+        directory.mkdir()
+        for name, message in (("open", "cannot be written or searched"), ("mkdir", "accepts new files but refuses new folders")):
+            with self.subTest(refused=name):
+                attempts, create = [], getattr(os, name)
+
+                def deny(path, *arguments, **options):
+                    if os.path.dirname(str(path)) == str(directory):
+                        attempts.append(path)
+                        raise PermissionError(errno.EACCES, "Access is denied", str(path))
+                    return create(path, *arguments, **options)
+
+                with mock.patch.object(installer.os, name, side_effect=deny):
+                    with self.assertRaises(installer.Blocked) as caught:
+                        installer.probe_writable(directory, "so it is refused", "retry", folders=True)
+                self.assertIn(message, str(caught.exception))
+                self.assertEqual(len(attempts), 1)
+                self.assertEqual(os.listdir(directory), [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX owners")
+    def test_a_foreign_owned_transaction_directory_names_ownership_of_what_it_holds(self):
+        # A sudo run of apply creates the transaction directory and everything rollback moves out of it as the same
+        # user, so write access to the directory alone would fail at a later rename (#71).
+        installer = self.load_installer()
+        directory = self.base / "transaction"
+        directory.mkdir()
+        owner = os.stat(str(directory)).st_uid
+        with mock.patch.object(installer.os, "geteuid", return_value=owner + 1):
+            held = installer.unwritable(directory, "so it is refused", "run rollback again", contents=True)
+            alone = installer.unwritable(directory, "so it is refused", "run rollback again")
+        self.assertIn(f"{directory} belongs to another user (uid {owner}): have its owner or an administrator give you "
+                      "ownership of it and of everything in it, then run rollback again", str(held))
+        self.assertIn(f"{directory} belongs to another user (uid {owner}): have its owner or an administrator give you "
+                      "write and search (execute) access to it, or its ownership, then run rollback again", str(alone))
 
     def test_a_transaction_directory_refusing_folders_blocks_rollback_before_any_change(self):
         # A Windows ACL can allow files in the receipt's transaction directory and deny the work folder rollback

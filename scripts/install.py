@@ -244,11 +244,14 @@ def exists(path: Path) -> bool:
     return os.path.lexists(str(path))
 
 
-def permission_fix(path: Path, needed: int, permission: str, held: str, allow: str) -> tuple[str | None, str]:
+def permission_fix(path: Path, needed: int, permission: str, held: str, allow: str,
+                   contents: bool = False) -> tuple[str | None, str]:
     """The mode of a path the OS refused and the fix for it (#54).
 
     On POSIX the fix follows the owner and mode: a path another user owns (one created with sudo) or one whose
-    owner already has the needed permission (an ACL or a macOS privacy control) is not fixed by the owner's mode."""
+    owner already has the needed permission (an ACL or a macOS privacy control) is not fixed by the owner's mode.
+    With contents, an action also moves what the directory holds, which a sudo run created as the same user, so
+    another owner must hand over all of it (#71)."""
     try:
         status = os.stat(str(path))
     except OSError:
@@ -257,8 +260,8 @@ def permission_fix(path: Path, needed: int, permission: str, held: str, allow: s
     fix = f"add owner {permission} permission to {path}"
     if status and os.name != "nt":
         if status.st_uid != os.geteuid():
-            fix = (f"{path} belongs to another user (uid {status.st_uid}): have its owner or an administrator give you "
-                   f"{permission} access to it, or its ownership")
+            wanted = "ownership of it and of everything in it" if contents else f"{permission} access to it, or its ownership"
+            fix = f"{path} belongs to another user (uid {status.st_uid}): have its owner or an administrator give you {wanted}"
         elif status.st_mode & needed == needed:
             fix = (f"its owner already has {held} permission, so an access control list or system privacy "
                    f"setting denies access: allow this process to {allow} {path}")
@@ -276,13 +279,13 @@ def inaccessible(path: Path, action: str, retry: str = "plan again") -> Blocked:
                    {"path": str(path), "mode": mode})
 
 
-def unwritable(path: Path, reason: str, retry: str) -> Blocked:
+def unwritable(path: Path, reason: str, retry: str, contents: bool = False) -> Blocked:
     """A directory or file the OS refused to write before anything changed, named with the fix (#68).
 
     Creating or opening an entry needs write and search permission on its directory, so both are named there."""
     if os.path.isdir(str(path)):
         mode, fix = permission_fix(path, stat.S_IWUSR | stat.S_IXUSR, "write and search (execute)", "write and search",
-                                   "write to and search")
+                                   "write to and search", contents)
         action = "written or searched"
     else:
         mode, fix = permission_fix(path, stat.S_IWUSR, "write", "write", "write to")
@@ -291,25 +294,29 @@ def unwritable(path: Path, reason: str, retry: str) -> Blocked:
     return Blocked(f"{path} cannot be {action}{shown}, {reason}; {fix}, then {retry}", {"path": str(path), "mode": mode})
 
 
-def probe_writable(directory: Path, reason: str, retry: str, folders: bool = False) -> None:
+def probe_writable(directory: Path, reason: str, retry: str, folders: bool = False, contents: bool = False) -> None:
     """Block, before anything changes, when directory refuses the files, and with folders the folders, that an action
     creates there (#68, #71).
 
     The OS is asked directly to create them, which also covers POSIX ACLs and a directory another user owns (one a
     sudo run created); a Windows ACL can allow files but deny folders. Only the creation decides: removing a probe and
-    any other failure stay unexpected errors."""
+    any other failure stay unexpected errors. contents names the fix for an action that also moves what directory
+    holds, as permission_fix describes."""
+    # One attempt under a random name, as write_durable names its files: before Python 3.13, tempfile retries a
+    # Windows PermissionError as a name clash up to TMP_MAX (2**31 - 1) times, so a denied probe would hang.
+    probe = directory / f".write-check-{uuid.uuid4().hex}"
     try:
-        descriptor, probe = tempfile.mkstemp(prefix=".write-check-", dir=str(directory))
+        descriptor = os.open(str(probe), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except PermissionError:
-        raise unwritable(directory, reason, retry) from None
+        raise unwritable(directory, reason, retry, contents) from None
     os.close(descriptor)
-    os.unlink(probe)
+    os.unlink(str(probe))
     if folders:
         try:
-            probe = tempfile.mkdtemp(prefix=".write-check-", dir=str(directory))
+            os.mkdir(str(probe), 0o700)
         except PermissionError:
             raise refuses_folders(directory, reason, retry) from None
-        os.rmdir(probe)
+        os.rmdir(str(probe))
 
 
 def refuses_folders(path: Path, reason: str, retry: str) -> Blocked:
@@ -1486,7 +1493,7 @@ def command_rollback(options) -> dict:
         # The rollback creates its work folder and rewrites the receipt in the receipt's transaction directory, which
         # a sudo run of apply can leave owned by another user (#71).
         probe_writable(transaction, "so the installer cannot record its rollback in it", "run rollback again",
-                         folders=True)
+                       folders=True, contents=True)
         # A receipt field is untrusted input: only an integer mode is quoted back in guidance.
         root = receipt["after"].get(".")
         recorded = root.get("mode") if isinstance(root, dict) else None
@@ -1665,6 +1672,10 @@ def command_recover(options) -> dict:
         operation = Operation(journal, record)
         if record.get("state") == "committed":
             result = {"result": "already committed", "journal": str(journal)}
+            if record["operation"] == "rollback" and exists(Path(record["receipt"])):
+                # Only the receipt is left to mark, in a directory a sudo run of apply can own (#71).
+                probe_writable(Path(record["receipt"]).parent, "so the installer cannot mark its receipt rolled back "
+                               "in it", "run recover again", contents=True)
             if record["operation"] == "rollback" and not mark_rolled_back(record, tolerant=True):
                 result["receipt_not_updated"] = record["receipt"]
             if record["operation"] == "apply":
@@ -1681,7 +1692,8 @@ def command_recover(options) -> dict:
             return result
         # Undo records each step in the journal, and an apply's receipt beside it, so a directory that refuses
         # them blocks before the first step (#71).
-        probe_writable(journal.parent, "so the installer cannot record its recovery in it", "run recover again")
+        probe_writable(journal.parent, "so the installer cannot record its recovery in it", "run recover again",
+                       contents=True)
         operation.record["recovery_boundary"] = boundary
         try:
             operation.undo()
