@@ -241,7 +241,7 @@ class SourceCheckTests(unittest.TestCase):
             self.assertNotIn(address, result.stdout + result.stderr)
 
     def test_source_gate_rejects_retrying_tempfile_creators_in_the_installer(self):
-        # Before Python 3.13 they retry a Windows PermissionError for hours; the installer supports 3.8 (#71).
+        # Without the cpython gh-66305 fix they retry a Windows PermissionError for hours; the installer supports 3.8 (#71).
         cases = [("descriptor, probe = tempfile.mkstemp(dir='.')", "tempfile.mkstemp"),
                  ("from tempfile import mkdtemp", "tempfile.mkdtemp")]
         for line, name in cases:

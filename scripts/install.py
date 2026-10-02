@@ -976,8 +976,9 @@ class Lock:
         create a file there, which also covers POSIX ACLs; a Windows ACL that allows files but denies folders is
         refused where apply creates its transaction folder. A read-only mount already refused the LOCK. Only the
         creation decides: removing the probe and any other failure stay unexpected errors, as in setup."""
-        # One attempt under a random name, as write_durable names its files: before Python 3.13, tempfile retries a
-        # Windows PermissionError as a name clash up to TMP_MAX (2**31 - 1) times, so a denied probe would hang.
+        # One attempt under a random name, as write_durable names its files: tempfile retries a Windows
+        # PermissionError as a name clash, up to os.TMP_MAX (2**31 - 1) times in a Python without the cpython
+        # gh-66305 fix, so a denied probe would hang.
         probe = self.state / f".write-check-{uuid.uuid4().hex}"
         try:
             descriptor = os.open(str(probe), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

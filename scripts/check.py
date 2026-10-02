@@ -215,9 +215,9 @@ def check_links(name, text, available):
         require(resolved in available or any(n.startswith(resolved.rstrip("/") + "/") for n in available), f"Broken link: {name}: {target}")
 
 
-# Before Python 3.13, these tempfile creators retry a Windows PermissionError as a name clash up to TMP_MAX
-# (2**31 - 1) times, so a write probe in a directory an access control list denies would hang. The installer
-# runtime supports Python 3.8 and later.
+# These tempfile creators retry a Windows PermissionError as a name clash, up to os.TMP_MAX (2**31 - 1) times
+# in a Python without the cpython gh-66305 fix, so a write probe in a directory an access control list denies
+# would hang. The installer runtime supports Python 3.8 and later.
 RETRYING_TEMPFILE = {"mkstemp", "mkdtemp", "NamedTemporaryFile", "TemporaryFile", "TemporaryDirectory",
                      "SpooledTemporaryFile"}
 
@@ -232,8 +232,8 @@ def check_runtime_tempfile(relative, tree):
             continue
         for name in names:
             require(name not in RETRYING_TEMPFILE,
-                    f"{relative}:{node.lineno}: tempfile.{name} can retry a Windows PermissionError for hours before "
-                    "Python 3.13; create the entry once under a uuid name instead")
+                    f"{relative}:{node.lineno}: tempfile.{name} can retry a Windows PermissionError for hours in a "
+                    "Python without the gh-66305 fix; create the entry once under a uuid name instead")
 
 
 def main():
