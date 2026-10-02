@@ -100,18 +100,44 @@ def invisible(c):
     return category == 'Cf' or (category == 'Cc' and c not in '\t\n\r') or bool(IGNORABLE.match(c))
 
 
-def normalize(text, joiner=''):
-    """Casefold and map dashes; replace invisible characters with joiner."""
+# Only an unspaced em dash can stand for a hyphen, so only text with one, before or after its invisible
+# characters are removed, or with a dash opening a line, gets the hyphen reading: the spaced dash of
+# the canonical marker costs no extra reading.
+UNSPACED_EM_DASH = re.compile('\\S[\u2014\u2015]|[\u2014\u2015]\\S')
+# A dash opening a line may be a list marker, as on main, or open a wrapped continuation, so it gets
+# both readings: as ' - ' alone it would indent the line under its '- ' siblings and split their list.
+# Any whitespace but a newline may indent it, as LIST_ITEM's indent, and quote markers may precede it.
+LINE_EM_DASH = re.compile('(?m)^(?:[^\\S\\n]|>)*[\u2014\u2015]')
+
+
+def readings(text):
+    """Each distinct casefolded reading of text that scan_text must check, dashes read as hyphens.
+
+    Invisible characters may split a word or separate two words: text with one is read with them
+    removed and with them spaced. An em dash or horizontal bar usually separates words even unspaced,
+    unlike a hyphen that joins them, so it reads as ' - '; an unspaced one may also stand for a hyphen
+    ('Laisse—moi fusionner'), and one opening a line for a list marker, and that reading comes first.
+    Text without either has one reading.
+    """
     # A spaced soft hyphen is read as a dash; elsewhere it is invisible.
-    text = re.sub('(?<=\\s)\u00ad|\u00ad(?=\\s)', '-', text)
-    text = unicodedata.normalize('NFKC', text)
-    table = {}
-    for c in set(text):
-        if invisible(c):
-            table[ord(c)] = joiner
-        elif unicodedata.category(c) == 'Pd' or c == '\u2212':
-            table[ord(c)] = '-'
-    return text.translate(table).replace('\r\n', '\n').replace('\r', '\n').casefold()
+    text = unicodedata.normalize('NFKC', re.sub('(?<=\\s)\u00ad|\u00ad(?=\\s)', '-', text))
+    chars = set(text)
+    hidden = [c for c in chars if invisible(c)]
+    table = {ord(c): '-' for c in chars
+             if c not in '\u2014\u2015' and (unicodedata.category(c) == 'Pd' or c == '\u2212')}
+    folded = []
+    for joiner in ('', ' ') if hidden else ('',):
+        table.update(dict.fromkeys(map(ord, hidden), joiner))
+        folded.append(text.translate(table).replace('\r\n', '\n').replace('\r', '\n').casefold())
+    # Translation, line endings and casefolding leave em dashes in place, so the NFKC pass and each
+    # translation serve both dash readings. Dashes are also found in the folded readings, where every
+    # line ending is a newline and no invisible character stands next to the dash: a whitespace
+    # control character such as VT or NEL is invisible, so removing it can leave the dash unspaced.
+    hyphen = ('\u2014' in text or '\u2015' in text) and (UNSPACED_EM_DASH.search(text) or any(
+        UNSPACED_EM_DASH.search(reading) or LINE_EM_DASH.search(reading) for reading in folded))
+    em_dashes = ('-', ' - ') if hyphen else (' - ',)
+    return list(dict.fromkeys(reading.replace('\u2014', em_dash).replace('\u2015', em_dash)
+                              for em_dash in em_dashes for reading in folded))
 
 
 START = re.compile(r'^\s*<!--\s*github-workflow:start\b(?:(?!-->).)*-->\s*$')
@@ -166,9 +192,11 @@ DECIDER_BASE = r'(?:owner|maintainer|admin|human)'
 ROLE_BASE = r'(?:release\s+manager|reviewer|(?:tech|team)\s+lead|code\s+owner)'
 # A role word naming a document, tool or place ('Consult the reviewer guide', 'Merge via the
 # admin panel', 'Merges go through the reviewer queue') names no one who decides.
-TOOL_NOUN = (r'(?!\s+(?:guide\w*|checklists?|docs?|documentation|notes?|templates?|bots?|tools?|files?|panels?|queues?'
-             r'|channels?|dashboards?|ui|pages?|settings?|buttons?|lists?)\b)')
-DECIDER = (r'(?:me|us|moi|nous|(?:the\s+|a\s+|an\s+|your\s+)?(?:(?:repo(?:sitory)?|project)(?:[’\x27]s)?\s+)?' + DECIDER_BASE + r's?'
+TOOL_WORD = (r'(?:guide\w*|checklists?|docs?|documentation|notes?|templates?|bots?|tools?|files?|panels?|queues?'
+             r'|channels?|dashboards?|ui|pages?|settings?|buttons?|lists?)')
+TOOL_NOUN = r'(?!\s+' + TOOL_WORD + r'\b)'
+DECIDER_PREFIX = r'(?:(?:repo(?:sitory)?|project)(?:[’\x27]s)?\s+)?'
+DECIDER = (r'(?:me|us|moi|nous|(?:the\s+|a\s+|an\s+|your\s+)?' + DECIDER_PREFIX + DECIDER_BASE + r's?'
            r'|(?:le\s+|la\s+|les\s+|un\s+|l[’\x27])?(?:propriétaires?|mainteneu(?:r|rs|se|ses)|humains?))\b(?![’\x27]s\b)')
 # Roles that decide when a merge is reserved or asked for: 'Merging is reserved for the release
 # manager', 'Ask a reviewer before merging'. Kept out of DECIDER so 'Merge once a reviewer approves'
@@ -217,16 +245,71 @@ PR_STATE = (r'(?:on\s+hold|on\s+pause|en\s+pause|paused|suspended|frozen|parked|
             r'|en\s+attente|suspendue?s?|gelée?s?)')
 # 'All PRs are blocked' holds them; 'Draft PRs are blocked', 'PRs are blocked by failing checks'
 # or '... until CI passes' describe a gate. So the PRs open the clause, with at most a
-# quantifier, and the state ends it or a time or event condition that is not a check follows.
+# quantifier, and the state ends it, a human or freeze blocks it, or a time or event
+# condition that is not a check follows.
 # After punctuation, only a failure explanation that ends the sentence describes a gate:
 # 'PRs are blocked: failing checks.' but not 'All PRs are blocked: CI is down.'
 FAILURE_EXPLANATION = (r'\s*(?:the\s+)?(?:(?:failing|failed|red)\s+' + CHECK_NOUN + r'|' + CHECK_NOUN
                        + r'\s+(?:fail|fails|failed|(?:are|is)\s+(?:red|failing)))\s*(?:\)\s*)?$')
+# A named human or explicit freeze is a hold; a role modifying a gate or thing is not.
+# A possessive decision still names the human; a tool noun after it ('review queue') does not.
+# 'lead time' names a delay, not a lead.
+PR_BLOCKER_PERSON = (r'(?:(?:la\s+)?(?:décision|validation|approbation|relecture)\s+'
+                     r'(?:du|de\s+la|de\s+l[’\x27]|des)\s*)?'
+                     + DECIDER_PREFIX + r'(?:(?:core|security)\s+)?'
+                     r'(?:me|us|moi|nous|' + DECIDER_BASE + r's?|' + ROLE_BASE + r's?|(?:tech|team)-leads?|leads?(?!\s+times?\b)|teams?'
+                     r'|mainteneu(?:r|rs|se|ses)|propriétaires?|responsables?|administrat(?:eur|rice)s?'
+                     r'|relecteu(?:r|rs|se|ses)|relectrices?|équipes?|chefs?)')
+# The speaker's own decision: 'blocked by my decision', not 'blocked by our CI'.
+PR_BLOCKER_MINE = r'(?:my|our|mon|ma|notre|nos|mes)\s+(?:decisions?|call|say-so|word|go-ahead|approval|décisions?|validation|accord)\b'
+PR_BLOCKER_GATE = (r'(?:ci|checks?|checkers?|tests?|builds?|lint\w*|pipelines?|jobs?|workflows?|polic(?:y|ies)|gates?'
+                   r'|failures?(?!\s+to\b)|outages?|runners?|timeouts?|scans?|coverage|(?<=github\s)actions|rules?|status|runs?|vérifications?|règles?|protection'
+                   r'|requirements?|enforce\w*|counts?|notifications?)')
+# Words that end the noun phrase after a person: a condition, relative, preposition,
+# concession, coordination, determiner, verb or time adverb. 'the reviewer until checks pass' and
+# 'the owner although (albeit, notwithstanding) CI is green' never reach the gate word.
+PR_PHRASE_END = (r'(?:until|till|unless|if|while|when\w*|although|though|albeit|notwithstanding|however|regardless|even|despite|whereas|except|once|yet|wh(?:o|om|ose|ich)|that|pending|for|since|because|and|or|but|nor|so'
+                 r'|as|on|in|at|to|with\w*|after|before|via|per|from|of|about|than|by|is|are|was|were|be|been|has|have|had'
+                 r'|will|may|can|must|should|would|could|the|a|an|this|these|those|some|any|all|every|each|no'
+                 r'|today|tonight|now|again|still|right|currently'
+                 r'|jusqu\w*|tant|pendant|sauf|si|qui|que|et|ou|mais|avec|sans|après|avant|pour|sur|dans|du|de|des|d'
+                 r'|le|la|les|l|un|une|ce|cet|cette|ces)\b')
+FREEZE_NOUN = r'(?:freezes?|holds?|embargo(?:es)?|gels?)'
+# A modifier is one word; a hyphenated compound ('end-to-end') is one word, so a phrase end inside
+# it ends nothing. A freeze, hold or human-decision word, alone or in a compound, is never a
+# modifier: 'the team's freeze rules', 'the owner's code-freeze gate' and 'the owner's final
+# decision gate' name the freeze or the person, not a gate. So does a failure to act: 'the
+# owner's failure to review'. 'Manual' vetoes only a manual gate, review or approval ('the
+# maintainer's manual gate'); 'the team's manual QA tests' are an ordinary gate.
+HUMAN_DECISION = r'(?:decisions?|approvals?|manual(?=[\s-]+(?:gates?|reviews?|approvals?|sign-?offs?)\b)|consent|permissions?)'
+PR_VETO = r'(?!(?:' + FREEZE_NOUN + r'|' + HUMAN_DECISION + r')\b)'
+PR_MODIFIER = r'(?!' + PR_PHRASE_END + r'(?!-))' + PR_VETO + r'\w+(?:-' + PR_VETO + r'\w+)*'
+# The phrase's head (its last word before a phrase end or punctuation) decides: a gate or tool
+# head names a thing ('team unit tests', 'reviewer assignment queue', 'the owner's CI'); any other
+# head names the person ('the owner's final decision'). An unclassified phrase stays a hold.
+# There is no word cap: each modifier is one whitespace-separated word, so matching stays linear.
+# A hyphen joins words; a comma ends the phrase, and so does an em dash in the reading where readings() spaces it.
+PR_GATE_HEAD = (r'(?:\s+|-)(?:' + PR_MODIFIER + r'\s+)*(?:' + PR_VETO + r'\w+-)*(?:' + PR_BLOCKER_GATE + r'|' + TOOL_WORD + r')\b'
+                r'(?![’\x27-])(?=\s*(?:$|[^\w\s])|\s+' + PR_PHRASE_END + r')')
+# Determiners, including quantifiers ('both maintainers', 'the other maintainers').
+PR_DETERMINER = (r'(?:(?:the|a|an|my|our|your|their|his|her|all|both|any|some|either|each|other|two|three'
+                 r'|le|la|les|un|une|du|des|mon|ma|mes|ton|ta|tes|notre|nos|votre|vos|leur|leurs|son|sa|ses)\s+|l[’\x27])')
+# 'Code owner review' is GitHub's branch-protection gate, not a person's decision.
+PR_BLOCKER = (PR_DETERMINER + r'{0,2}'
+              r'(?:' + PR_BLOCKER_MINE + r'|(?!code\s+owners?\s+reviews?\b)(?:' + PR_BLOCKER_PERSON + r')\b'
+              r'(?:[’\x27]s?(?=\s+\w))?(?![’\x27])(?!' + PR_GATE_HEAD + r')'
+              # Modifiers up to the freeze word name the freeze ('the current release freeze', 'the end-of-year
+              # code freeze'); a hyphenated compound is one modifier.
+              r'|(?:(?!' + PR_PHRASE_END + r'(?!-))\w+(?:-\w+)*\s+)*(?:\w+-)*'
+              + FREEZE_NOUN + r'\b(?![’\x27](?:s\b|\s)|-(?!(?:period|window)\b))' + TOOL_NOUN + r')')
 PR_BLOCKED = (r'^\W*(?:(?:all|every|any|the|open|pending|toutes|tous|les)\s+){0,2}' + PR_NOUN
-              + r'\s+(?:are|is|remain|stay|restent|reste|sont|est)\s+(?:(?:now|currently|temporarily|all|actuellement|désormais)\s+)?'
+              + r'\s+(?:are|is|remain|stay|restent|reste|sont|est)\s+'
+              r'(?:(?:now|currently|temporarily|all|still|again|actuellement|désormais|encore|toujours)\s+)?'
               r'(?:blocked|bloquée?s?)\b(?=\s*$|\s*[,;:)](?!' + FAILURE_EXPLANATION + r')'
               r'|\s+(?:until|till|while|jusqu\w*|tant|pendant|for\s+now|today|pour\s+le\s+moment)\b'
-              r'(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:(?:failing|green)\s+)?' + CHECK_NOUN + r'\b))')
+              r'(?!\s+(?:the\s+|a\s+|all\s+|la\s+|le\s+|les\s+)?(?:(?:failing|green)\s+)?' + CHECK_NOUN + r'\b)'
+              r'|\s+(?:(?:again|still|now|currently|encore|toujours)\s+)?(?:by|pending|par)\s+'
+              r'(?:(?:(?:a|an|code)\s+)?(?:review|revue|relecture)\s+(?:by|par)\s+)?' + PR_BLOCKER + r')')
 # A PR state that PR_HELD reads as a gate, not a hold: 'held to the same standard', 'blocked by failing checks'.
 PR_GATE = re.compile(r'(?P<gate_prefix>' + PR_NOUN + r'[^.!?]{0,80}?)\b(?:held|blocked|bloquée?s?)\b')
 # Only a gate's own words, so the rest of its sentence is still read for a hold: 'All PRs are
@@ -517,6 +600,9 @@ NEXT_HOLD = re.compile(
 STRONG_PAUSE = r'\b(?:suspend\w*|paused?|on\s+hold|en\s+attente)\b'
 CROSS_PAUSE = re.compile(
     MERGE_WORD + r'[^.!?]{0,120}' + STRONG_PAUSE + r'|' + STRONG_PAUSE + r'[^.!?]{0,120}' + MERGE_WORD)
+# Every CROSS_PAUSE match holds a STRONG_PAUSE word, which most files lack; without one, the
+# bounded search after each merge word is skipped.
+STRONG_PAUSE_CUE = re.compile(STRONG_PAUSE)
 # An upstream-sync rule names an upstream remote as the single source that ends its clause.
 UPSTREAM_SOURCE = re.compile(
     r'\b(?:from|depuis|du|de)\s+(?:the\s+|le\s+|la\s+|l[’\x27]\s*)?'
@@ -557,15 +643,54 @@ def unquote(line):
     return line.expandtabs(4)
 
 
-def trim(blocks):
-    """Keep the newest blocks that fit the context limit, and at least one."""
-    kept, size = [], 0
-    for block in reversed(blocks):
-        if kept and size + len(block) > CONTEXT_LIMIT:
-            break
-        kept.append(block)
-        size += len(block) + 1
-    return kept[::-1]
+class Lead:
+    """Unterminated blocks that introduce what follows: the newest that fit the context limit, and at least one.
+
+    Many short blocks would make a walk over the kept blocks cost up to CONTEXT_LIMIT steps for every
+    unit, so the kept blocks carry running sizes and a cached join instead.
+    """
+
+    def __init__(self):
+        self.blocks = collections.deque()
+        self.starts = set()  # where each kept block starts, counted over every block ever added
+        self.end = 0         # where the next block starts
+        self.size = 0        # kept blocks, one separator each
+        self.text = ''       # their join, cut to CONTEXT_LIMIT
+
+    def add(self, blocks):
+        for block in blocks:
+            self.starts.add(self.end)
+            self.end += len(block) + 1
+            self.size += len(block) + 1
+            self.blocks.append(block)
+        # Every block after the oldest needs its separator inside the limit, so the kept blocks
+        # are the longest such suffix, as a walk from the newest block would keep them.
+        while len(self.blocks) > 1 and self.size > CONTEXT_LIMIT + 1:
+            self.starts.discard(self.end - self.size)
+            self.size -= len(self.blocks.popleft()) + 1
+        self.text = ' '.join(self.blocks)[-CONTEXT_LIMIT:]
+
+    def clear(self):
+        self.blocks.clear()
+        self.starts.clear()
+        self.size = 0
+        self.text = ''
+
+    def tail(self, extra):
+        """The kept blocks then extra, as a walk from the newest part that stops at CONTEXT_LIMIT cuts them."""
+        parts, size = [], 0
+        for part in reversed(list(extra)):
+            if size >= CONTEXT_LIMIT:
+                break
+            parts.append(part)
+            size += len(part) + 1
+        own = ' '.join(reversed(parts))
+        if size >= CONTEXT_LIMIT or not self.blocks:
+            return own[-CONTEXT_LIMIT:]
+        # The walk stops at the first block that brings the size to CONTEXT_LIMIT. When the size lands
+        # exactly on it, the walk keeps one character less: the separator before that block.
+        cut = CONTEXT_LIMIT - 1 if self.end - (CONTEXT_LIMIT - size) in self.starts else CONTEXT_LIMIT
+        return (self.text + ' ' + own if parts else self.text)[-cut:]
 
 
 def label(text):
@@ -664,7 +789,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
     lead-in item of the same list or a negated lead-in row of the same table.
     """
     headings = []  # (level, text) of the current heading path
-    lead = []      # unterminated blocks that introduce what follows
+    lead = Lead()  # unterminated blocks that introduce what follows
     items = []     # (indent, text) of the open list item chain
     intros = set()  # indents whose list holds a negated lead-in item so far
     header = None  # first row of the current table
@@ -682,13 +807,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
     def context(extra=(), near=()):
         """Heading path, then lead-ins and extra cut to CONTEXT_LIMIT, then near items uncut."""
         path = ' '.join(t for _, t in headings)[-CONTEXT_LIMIT:]
-        parts, size = [], 0
-        for part in reversed(lead + list(extra)):
-            if size >= CONTEXT_LIMIT:
-                break
-            parts.append(part)
-            size += len(part) + 1
-        return ' '.join([path, ' '.join(reversed(parts))[-CONTEXT_LIMIT:], *near]).strip()
+        return ' '.join([path, lead.tail(extra), *near]).strip()
 
     def extend_run(text):
         nonlocal run_size, run_held
@@ -735,7 +854,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
         run_size = 0
 
     def flush():
-        nonlocal block, kind, lead, items, header, row_intro
+        nonlocal block, kind, items, header, row_intro
         if not block:
             return None
         text = ' '.join(part.strip() for part in block)
@@ -767,7 +886,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
             return context(t for i, t in items if i < indent), text
         if items:
             # Unterminated open items still introduce the block after the list.
-            lead = trim(lead + [t for _, t in items if not terminated(t)])
+            lead.add(t for _, t in items if not terminated(t))
             items = []
             intros.clear()
         if current == 'row':
@@ -784,16 +903,20 @@ def units(lines, hold_found, heading_found=lambda level: None):
         end_run()
         pair = context(), text
         body = re.sub(r'<!--|-->', ' ', text).strip() if current == 'comment' else text
-        lead = [] if terminated(body) else trim(lead + [body])
+        if terminated(body):
+            lead.clear()
+        else:
+            lead.add([body])
         return pair
 
     def enter_heading(level, text):
-        nonlocal lead, items, header, row_intro
+        nonlocal items, header, row_intro
         while headings and headings[-1][0] >= level:
             headings.pop()
         pair = context(), text
         headings.append((level, text[:CONTEXT_LIMIT]))
-        lead, items, header, row_intro = [], [], None, False
+        lead.clear()
+        items, header, row_intro = [], None, False
         intros.clear()
         end_run()
         heading_found(level)
@@ -1019,7 +1142,7 @@ def free_restriction(context, unit):
     return 'cleared' if mechanics_only(unit) else True
 
 
-def scan_normalized(text):
+def scan_normalized(text, restriction, strip):
     outside = []
     managed = False
     # Only newlines end Markdown lines; str.splitlines would also split on U+2028 or \x1e.
@@ -1056,7 +1179,7 @@ def scan_normalized(text):
     joined = DATED.sub(take_date, joined)
     if invalid_date or re.search(r'autonomous\s+merge\s+suspended|merge\s+autonome\s+suspendu', joined):
         return 2
-    if CROSS_PAUSE.search(joined):
+    if STRONG_PAUSE_CUE.search(joined) and CROSS_PAUSE.search(joined):
         return 2
 
     # Free-form restrictions are read per Markdown unit so that sibling list
@@ -1064,9 +1187,6 @@ def scan_normalized(text):
     cleared, follows, held, headings = False, False, [], []
     mechanics, gate_follows = False, False  # a git-mechanics rule; a hold beside a gate's own words
     level, section = 0, None  # current heading level; level of the cleared rule's section
-    # Cache only pure classification; every unit still updates the scan state.
-    restriction = functools.lru_cache(maxsize=128)(free_restriction)
-    strip = functools.lru_cache(maxsize=128)(strip_markers)
     for context, unit in units(outside, lambda: held.append(True), headings.append):
         if headings:
             level = headings.pop()
@@ -1099,12 +1219,12 @@ def scan_normalized(text):
     return 1 if found else 0
 
 
-def outside_managed(text):
-    """Raw lines outside managed blocks under either invisible-character reading."""
+def outside_managed(text, choices):
+    """Raw lines outside managed blocks under any of the readings in choices."""
     raw = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
     keep = [False] * len(raw)
-    for joiner in ('', ' '):
-        lines = normalize(text, joiner).split('\n')
+    for reading in choices:
+        lines = reading.split('\n')
         if len(lines) != len(raw):
             return text  # lines do not align: check the whole file
         managed = False
@@ -1148,13 +1268,21 @@ def scan_text(text):
     """0 clear, 1 dated canonical veto, 2 ambiguous/malformed evidence."""
     if len(text) > MAX_SCAN_CHARS:
         return 2
-    # Invisible characters may split a word or separate two words: check each distinct reading.
-    readings = dict.fromkeys(normalize(text, joiner) for joiner in ('', ' '))
-    results = [scan_normalized(reading) for reading in readings]
-    if hidden_splits(outside_managed(text)) > 1:
+    # A hold in any reading is a hold, so each distinct reading is scanned in full.
+    choices = readings(text)
+    # Cache only pure classification; every unit still updates the scan state. The readings of one
+    # file share most of their units, so they share caches sized for the distinct units of a file.
+    restriction = functools.lru_cache(maxsize=4096)(free_restriction)
+    strip = functools.lru_cache(maxsize=4096)(strip_markers)
+    results = []
+    for reading in choices:
+        results.append(scan_normalized(reading, restriction, strip))
+        if results[-1] == 2:
+            return 2
+    if hidden_splits(outside_managed(text, choices)) > 1:
         # Two readings cannot cover several invisible splits that need different choices.
-        results.append(2)
-    return 2 if 2 in results else 1 if 1 in results else 0
+        return 2
+    return 1 if 1 in results else 0
 
 
 def published_instructions(branch):

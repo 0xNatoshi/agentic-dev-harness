@@ -1,9 +1,11 @@
 """Merge routing, suspension and Pages fixtures against the source skill."""
 
+import collections
 from dataclasses import dataclass
 import importlib.util
 import json
 from pathlib import Path
+import random
 import re
 from tempfile import TemporaryDirectory
 import time
@@ -98,6 +100,7 @@ TEXT_CASES = (
     Case("start cannot swallow adjacent comments and veto", 2, "<!-- github-workflow:start v6.3 --> Autonomous merge suspended — request dated 2026-09-27 <!-- owner note -->\n<!-- github-workflow:end -->"),
     Case("start must be one complete comment", 2, "<!-- github-workflow:start v6.3 --> <!-- owner note -->\n<!-- github-workflow:end -->"),
     Case("orphan marker", 2, "<!-- github-workflow:end -->"),
+    Case("orphan marker with em dash for a hyphen", 2, "<!-—github-workflow:end -->"),
     # Free-form restrictions per Markdown unit and invisible characters.
     Case("kept hold until I approve", 2, "Do not merge anything until I approve."),
     Case("kept bare never merge", 2, "Never merge."),
@@ -662,6 +665,8 @@ TEXT_CASES = (
     Case("caught nobody merges except the owner", 2, "Nobody merges PRs except the owner."),
     Case("caught let me merge", 2, "Let me merge."),
     Case("caught French let me merge without hyphen", 2, "Laisse moi fusionner."),
+    Case("caught French let me merge with em dash for a hyphen", 2, "Laisse—moi fusionner."),
+    Case("caught freeze dependencies lockfiles then em dash and merges", 2, "Freeze dependencies, lockfiles—and merges."),
     Case("caught table row ask me before", 2, "| Action | Rule |\n|---|---|\n| Merge PRs | ask me before |"),
     Case("caught merging is the tech lead's call", 2, "Merging is the tech lead's call."),
     Case("caught merging is the code owner's decision", 2, "Merging is the code owner's decision."),
@@ -786,6 +791,380 @@ TEXT_CASES = (
          "PRs are held to the same standard.\n\nWait for my go before merging."),
     Case("caught PRs blocked failing checks then I merge", 2, "PRs are blocked: failing checks. I merge when ready."),
     Case("cleared CI heading over PRs blocked by failing checks", 0, "## CI\nPRs are blocked by failing checks."),
+    # Issue #62: human blockers and freezes hold PRs even without a neighboring merge rule.
+    Case("caught PRs blocked by the maintainer until further notice", 2,
+         "All PRs are blocked by the maintainer until further notice."),
+    Case("caught PRs blocked by the owner", 2, "PRs are blocked by the owner."),
+    Case("caught PRs blocked by the maintainer", 2, "PRs are blocked by the maintainer."),
+    Case("caught PRs blocked by the maintainer's decision", 2, "PRs are blocked by the maintainer's decision."),
+    Case("caught PRs blocked by the owner's review", 2, "PRs are blocked by the owner's review."),
+    Case("caught PRs blocked by the owner's curly possessive approval", 2, "PRs are blocked by the owner’s approval."),
+    Case("caught PRs blocked by the team-lead", 2, "PRs are blocked by the team-lead."),
+    Case("caught PRs blocked by the maintainers", 2, "All PRs are blocked by the maintainers."),
+    Case("caught PRs blocked pending review by the owner", 2, "PRs are blocked pending review by the owner."),
+    Case("caught PRs blocked by the release freeze", 2, "PRs are blocked by the release freeze."),
+    Case("caught PRs blocked by me", 2, "PRs are blocked by me."),
+    Case("caught PRs blocked pending maintainer approval", 2, "All PRs are blocked pending maintainer approval."),
+    Case("cleared PRs blocked by failing checks standalone", 0, "PRs are blocked by failing checks."),
+    Case("cleared PRs blocked by CI", 0, "PRs are blocked by CI."),
+    Case("cleared PRs blocked pending CI", 0, "PRs are blocked pending CI."),
+    Case("cleared PRs blocked pending checks", 0, "PRs are blocked pending checks."),
+    Case("cleared draft PRs blocked by branch protection", 0, "Draft PRs are blocked by branch protection."),
+    # A queue blocking PRs stays ambiguous, consistent with the existing held-by-queue cases.
+    Case("conservative PRs blocked by the merge queue", 2, "PRs are blocked by the merge queue."),
+    Case("caught PRs blocked by owners", 2, "PRs are blocked by the owners."),
+    Case("caught PRs blocked by admin", 2, "PRs are blocked by the admin."),
+    Case("caught PRs blocked by admins", 2, "PRs are blocked by the admins."),
+    Case("caught PRs blocked by lead", 2, "PRs are blocked by the lead."),
+    Case("caught PRs blocked by release manager", 2, "PRs are blocked by the release manager."),
+    Case("caught PRs blocked by release managers", 2, "PRs are blocked by the release managers."),
+    Case("caught PRs blocked by reviewer", 2, "PRs are blocked by the reviewer."),
+    Case("caught PRs blocked by reviewers", 2, "PRs are blocked by the reviewers."),
+    Case("caught PRs blocked by team", 2, "PRs are blocked by the team."),
+    Case("caught PRs blocked by bare maintainer", 2, "PRs are blocked by maintainer."),
+    Case("caught PRs blocked by a maintainer", 2, "PRs are blocked by a maintainer."),
+    Case("caught PRs blocked by an admin", 2, "PRs are blocked by an admin."),
+    Case("caught PRs blocked by our maintainers", 2, "PRs are blocked by our maintainers."),
+    Case("caught PRs blocked by their reviewers", 2, "PRs are blocked by their reviewers."),
+    Case("caught PRs blocked by my team", 2, "PRs are blocked by my team."),
+    Case("caught PRs blocked by your owner", 2, "PRs are blocked by your owner."),
+    Case("caught PRs blocked by his lead", 2, "PRs are blocked by his lead."),
+    Case("caught PRs blocked by her release manager", 2, "PRs are blocked by her release manager."),
+    Case("caught PRs blocked by code owner", 2, "PRs are blocked by the code owner."),
+    Case("caught PRs blocked pending owner", 2, "PRs are blocked pending the owner."),
+    Case("caught PRs blocked pending their reviewers", 2, "PRs are blocked pending their reviewers."),
+    Case("caught French PRs blocked by mainteneur", 2, "Les PR sont bloquées par le mainteneur."),
+    Case("caught French PRs blocked by nos mainteneurs", 2, "Les PR sont bloquées par nos mainteneurs."),
+    Case("caught French PRs blocked by propriétaire", 2, "Les PR sont bloquées par le propriétaire."),
+    Case("caught French PRs blocked by propriétaires", 2, "Les PR sont bloquées par les propriétaires."),
+    Case("caught French PRs blocked by responsable", 2, "Les PR sont bloquées par la responsable."),
+    Case("caught French PRs blocked by leurs responsables", 2, "Les PR sont bloquées par leurs responsables."),
+    Case("caught French PRs blocked by mainteneuse", 2, "Les PR sont bloquées par notre mainteneuse."),
+    Case("caught French PRs blocked by relecteurs", 2, "Les PR sont bloquées par les relecteurs."),
+    Case("caught French PRs blocked by équipe", 2, "Les PR sont bloquées par l’équipe."),
+    Case("caught French PRs blocked by un admin", 2, "Les PR sont bloquées par un admin."),
+    Case("caught French PRs blocked pending propriétaire", 2, "Les PR sont bloquées en attente du propriétaire."),
+    Case("caught French PRs blocked pending responsable", 2, "Les PR sont bloquées en attente de la responsable."),
+    Case("caught French PRs blocked pending review by owner", 2, "Les PR sont bloquées en attente de revue par le propriétaire."),
+    Case("caught PRs blocked by freeze", 2, "PRs are blocked by the freeze."),
+    Case("caught PRs blocked by code freeze", 2, "PRs are blocked by the code freeze."),
+    Case("caught PRs blocked by hold", 2, "PRs are blocked by a hold."),
+    Case("caught PRs blocked pending embargo", 2, "PRs are blocked pending the embargo."),
+    Case("caught PRs blocked by gel", 2, "PRs are blocked by the gel."),
+    Case("caught French PRs blocked by gel", 2, "Les PR sont bloquées par le gel."),
+    Case("cleared PRs blocked by red checks", 0, "PRs are blocked by red checks."),
+    Case("cleared PRs blocked by tests", 0, "PRs are blocked by tests."),
+    Case("cleared PRs blocked by builds", 0, "PRs are blocked by builds."),
+    Case("cleared PRs blocked by lint", 0, "PRs are blocked by lint."),
+    Case("cleared PRs blocked by required status checks", 0, "PRs are blocked by required status checks."),
+    Case("cleared PRs blocked by branch protection", 0, "PRs are blocked by branch protection."),
+    Case("cleared PRs blocked by maintainer bot", 0, "PRs are blocked by the maintainer bot."),
+    Case("cleared PRs blocked by reviewer queue", 0, "PRs are blocked by the reviewer queue."),
+    Case("cleared PRs blocked by lead time gate", 0, "PRs are blocked by lead time."),
+    Case("cleared PRs blocked by lead time of checks gate", 0,
+         "PRs are blocked by the lead time of the checks."),
+    Case("cleared PRs blocked by possessive team CI gate", 0, "PRs are blocked by the team's CI."),
+    Case("cleared PRs blocked by possessive team review queue gate", 0, "PRs are blocked by the team's review queue."),
+    Case("cleared PRs blocked by plural possessive teams CI gate", 0, "PRs are blocked by the teams’ CI."),
+    Case("cleared PRs blocked by plural possessive teams checks gate", 0, "PRs are blocked by the teams' checks."),
+    Case("caught PRs blocked by the maintainers' decision", 2, "PRs are blocked by the maintainers' decision."),
+    Case("cleared PRs blocked by team policy checks gate", 0, "PRs are blocked by team policy checks."),
+    Case("cleared PRs blocked by teams CI pipeline gate", 0, "PRs are blocked by the teams CI pipeline."),
+    Case("cleared PRs blocked by hold-the-line tests gate", 0, "PRs are blocked by hold-the-line tests."),
+    Case("cleared PRs not blocked by the owner", 0, "PRs are not blocked by the owner."),
+    Case("cleared PRs blocked pending tests", 0, "PRs are blocked pending tests."),
+    Case("caught French PRs blocked pending propriétaires", 2, "Les PR sont bloquées en attente des propriétaires."),
+    Case("caught PRs blocked by us", 2, "PRs are blocked by us."),
+    Case("caught French PRs blocked by moi", 2, "Les PR sont bloquées par moi."),
+    # Issue #62 round 4: fixed blocker vocabulary; condition words never skip to a gate.
+    Case("caught PRs blocked by owner then em dash condition", 2,
+         "PRs are blocked by the owner—until further notice."),
+    Case("caught PRs blocked by maintainer then em dash reference", 2,
+         "PRs are blocked by the maintainer—see issue 12."),
+    Case("caught PRs blocked by repository owner", 2, "PRs are blocked by the repository owner."),
+    Case("caught PRs blocked by repo owner", 2, "PRs are blocked by the repo owner."),
+    Case("caught PRs blocked by project maintainer", 2, "PRs are blocked by the project maintainer."),
+    Case("caught PRs blocked by core maintainers", 2, "PRs are blocked by the core maintainers."),
+    Case("caught PRs blocked by security team", 2, "PRs are blocked by the security team."),
+    Case("caught PRs blocked by core team", 2, "PRs are blocked by the core team."),
+    Case("caught PRs blocked by my decision", 2, "PRs are blocked by my decision."),
+    Case("caught PRs blocked by our decision", 2, "PRs are blocked by our decision."),
+    Case("cleared PRs blocked by code owner review requirement", 0,
+         "PRs are blocked by the code owner review requirement."),
+    Case("cleared PRs blocked by owner review policy", 0, "PRs are blocked by the owner review policy."),
+    Case("cleared PRs blocked by team protection rules", 0, "PRs are blocked by the team protection rules."),
+    Case("cleared PRs blocked by admin enforced branch protection", 0,
+         "PRs are blocked by admin enforced branch protection."),
+    Case("cleared PRs blocked by admin enforcement", 0, "PRs are blocked by admin enforcement."),
+    Case("cleared PRs blocked by reviewer requirement", 0, "PRs are blocked by the reviewer requirement."),
+    Case("cleared PRs blocked by reviewers count", 0, "PRs are blocked by the reviewers count."),
+    Case("cleared PRs blocked by lead times", 0, "PRs are blocked by lead times."),
+    Case("cleared PRs blocked by Teams notifications", 0, "PRs are blocked by Teams notifications."),
+    Case("cleared PRs blocked by human review check", 0, "PRs are blocked by the human review check."),
+    Case("caught PRs blocked by freeze window", 2, "PRs are blocked by the freeze window."),
+    Case("caught PRs blocked by hold period", 2, "PRs are blocked by the hold period."),
+    Case("caught PRs blocked by reviewer until checks pass", 2,
+         "PRs are blocked by the reviewer until checks pass."),
+    Case("caught PRs blocked by maintainer if CI fails", 2,
+         "PRs are blocked by the maintainer if CI fails."),
+    Case("caught PRs blocked by feature freeze", 2, "PRs are blocked by the feature freeze."),
+    Case("caught PRs blocked by deploy freeze", 2, "PRs are blocked by the deploy freeze."),
+    Case("caught PRs blocked by holiday freeze", 2, "PRs are blocked by the holiday freeze."),
+    Case("caught PRs blocked by security embargo", 2, "PRs are blocked by the security embargo."),
+    Case("caught PRs blocked by legal hold", 2, "PRs are blocked by a legal hold."),
+    Case("caught PRs blocked by holds", 2, "PRs are blocked by holds."),
+    Case("caught PRs blocked by freezes", 2, "PRs are blocked by freezes."),
+    Case("caught PRs blocked by embargoes", 2, "PRs are blocked by embargoes."),
+    Case("caught PRs blocked by hyphenated code freeze", 2, "PRs are blocked by the code-freeze."),
+    Case("caught PRs blocked by hyphenated release freeze", 2, "PRs are blocked by the release-freeze."),
+    Case("cleared PRs blocked by freeze bot", 0, "PRs are blocked by the freeze bot."),
+    Case("caught PRs blocked pending a review by owner", 2, "PRs are blocked pending a review by the owner."),
+    Case("caught PRs blocked pending code review by owner", 2, "PRs are blocked pending code review by the owner."),
+    Case("caught PRs blocked by owner's request", 2, "PRs are blocked by the owner's request."),
+    Case("cleared PRs blocked pending review", 0, "PRs are blocked pending review."),
+    Case("caught French PRs blocked by administrateur", 2, "Les PR sont bloquées par l'administrateur."),
+    Case("caught French PRs blocked by mainteneur decision", 2,
+         "Les PR sont bloquées par la décision du mainteneur."),
+    Case("cleared French PRs blocked by CI", 0, "Les PR sont bloquées par la CI."),
+    Case("cleared French PRs blocked by tests", 0, "Les PR sont bloquées par les tests."),
+    Case("caught French PRs blocked by chef de projet", 2, "Les PR sont bloquées par le chef de projet."),
+    Case("cleared PRs blocked by maintainer checks", 0, "PRs are blocked by the maintainer checks."),
+    Case("cleared PRs blocked by team builds", 0, "PRs are blocked by the team builds."),
+    Case("cleared PRs blocked by admin rules", 0, "PRs are blocked by the admin rules."),
+    Case("cleared PRs blocked by owner workflows", 0, "PRs are blocked by the owner workflows."),
+    Case("cleared French PRs blocked by équipe vérifications", 0,
+         "Les PR sont bloquées par l'équipe vérifications."),
+    Case("cleared French PRs blocked by règles de équipe", 0,
+         "Les PR sont bloquées par les règles de l'équipe."),
+    # Neighboring condition words and hyphenated gate/tool nouns use the same bounded path.
+    Case("caught PRs blocked by reviewer unless checks fail", 2,
+         "PRs are blocked by the reviewer unless checks fail."),
+    Case("caught PRs blocked by reviewer when checks pass", 2,
+         "PRs are blocked by the reviewer when checks pass."),
+    Case("caught PRs blocked by reviewer after checks pass", 2,
+         "PRs are blocked by the reviewer after checks pass."),
+    Case("caught PRs blocked by reviewer before checks pass", 2,
+         "PRs are blocked by the reviewer before checks pass."),
+    Case("caught PRs blocked by reviewer pending checks", 2,
+         "PRs are blocked by the reviewer pending checks."),
+    Case("caught French PRs blocked by mainteneur jusqu checks", 2,
+         "Les PR sont bloquées par le mainteneur jusqu'à la réussite des tests."),
+    Case("caught French PRs blocked by mainteneur si CI fails", 2,
+         "Les PR sont bloquées par le mainteneur si la CI échoue."),
+    Case("caught French PRs blocked by mainteneur tant que tests fail", 2,
+         "Les PR sont bloquées par le mainteneur tant que les tests échouent."),
+    Case("caught French PRs blocked by mainteneur quand tests pass", 2,
+         "Les PR sont bloquées par le mainteneur quand les tests passent."),
+    Case("cleared PRs blocked by hyphenated owner checks", 0, "PRs are blocked by the owner-checks."),
+    Case("cleared PRs blocked by hyphenated maintainer bot", 0, "PRs are blocked by the maintainer-bot."),
+    Case("caught French PRs blocked by administratrice", 2, "Les PR sont bloquées par l'administratrice."),
+    Case("cleared PRs blocked by maintainer tests", 0, "PRs are blocked by the maintainer tests."),
+    Case("cleared PRs blocked by maintainer lint", 0, "PRs are blocked by the maintainer lint."),
+    Case("cleared PRs blocked by maintainer pipelines", 0, "PRs are blocked by the maintainer pipelines."),
+    Case("cleared PRs blocked by maintainer jobs", 0, "PRs are blocked by the maintainer jobs."),
+    Case("cleared PRs blocked by maintainer status", 0, "PRs are blocked by the maintainer status."),
+    Case("cleared PRs blocked by maintainer runs", 0, "PRs are blocked by the maintainer runs."),
+    # Issue #62 round 5: the head of the noun phrase after a person decides. A gate or tool head
+    # clears whatever modifies it; any other head, a boundary word or punctuation keeps the hold.
+    Case("cleared PRs blocked by team unit tests", 0, "PRs are blocked by team unit tests."),
+    Case("cleared PRs blocked by maintainer automated checks", 0,
+         "PRs are blocked by the maintainer automated checks."),
+    Case("cleared PRs blocked by team security checks", 0, "PRs are blocked by the team security checks."),
+    Case("cleared PRs blocked by reviewer assignment queue", 0,
+         "PRs are blocked by the reviewer assignment queue."),
+    Case("cleared PRs blocked by maintainer review bot", 0, "PRs are blocked by the maintainer review bot."),
+    Case("cleared PRs blocked by owner's CI", 0, "PRs are blocked by the owner's CI."),
+    Case("cleared PRs blocked by maintainers' required checks", 0,
+         "PRs are blocked by the maintainers’ required checks."),
+    Case("cleared PRs blocked by owner-run checks", 0, "PRs are blocked by the owner-run checks."),
+    Case("cleared PRs blocked by team unit tests until they pass", 0,
+         "PRs are blocked by team unit tests until they pass."),
+    Case("cleared PRs blocked by team unit tests then relative clause", 0,
+         "PRs are blocked by team unit tests, which run nightly."),
+    Case("cleared PRs blocked by release manager checklist", 0,
+         "PRs are blocked by the release manager checklist."),
+    Case("caught PRs blocked by owner's final decision", 2, "PRs are blocked by the owner's final decision."),
+    Case("caught PRs blocked by maintainer's explicit approval", 2,
+         "PRs are blocked by the maintainer's explicit approval."),
+    Case("caught PRs blocked by team lead's sign-off", 2, "PRs are blocked by the team lead's sign-off."),
+    Case("caught PRs blocked by owner this time", 2, "PRs are blocked by the owner this time."),
+    Case("caught PRs blocked by owner and CI", 2, "PRs are blocked by the owner and the CI."),
+    Case("caught PRs blocked by owner of CI", 2, "PRs are blocked by the owner of the CI."),
+    Case("caught PRs blocked by owner not checks", 2, "PRs are blocked by the owner, not the checks."),
+    Case("caught PRs blocked by owner then dash about checks", 2,
+         "PRs are blocked by the owner — checks are irrelevant."),
+    Case("caught PRs blocked by reviewer until checks", 2, "PRs are blocked by the reviewer until checks."),
+    Case("cleared PRs blocked by team four modifiers before tests", 0,
+         "PRs are blocked by the team nightly automated security unit tests."),
+    Case("caught French PRs blocked by mainteneur du dépôt", 2,
+         "Les PR sont bloquées par le mainteneur du dépôt."),
+    Case("cleared PRs blocked by our CI", 0, "PRs are blocked by our CI."),
+    # Issue #62 round 7: a concession ends the phrase, no word cap before a gate or freeze head,
+    # a gate's outage, runner or timeout is still the gate, and a freeze or human-decision word
+    # in a modifier, or a failure to act, keeps the person.
+    Case("caught PRs blocked by owner although CI green", 2, "PRs are blocked by the owner although CI is green."),
+    Case("caught PRs blocked by owner even though CI green", 2,
+         "PRs are blocked by the owner even though CI is green."),
+    Case("caught PRs blocked by owner though CI green", 2, "PRs are blocked by the owner though CI is green."),
+    Case("caught PRs blocked by owner despite green CI", 2, "PRs are blocked by the owner despite green CI."),
+    Case("caught PRs blocked by owner once CI green", 2, "PRs are blocked by the owner once CI is green."),
+    Case("caught PRs blocked by owner yet CI green", 2, "PRs are blocked by the owner yet CI is green."),
+    Case("caught PRs blocked by three modifiers before a code freeze", 2,
+         "PRs are blocked by the big annual holiday code freeze."),
+    Case("caught PRs blocked by hyphenated end-of-year code freeze", 2,
+         "PRs are blocked by the annual end-of-year holiday code freeze."),
+    Case("caught PRs blocked by owner's long final release decision", 2,
+         "PRs are blocked by the owner's long overdue final release decision."),
+    Case("caught PRs blocked by owner until long gate phrase passes", 2,
+         "PRs are blocked by the owner until the nightly automated security unit tests pass."),
+    Case("cleared PRs blocked by reviewer pull request assignment queue", 0,
+         "PRs are blocked by the reviewer pull request assignment queue."),
+    Case("cleared PRs blocked by maintainer automated code review bot", 0,
+         "PRs are blocked by the maintainer automated code review bot."),
+    Case("cleared PRs blocked by team's CI outage", 0, "PRs are blocked by the team's CI outage."),
+    Case("cleared PRs blocked by team's CI outages", 0, "PRs are blocked by the team's CI outages."),
+    Case("cleared PRs blocked by team's flaky CI runner", 0, "PRs are blocked by the team's flaky CI runner."),
+    Case("cleared PRs blocked by team's CI timeouts", 0, "PRs are blocked by the team's CI timeouts."),
+    Case("cleared PRs blocked by maintainer's GitHub Actions runner", 0,
+         "PRs are blocked by the maintainer's GitHub Actions runner."),
+    Case("caught PRs blocked by owner's failure to review", 2, "PRs are blocked by the owner's failure to review."),
+    Case("caught PRs blocked by owner's failure to decide", 2, "PRs are blocked by the owner's failure to decide."),
+    Case("caught PRs blocked by owner's final decision gate", 2, "PRs are blocked by the owner's final decision gate."),
+    Case("caught PRs blocked by owner's manual review gate", 2, "PRs are blocked by the owner's manual review gate."),
+    Case("caught PRs blocked by owner's manual approval", 2, "PRs are blocked by the owner's manual approval."),
+    Case("caught PRs blocked by maintainer's manual gate", 2, "PRs are blocked by the maintainer's manual gate."),
+    Case("cleared PRs blocked by team's manual QA tests", 0, "PRs are blocked by the team's manual QA tests."),
+    Case("cleared PRs blocked by team's requirements to pass CI", 0,
+         "PRs are blocked by the team's requirements to pass CI."),
+    Case("caught PRs blocked by owner's requirement to approve", 2,
+         "PRs are blocked by the owner's requirement to approve."),
+    Case("caught PRs blocked by owner notwithstanding green CI", 2,
+         "PRs are blocked by the owner notwithstanding green CI."),
+    Case("caught PRs blocked by owner albeit CI is green", 2, "PRs are blocked by the owner albeit CI is green."),
+    Case("caught PRs blocked by owner however CI is green", 2, "PRs are blocked by the owner however CI is green."),
+    Case("caught PRs blocked by owner's code-freeze gate", 2, "PRs are blocked by the owner's code-freeze gate."),
+    Case("caught PRs blocked by owner's hold-period gate", 2, "PRs are blocked by the owner's hold-period gate."),
+    Case("caught PRs blocked by owner's freeze-gate", 2, "PRs are blocked by the owner's freeze-gate."),
+    Case("cleared PRs blocked by owner's CI failure", 0, "PRs are blocked by the owner's CI failure."),
+    # Issue #62 round 6: any freeze or hold modifier, quantifiers, an unspaced em dash, more
+    # adverbs and gate heads; only lead time clears among time words.
+    Case("caught PRs blocked by current release freeze", 2, "PRs are blocked by the current release freeze."),
+    Case("caught PRs blocked by ongoing freeze", 2, "PRs are blocked by an ongoing freeze."),
+    Case("caught PRs blocked by holiday code freeze", 2, "PRs are blocked by the holiday code freeze."),
+    Case("caught PRs blocked by year-end freeze", 2, "PRs are blocked by the year-end freeze."),
+    Case("caught PRs blocked by Q4 freeze", 2, "PRs are blocked by the Q4 freeze."),
+    Case("caught PRs blocked by temporary hold", 2, "PRs are blocked by a temporary hold."),
+    Case("caught PRs blocked by hyphenated freeze-period", 2, "PRs are blocked by the freeze-period."),
+    Case("caught PRs blocked by both maintainers", 2, "PRs are blocked by both maintainers."),
+    Case("caught PRs blocked by all maintainers", 2, "PRs are blocked by all maintainers."),
+    Case("caught PRs blocked by any maintainer", 2, "PRs are blocked by any maintainer."),
+    Case("caught PRs blocked by two maintainers", 2, "PRs are blocked by two maintainers."),
+    Case("caught PRs blocked by the other maintainers", 2, "PRs are blocked by the other maintainers."),
+    Case("caught PRs blocked by owner then unspaced em dash before checks", 2,
+         "PRs are blocked by the owner—checks are irrelevant."),
+    Case("caught PRs blocked by maintainer then unspaced em dash before CI", 2,
+         "PRs are blocked by the maintainer—CI is not enough."),
+    Case("caught PRs blocked by owner then unspaced em dash before a CI list", 2,
+         "PRs are blocked by the owner—CI, tests, nothing else matters."),
+    Case("caught PRs blocked by owner then unspaced horizontal bar before CI", 2,
+         "PRs are blocked by the owner―CI is irrelevant."),
+    Case("caught PRs blocked by maintainer then unspaced em dash before status", 2,
+         "PRs are blocked by the maintainer—status: frozen."),
+    Case("caught ordered item PRs blocked by owner then unspaced em dash", 2,
+         "1) PRs are blocked by the owner—CI is green."),
+    Case("caught quoted ordered item PRs blocked by owner then unspaced em dash", 2,
+         "> 1) PRs are blocked by the owner—CI is green."),
+    Case("caught wrapped quoted ordered item PRs blocked by owner then unspaced em dash", 2,
+         "> 1) PRs are blocked by the\n>    owner—CI is green."),
+    Case("caught wrapped PRs blocked by owner then unspaced em dash after a heading and blank line", 2,
+         "# Rules\n\nPRs are blocked by the\nowner—CI is green."),
+    Case("caught wrapped PRs blocked by owner then unspaced em dash right after a heading", 2,
+         "# Rules\nPRs are blocked by the\nowner—CI is green."),
+    Case("caught wrapped PRs blocked by owner then unspaced em dash after a setext heading", 2,
+         "Rules\n=====\nPRs are blocked by the\nowner—CI is green."),
+    Case("caught wrapped list item PRs blocked by owner then unspaced em dash after a sibling", 2,
+         "- Tests run on CI\n- PRs are blocked by the\n  owner—CI is green."),
+    Case("caught wrapped PRs blocked by maintainer then unspaced em dash after an unpunctuated paragraph", 2,
+         "Read the guide\n\nPRs are blocked by the\nmaintainer—status: frozen."),
+    Case("caught wrapped quoted PRs blocked by owner then unspaced em dash after a quoted note", 2,
+         "> Note\n>\n> PRs are blocked by the\n> owner—CI is green."),
+    # Round 9b: a dash opening the wrapped line still separates the hold from what follows.
+    Case("caught wrapped PRs blocked by owner with em dashes on the next line", 2,
+         "PRs are blocked by the\n—owner—CI is green."),
+    Case("caught wrapped list item PRs blocked by owner with em dashes on the continuation", 2,
+         "- PRs are blocked by the\n  —owner—CI is green."),
+    Case("caught wrapped PRs blocked by owner with an em dash opening the last line", 2,
+         "PRs are blocked by the\n—owner."),
+    # Round 10: a spaced dash opening a line is a list marker, never an indent under its siblings.
+    Case("caught em dash item Never then hyphen item merge", 2, "— Never\n- merge PRs"),
+    Case("caught horizontal bar item Never then hyphen item merge", 2, "― Never\n- merge PRs"),
+    Case("caught em dash item Never then asterisk item merge", 2, "— Never\n* merge PRs"),
+    Case("caught em dash item Never then numbered item merge", 2, "— Never\n1. merge PRs"),
+    Case("caught em dash item Don't unless I approve then hyphen item merge", 2,
+         "— Don't, unless I approve\n- merge"),
+    Case("caught em dash item after a heading line then hyphen item merge", 2,
+         "Rules\n— Don't, unless I approve\n- merge"),
+    Case("caught hyphen items Do not then em dash item merge", 2,
+         "- Do not do the following\n- Not now\n— merge"),
+    Case("caught quoted em dash item Never then quoted hyphen item merge", 2, "> — Never\n> - merge PRs"),
+    Case("caught em dash item Never with a tab then hyphen item merge", 2, "—\tNever\n- merge PRs"),
+    # Any indent before the dash counts, as for a list marker, including a lone CR line ending and
+    # control characters read as invisible.
+    Case("caught Ogham space em dash item Never then hyphen item merge", 2,
+         "\N{OGHAM SPACE MARK}— Never\n\N{OGHAM SPACE MARK}- merge PRs"),
+    Case("caught line separator em dash item Never then hyphen item merge", 2,
+         "\N{LINE SEPARATOR}— Never\n\N{LINE SEPARATOR}- merge PRs"),
+    Case("caught paragraph separator horizontal bar item Never then asterisk item merge", 2,
+         "\N{PARAGRAPH SEPARATOR}― Never\n\N{PARAGRAPH SEPARATOR}* merge PRs"),
+    Case("caught em dash item Never after lone CR line endings then hyphen item merge", 2,
+         "x\r— Never\r- merge PRs"),
+    Case("caught next line control em dash item Never then hyphen item merge", 2, "\x85— Never\n- merge PRs"),
+    Case("caught vertical tab em dash item Never then hyphen item merge", 2, "\x0b— Never\n- merge PRs"),
+    # A whitespace control character is also invisible: removed, it leaves the dash unspaced, so the
+    # dash is still read as a hyphen, as on main.
+    Case("caught French let me merge with vertical tabs around an em dash", 2,
+         "Laisse\x0b—\x0bmoi fusionner."),
+    Case("caught French let me merge with form feeds around a horizontal bar", 2,
+         "Laisse\x0c―\x0cmoi fusionner."),
+    Case("caught French ask me first with next line controls around an em dash", 2,
+         "Avant de fusionner, demande\x85—\x85moi."),
+    Case("caught my sign-off with record separators around an em dash", 2,
+         "Merging requires my sign\x1e—\x1eoff."),
+    Case("orphan end marker with vertical tabs around an em dash", 2,
+         "<!-- github\x0b—\x0bworkflow:end -->"),
+    Case("unclosed start marker with vertical tabs around an em dash", 2,
+         "<!-- github\x0b—\x0bworkflow:start v6.2 -->\nExample <!-- github-workflow:end -->"),
+    Case("caught PRs blocked by release manager's freeze policy", 2,
+         "PRs are blocked by the release manager's freeze policy."),
+    Case("caught PRs blocked by release manager's code freeze policy", 2,
+         "PRs are blocked by the release manager's code freeze policy."),
+    Case("caught PRs blocked by team's freeze rules", 2, "PRs are blocked by the team's freeze rules."),
+    Case("caught PRs blocked by owner's freeze notifications", 2,
+         "PRs are blocked by the owner's freeze notifications."),
+    Case("caught PRs blocked by maintainer's hold list", 2, "PRs are blocked by the maintainer's hold list."),
+    Case("caught PRs blocked by owner's hold status", 2, "PRs are blocked by the owner's hold status."),
+    Case("caught PRs still blocked by maintainer", 2, "PRs are still blocked by the maintainer."),
+    Case("caught PRs blocked again by owner", 2, "PRs are blocked again by the owner."),
+    Case("caught French PRs encore bloquées par mainteneur", 2, "Les PR sont encore bloquées par le mainteneur."),
+    Case("caught French PRs toujours bloquées par mainteneur", 2, "Les PR sont toujours bloquées par le mainteneur."),
+    Case("cleared PRs blocked pending code owner review gate", 0, "PRs are blocked pending code owner review."),
+    Case("cleared PRs blocked by code owner review gate", 0, "PRs are blocked by code owner review."),
+    Case("cleared PRs blocked by team CI failures", 0, "PRs are blocked by team CI failures."),
+    Case("cleared PRs blocked by team quality gates", 0, "PRs are blocked by team quality gates."),
+    Case("cleared PRs blocked by team linters", 0, "PRs are blocked by the team linters."),
+    Case("cleared PRs blocked by team's linting", 0, "PRs are blocked by the team's linting."),
+    Case("cleared PRs blocked by team's end-to-end tests", 0, "PRs are blocked by the team's end-to-end tests."),
+    Case("cleared PRs blocked by team's GitHub Actions", 0, "PRs are blocked by the team's GitHub Actions."),
+    Case("cleared PRs blocked by security team scan", 0, "PRs are blocked by the security team scan."),
+    Case("cleared PRs blocked by maintainer's type checker", 0, "PRs are blocked by the maintainer's type checker."),
+    Case("cleared PRs blocked by owner's required GitHub status checks", 0,
+         "PRs are blocked by the owner's required GitHub status checks."),
+    Case("cleared PRs blocked by team's CI today", 0, "PRs are blocked by the team's CI today."),
+    Case("cleared PRs blocked by maintainer checks right now", 0, "PRs are blocked by maintainer checks right now."),
+    Case("caught PRs blocked by owner today", 2, "PRs are blocked by the owner today."),
+    Case("caught PRs blocked by owner's vacation time", 2, "PRs are blocked by the owner's vacation time."),
+    Case("caught PRs blocked by owner's busy times", 2, "PRs are blocked by the owner's busy times."),
+    Case("caught PRs blocked by maintainer review time", 2, "PRs are blocked by maintainer review time."),
     # Independent review of 337c85b: a gate's own words are not a hold, but the rest of its
     # sentence still qualifies a merge-method rule anywhere in the file, in any layout.
     Case("caught PRs blocked by the maintainer then method rule", 2,
@@ -923,8 +1302,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 710 or len({case.name for case in ALL_CASES}) != 710:
-    raise RuntimeError("Merge fixture inventory must contain 710 unique cases")
+if len(ALL_CASES) != 995 or len({case.name for case in ALL_CASES}) != 995:
+    raise RuntimeError("Merge fixture inventory must contain 995 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
@@ -1045,6 +1424,78 @@ class ScanTimeTests(unittest.TestCase):
             work.append(len(calls))
         self.assertEqual(work[0], work[1])
 
+    def test_lead_in_blocks_and_context_match_a_walk_over_every_block(self) -> None:
+        # Many short lead-in blocks made a walk over the kept blocks cost up to CONTEXT_LIMIT
+        # steps per unit (#62). Lead keeps running sizes instead and must keep and cut exactly
+        # what the walk did, including sizes that land on the limit.
+        spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        limit = module.CONTEXT_LIMIT
+
+        def trim(blocks):
+            kept, size = [], 0
+            for block in reversed(blocks):
+                if kept and size + len(block) > limit:
+                    break
+                kept.append(block)
+                size += len(block) + 1
+            return kept[::-1]
+
+        def tail(blocks, extra):
+            parts, size = [], 0
+            for part in reversed(blocks + extra):
+                if size >= limit:
+                    break
+                parts.append(part)
+                size += len(part) + 1
+            return " ".join(reversed(parts))[-limit:]
+
+        # Most sizes plus a separator divide the limit, so running sizes land on it exactly.
+        sizes = (0, 1, 2, 5, 9, 19, 29, 59, 99, 199, 299, limit - 2, limit - 1, limit, limit + 1, 2 * limit)
+        rng = random.Random(62)
+        lead, kept = module.Lead(), []
+        for step in range(3000):
+            choice = rng.random()
+            if choice < 0.05:
+                lead.clear()
+                kept = []
+            elif choice < 0.55:
+                blocks = [str(step % 10) * rng.choice(sizes) for _ in range(rng.choice((1, 1, 1, 2, 3)))]
+                lead.add(blocks)
+                kept = trim(kept + blocks)
+            extra = [chr(97 + step % 26) * rng.choice(sizes) for _ in range(rng.choice((0, 0, 1, 2)))]
+            with self.subTest(step=step):
+                self.assertEqual(list(lead.blocks), kept)
+                self.assertEqual(lead.tail(extra), tail(kept, extra))
+
+    def test_pause_cue_keeps_every_cross_pause_match(self) -> None:
+        # scan_normalized reads CROSS_PAUSE only when a STRONG_PAUSE word, which every match holds,
+        # is present (#62). The guarded search must match exactly when CROSS_PAUSE does, so a cue
+        # that misses one pause word fails here.
+        spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        merges = ("merge", "merges", "merged", "merging", "fusionne", "automerge", "integrate", "")
+        pauses = ("", "suspended", "suspendu", "paused", "pause", "on hold", "on\nhold", "en  attente", "attente", "hold")
+        separators = (" ", "  ", "\n", ", ", ". ", "; ", "! ")
+        rng = random.Random(62)
+        found = collections.Counter()
+        for step in range(4000):
+            # The 140-character filler or a sentence end keeps the words apart; shorter fillers stay
+            # within CROSS_PAUSE's 120-character span.
+            words = [rng.choice(merges), "x " * rng.choice((0, 5, 40, 70)), rng.choice(pauses)]
+            if rng.random() < 0.5:
+                words.reverse()
+            text = "".join(word + rng.choice(separators) for word in words)
+            cross = bool(module.CROSS_PAUSE.search(text))
+            found[cross] += 1
+            with self.subTest(step=step, text=text):
+                self.assertEqual(bool(module.STRONG_PAUSE_CUE.search(text) and module.CROSS_PAUSE.search(text)), cross)
+        # The guarded search both matches and fails often enough for the comparison to mean something;
+        # a missing outcome counts as zero.
+        self.assertGreater(min(found[True], found[False]), 300, found)
+
     def test_repeated_classifications_keep_context_and_state(self) -> None:
         rule = "No rebase merges; use squash merges."
         cases = (
@@ -1068,6 +1519,20 @@ class ScanTimeTests(unittest.TestCase):
             ("Autonomous merge sus\u200bpended — request dated 2026-09-27", 1, 2),
             ("Autonomous\u200bmerge suspended — request dated 2026-09-27", 1, 2),
             ("Autonomous\u200bmerge sus\u200bpended — request dated 2026-09-27", 2, 2),
+            # Only an unspaced em dash adds the hyphen reading; the marker's spaced dash does not.
+            # The hyphen reading is scanned first and a hold ends the scan.
+            ("Laisse—moi fusionner.", 2, 1),
+            # Otherwise the spaced reading is scanned too, wherever the dash is.
+            ("- merge\n- go\n" * 40 + "a—b", 0, 2),
+            ("PRs are blocked by the owner—CI is green.", 2, 2),
+            # A spaced dash opening a line also adds it, since it may be a list marker; one inside a line does not.
+            ("- merge\n- go\n" * 40 + "— go\n", 0, 2),
+            ("> — Squash merges only.\n", 0, 2),
+            # Line starts are found in the folded readings, so a lone CR, which git show output keeps, ends a line.
+            ("x\r— go\r", 0, 2),
+            ("- merge\n- go\n" * 40 + "a — b\n", 0, 1),
+            # Two invisible-character readings times two dash readings.
+            ("a\N{ZERO WIDTH SPACE}b—c", 0, 4),
         )
         for text, expected, reading_count in cases:
             with self.subTest(text=text):
@@ -1077,13 +1542,37 @@ class ScanTimeTests(unittest.TestCase):
                 calls = []
                 scan_normalized = module.scan_normalized
 
-                def counted(reading):
+                def counted(reading, *caches):
                     calls.append(reading)
-                    return scan_normalized(reading)
+                    return scan_normalized(reading, *caches)
 
                 module.scan_normalized = counted
                 self.assertEqual(module.scan_text(text), expected)
                 self.assertEqual(len(calls), reading_count)
+
+    def test_each_scan_normalizes_the_text_once(self) -> None:
+        # NFKC dominated the cost of a scan when every reading and the managed-block check each
+        # normalized the whole text again; one pass serves every reading.
+        for text in ("- merge" + "\n- go" * 200, "a\N{ZERO WIDTH SPACE}b", "Laisse—moi fusionner.",
+                     "a\N{ZERO WIDTH SPACE}b—c\n"):
+            with self.subTest(text=text[:20]):
+                spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                calls = []
+                unicodedata = module.unicodedata
+
+                class Counted:
+                    def __getattr__(self, name):
+                        return getattr(unicodedata, name)
+
+                    def normalize(self, form, value):
+                        calls.append(form)
+                        return unicodedata.normalize(form, value)
+
+                module.unicodedata = Counted()
+                module.scan_text(text)
+                self.assertEqual(calls, ["NFKC"])
 
     def test_long_invisible_run_stays_linear(self) -> None:
         # A quadratic hidden-split scan took over 10 s on this input; linear takes milliseconds.
