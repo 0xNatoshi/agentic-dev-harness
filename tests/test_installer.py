@@ -875,15 +875,17 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(caught.exception.details, {"path": str(target), "mode": mode})
 
     @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX owners for an unprivileged user")
-    def test_a_target_or_skill_root_another_user_owns_blocks_plan_and_rollback_before_any_rename(self):
+    def test_a_target_or_skill_root_another_user_owns_blocks_plan_apply_and_rollback_before_any_rename(self):
         # A sudo run of apply leaves the target, and a skill root it created, owned by root with owner write, which
         # the owner bit accepted until the first rename failed (#76). Only a CI runner's passwordless sudo changes
         # the owner here; a rename needs write access to the moved directory itself, not to what it holds.
-        if os.environ.get("GITHUB_ACTIONS") != "true" or subprocess.run(["sudo", "-n", "true"],
-                                                                          capture_output=True).returncode:
+        if (os.environ.get("GITHUB_ACTIONS") != "true" or shutil.which("sudo") is None
+                or subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode):
             self.skipTest("changing an owner needs the CI runner's passwordless sudo")
         self.v52_layout()
         receipt_path = self.installed()
+        # apply makes the plan again under its lock, so a plan made before the owner changed is blocked the same way.
+        plan = self.plan()
         after, state = snapshot(self.target), self.state()
         owner, refused = f"{os.getuid()}:{os.getgid()}", self.base / "refused.json"
         for path, reason in ((self.target, "so it cannot be moved to another directory"),
@@ -894,10 +896,11 @@ class InstallerTests(unittest.TestCase):
                 try:
                     planned = self.run_installer("plan", "--runtime", "claude", "--home", self.home, "--checksums",
                                                  self.checksums, "--output", refused)
+                    applied = self.apply(plan)
                     rolled_back = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
                 finally:
                     subprocess.run(["sudo", "-n", "chown", owner, str(path)], check=True)
-                for result, retry in ((planned, "plan again"), (rolled_back, "run rollback again")):
+                for result, retry in ((planned, "plan again"), (applied, "plan again"), (rolled_back, "run rollback again")):
                     self.assert_refused(result, 2)
                     self.assertEqual(json.loads(result.stderr)["error"],
                                      f"{path} cannot be written (mode {mode}), {reason}; {path} belongs to another user "
