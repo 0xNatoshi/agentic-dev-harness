@@ -199,4 +199,3 @@ Lock new pitfalls in automatic checks when feasible; otherwise record them here.
 - One implementation owner and one branch/PR per issue. Reviewers comment on the PR; parallel agents own independent files. Never commit or clean another session's resources.
 - Follow CONTRIBUTING.md for claims, evidence, handoff and releases. Release publication needs specific authorization.
 - First bootstrap of this explicitly requested new repository is authorized. All later default-branch changes use reviewed PRs.
-- Merge author name: `Natoshi` (owner decision on #21, 2026-10-02)
