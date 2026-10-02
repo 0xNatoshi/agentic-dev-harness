@@ -1379,8 +1379,9 @@ def default_base(pull, branch):
 
 
 # Text after which Markdown rendering needs a full parser: a fence or code span delimiter, an unpaired
-# backtick, HTML or a comment, or an indented line.
-UNCLEAR = re.compile(r'``|~~~|<|^(?: {4}|\t)')
+# backtick, HTML or a comment, math, front matter or a thematic break, or an indented line.
+UNCLEAR = re.compile(r'``|~~~|<|\$|^---')
+INDENTED = re.compile(r' {0,3}\t| {4}')
 
 
 def setting_lines(text):
@@ -1390,15 +1391,21 @@ def setting_lines(text):
     UNCLEAR or holding an odd number of backticks, are known to render as
     written. Tracking what a fence, code span, HTML block or comment hides
     depends on containers such as list items, so every later line counts as
-    hidden, as does an indented line, which may be code. The managed block's
-    start marker is a comment, so its content is never read here.
+    hidden, as does an indented line, which may be code. A line must also be
+    its own block, between blank lines or the file's edges: a link reference
+    title, code span, lazy continuation or setext underline cannot cross a
+    blank line. The managed block's start marker is a comment, so its content
+    is never read here.
     """
+    lines = text.split('\n')
     clear = True
     managed = False
-    for line in text.split('\n'):
+    for index, line in enumerate(lines):
         # A line's own markers matter only for later lines; the exact-form check rejects them on the line.
-        hidden = not clear or line.startswith(('    ', '\t'))
-        clear = clear and not UNCLEAR.search(line) and line.count('`') % 2 == 0
+        hidden = (not clear or INDENTED.match(line) is not None
+                  or (index > 0 and lines[index - 1].strip() != '')
+                  or (index + 1 < len(lines) and lines[index + 1].strip() != ''))
+        clear = clear and not UNCLEAR.search(line) and not INDENTED.match(line) and line.count('`') % 2 == 0
         if START.match(line):
             managed = True
         elif END.match(line):
@@ -1429,7 +1436,8 @@ def configured_author_name(text):
         if not AUTHOR_NAME_LIKE.search(folded):
             continue
         if hidden:
-            raise EvidenceError('Merge author name line not above all code, HTML and comments in published AGENTS.md')
+            raise EvidenceError('Merge author name line must stand alone between blank lines above all code, HTML '
+                                'and comments in published AGENTS.md')
         line = line.strip()
         # A second label, even inside the note, would show two names for one setting.
         found = AUTHOR_NAME.fullmatch(line) if len(AUTHOR_NAME_LIKE.findall(folded)) == 1 else None
@@ -1566,8 +1574,8 @@ def identity_mode(args):
     if ('blocker', 'profile-name') in findings:
         print('identity: decision required: the server-generated merge author name follows the profile display '
               'name, which differs from the expected author name, case included: the account login, or the name the '
-              'owner recorded as `Merge author name:` in the published AGENTS.md above the managed block. The merge '
-              'stays blocked until they match or the user decides.', file=sys.stderr)
+              'owner recorded as a standalone `Merge author name:` line in the published AGENTS.md above the managed '
+              'block. The merge stays blocked until they match or the user decides.', file=sys.stderr)
     if not possible:
         print('identity: possible commit emails are unreadable or empty, as under the default gh token scopes; the '
               'pinned --author-email and the published check cover the noreply.', file=sys.stderr)
