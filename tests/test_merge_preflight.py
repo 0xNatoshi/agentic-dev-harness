@@ -1525,6 +1525,10 @@ IDENTITY_CASES = (
     identity_case("identity fence line inside comment", 2, api_calls=0,
                   text="<!--\n```\n-->\n```\n-->\n" + ALIAS + "```\n", setup="published_text",
                   stderr="inside code or an HTML comment"),
+    # The list item ends at the column-0 comment, closing its fence, so the alias renders inside the comment.
+    identity_case("identity fence in list item ended by comment", 2, api_calls=0,
+                  text="- item\n  ```\n<!--\n```\n" + ALIAS + "-->\n```\n", setup="published_text",
+                  stderr="inside code or an HTML comment"),
     # GitHub drops a leading BOM, so the first-line fence still hides the alias.
     identity_case("identity author name in fence after BOM", 2, api_calls=0, text="\ufeff```\n" + ALIAS + "```\n",
                   setup="published_text", stderr="inside code or an HTML comment"),

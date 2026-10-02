@@ -1395,15 +1395,16 @@ def setting_lines(text):
                 fence = None
         elif opened and not comment:
             fence = opened.group(1)
-        else:
-            position = 0
-            while True:
-                marker = line.find('-->' if comment else '<!--', position)
-                if marker < 0:
-                    break
-                hidden = True
-                comment = not comment
-                position = marker + 3
+        # Comment markers count even inside a fence: a fence in a list item ends with the item, which
+        # this scan does not track, so treating the marker as real can only hide more lines (exit 2).
+        position = 0
+        while True:
+            marker = line.find('-->' if comment else '<!--', position)
+            if marker < 0:
+                break
+            hidden = True
+            comment = not comment
+            position = marker + 3
         yield line, hidden
 
 
