@@ -1265,6 +1265,93 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(state)), ["LOCK"])
         self.assertEqual(snapshot(self.target), before)
 
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_an_unwritable_transaction_directory_blocks_rollback_and_recover_before_any_change(self):
+        # A sudo run of apply can leave its transaction directory owned by another user. Rollback and recover write
+        # there after the state directory checks pass, so they block before anything changes (#71).
+        self.v52_layout()
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        transaction, state = receipt_path.parent, self.state()
+        held, receipt = sorted(os.listdir(transaction)), receipt_path.read_bytes()
+        transaction.chmod(0o500)
+        try:
+            result = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        finally:
+            transaction.chmod(0o755)
+        self.assert_refused(result, 2)
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], f"{transaction} cannot be written or searched (mode 0500), so the installer "
+                                         f"cannot record its rollback in it; add owner write and search (execute) "
+                                         f"permission to {transaction}, then run rollback again")
+        self.assertEqual(error["details"], {"path": str(transaction), "mode": "0500"})
+        self.assertEqual(sorted(os.listdir(transaction)), held)
+        self.assertFalse((state / "CURRENT").exists())
+        self.assertEqual(receipt_path.read_bytes(), receipt)
+        self.assertEqual(snapshot(self.target), after)
+        # An interrupted rollback leaves CURRENT naming the journal in its work folder below that directory. A work
+        # folder that cannot be searched hides the journal, which must not read as "no rename happened".
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        journal = state / (state / "CURRENT").read_text(encoding="utf-8").strip()
+        work, record = journal.parent, journal.read_bytes()
+        self.assertIsNone(snapshot(self.target))
+        refusals = ((0o500, f"{work} cannot be written or searched (mode 0500), so the installer cannot record its "
+                            f"recovery in it; add owner write and search (execute) permission to {work}, then run "
+                            "recover again"),
+                    (0o600, f"{work} cannot be searched (mode 0600), so the installer cannot inspect what it holds; add "
+                            f"owner read and search (execute) permission to {work}, then run recover again"))
+        for mode, message in refusals:
+            with self.subTest(mode=f"{mode:04o}"):
+                work.chmod(mode)
+                try:
+                    result = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                                "--maintenance-confirmed")
+                finally:
+                    work.chmod(0o755)
+                self.assert_refused(result, 2)
+                error = json.loads(result.stderr)
+                self.assertEqual(error["error"], message)
+                self.assertEqual(error["details"], {"path": str(work), "mode": f"{mode:04o}"})
+                self.assertTrue((state / "CURRENT").exists())
+                self.assertEqual(journal.read_bytes(), record)
+                self.assertIsNone(snapshot(self.target))
+        self.assertEqual(self.recover()["result"], "restored")
+        self.assertEqual(snapshot(self.target), after)
+
+    def test_a_transaction_directory_refusing_folders_blocks_rollback_before_any_change(self):
+        # A Windows ACL can allow files in the receipt's transaction directory and deny the work folder rollback
+        # creates there; the OS refusal is injected on new folders in that directory alone (#71).
+        self.v52_layout()
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        transaction = receipt_path.parent
+        held, receipt = sorted(os.listdir(transaction)), receipt_path.read_bytes()
+        script = ("import os, runpy, sys\n"
+                  "transaction, create = os.path.normcase(sys.argv[1]), os.mkdir\n"
+                  "def mkdir(path, *arguments, **options):\n"
+                  "    if os.path.normcase(os.path.dirname(os.path.abspath(path))) == transaction:\n"
+                  "        raise PermissionError(13, 'Access is denied', str(path))\n"
+                  "    return create(path, *arguments, **options)\n"
+                  "os.mkdir = mkdir\n"
+                  "sys.argv = sys.argv[2:]\n"
+                  "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+        result = subprocess.run([sys.executable, "-B", "-c", script, str(transaction), str(self.installer), "rollback",
+                                 "--receipt", str(receipt_path), "--maintenance-confirmed"], cwd=self.base,
+                                env=self.environment(), capture_output=True, text=True, encoding="utf-8", timeout=120)
+        self.assert_refused(result, 2)
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], f"{transaction} accepts new files but refuses new folders, so the installer "
+                                         f"cannot record its rollback in it; allow this account to create folders in "
+                                         f"{transaction} (an access control list or security policy denies it), then run "
+                                         "rollback again")
+        self.assertEqual(error["details"], {"path": str(transaction)})
+        self.assertEqual(sorted(os.listdir(transaction)), held)
+        self.assertFalse((self.state() / "CURRENT").exists())
+        self.assertEqual(receipt_path.read_bytes(), receipt)
+        self.assertEqual(snapshot(self.target), after)
+
     def test_a_file_at_a_state_ancestor_blocks_apply_and_leaves_recover_nothing(self):
         # The location checks find no link below a file, so the lock names the file in the way (#68).
         plan = self.plan()

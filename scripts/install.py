@@ -291,6 +291,33 @@ def unwritable(path: Path, reason: str, retry: str) -> Blocked:
     return Blocked(f"{path} cannot be {action}{shown}, {reason}; {fix}, then {retry}", {"path": str(path), "mode": mode})
 
 
+def probe_writable(directory: Path, reason: str, retry: str, folders: bool = False) -> None:
+    """Block, before anything changes, when directory refuses the files, and with folders the folders, that an action
+    creates there (#68, #71).
+
+    The OS is asked directly to create them, which also covers POSIX ACLs and a directory another user owns (one a
+    sudo run created); a Windows ACL can allow files but deny folders. Only the creation decides: removing a probe and
+    any other failure stay unexpected errors."""
+    try:
+        descriptor, probe = tempfile.mkstemp(prefix=".write-check-", dir=str(directory))
+    except PermissionError:
+        raise unwritable(directory, reason, retry) from None
+    os.close(descriptor)
+    os.unlink(probe)
+    if folders:
+        try:
+            probe = tempfile.mkdtemp(prefix=".write-check-", dir=str(directory))
+        except PermissionError:
+            raise refuses_folders(directory, reason, retry) from None
+        os.rmdir(probe)
+
+
+def refuses_folders(path: Path, reason: str, retry: str) -> Blocked:
+    """A directory that accepted a new file but refused a new folder, as a Windows access control list allows (#68)."""
+    return Blocked(f"{path} accepts new files but refuses new folders, {reason}; allow this account to create folders in "
+                   f"{path} (an access control list or security policy denies it), then {retry}", {"path": str(path)})
+
+
 def searchable_part(path: Path, retry: str) -> Path | None:
     """The deepest existing path on the way to path, or None when none exists.
 
@@ -972,16 +999,10 @@ class Lock:
         """Block, before anything changes, when the state directory refuses the transaction directory, journal and
         CURRENT pointer an action writes there (#68).
 
-        An existing writable LOCK opens without write permission on its directory, so the OS is asked directly to
-        create a file there, which also covers POSIX ACLs; a Windows ACL that allows files but denies folders is
-        refused where apply creates its transaction folder. A read-only mount already refused the LOCK. Only the
-        creation decides: removing the probe and any other failure stay unexpected errors, as in setup."""
-        try:
-            descriptor, probe = tempfile.mkstemp(prefix=".write-check-", dir=str(self.state))
-        except PermissionError:
-            raise unwritable(self.state, "so the installer cannot record its transaction in it", self.retry) from None
-        os.close(descriptor)
-        os.unlink(probe)
+        An existing writable LOCK opens without write permission on its directory, so the directory itself is
+        probed; a Windows ACL that allows files but denies folders is refused where apply creates its transaction
+        folder. A read-only mount already refused the LOCK."""
+        probe_writable(self.state, "so the installer cannot record its transaction in it", self.retry)
 
     def __enter__(self) -> "Lock":
         return self
@@ -1280,10 +1301,8 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
     except PermissionError:
         # Nothing has changed yet: the lock and require_writable's probe file are the only earlier writes. That probe
         # has just created a file here, so the refusal is of folders, as a Windows access control list allows (#68).
-        raise Blocked(f"{locations.state} accepts new files but refuses new folders, so the installer cannot create its "
-                      f"transaction folder in it; allow this account to create folders in {locations.state} (an access "
-                      "control list or security policy denies it), then run apply again",
-                      {"path": str(locations.state)}) from None
+        raise refuses_folders(locations.state, "so the installer cannot create its transaction folder in it",
+                              "run apply again") from None
     begin(locations.state, journal)
     try:
         installer = keep_installer(package, transaction)
@@ -1464,6 +1483,10 @@ def command_rollback(options) -> dict:
         lock.require_writable()
         if exists(locations.state / "CURRENT"):
             raise Blocked(f"An interrupted transaction is recorded in {locations.state / 'CURRENT'}; run `recover` first")
+        # The rollback creates its work folder and rewrites the receipt in the receipt's transaction directory, which
+        # a sudo run of apply can leave owned by another user (#71).
+        probe_writable(transaction, "so the installer cannot record its rollback in it", "run rollback again",
+                         folders=True)
         # A receipt field is untrusted input: only an integer mode is quoted back in guidance.
         root = receipt["after"].get(".")
         recorded = root.get("mode") if isinstance(root, dict) else None
@@ -1632,6 +1655,8 @@ def command_recover(options) -> dict:
         # Every outcome below ends by removing CURRENT, possibly after restoring the target.
         lock.require_writable()
         journal = locations.state / current.read_text(encoding="utf-8").strip()
+        # exists() reads a journal in a directory that cannot be searched as absent, which would drop CURRENT (#71).
+        searchable_part(journal, "run recover again")
         if not exists(journal):
             # The journal is written durably before the first rename, so nothing was renamed.
             finish(locations.state)
@@ -1654,6 +1679,9 @@ def command_recover(options) -> dict:
                     result.update({key: value[key] for key in ("retirements", "rollback_command") if key in value})
             finish(locations.state)
             return result
+        # Undo records each step in the journal, and an apply's receipt beside it, so a directory that refuses
+        # them blocks before the first step (#71).
+        probe_writable(journal.parent, "so the installer cannot record its recovery in it", "run recover again")
         operation.record["recovery_boundary"] = boundary
         try:
             operation.undo()
