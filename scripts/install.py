@@ -7,6 +7,7 @@ Standard library only; Python 3.8+. Exit codes: 0 done, 1 refused or failed and 
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import io
 import json
@@ -228,8 +229,8 @@ def read_json(path: Path, retry: str | None = None) -> dict:
 def is_link(path: Path) -> bool:
     try:
         status = os.lstat(str(path))
-    except FileNotFoundError:
-        return False
+    except (FileNotFoundError, NotADirectoryError):
+        return False  # Nothing, link or not, is below a file (#68).
     if stat.S_ISLNK(status.st_mode):
         return True
     if getattr(status, "st_file_attributes", 0) & REPARSE_POINT:
@@ -243,28 +244,51 @@ def exists(path: Path) -> bool:
     return os.path.lexists(str(path))
 
 
-def inaccessible(path: Path, action: str, retry: str = "plan again") -> Blocked:
-    """A directory the OS refused to search or list, named with the fix instead of an error on one of its children (#54).
+def permission_fix(path: Path, needed: int, permission: str, held: str, allow: str) -> tuple[str | None, str]:
+    """The mode of a path the OS refused and the fix for it (#54).
 
-    Read and search permission are both named: either alone leaves the directory uninspectable. On POSIX the
-    fix follows the owner and mode: a directory another user owns (one created with sudo) or one whose owner
-    already has both permissions (an ACL or a macOS privacy control) is not fixed by the owner's mode."""
+    On POSIX the fix follows the owner and mode: a path another user owns (one created with sudo) or one whose
+    owner already has the needed permission (an ACL or a macOS privacy control) is not fixed by the owner's mode."""
     try:
         status = os.stat(str(path))
     except OSError:
         status = None
     mode = f"{stat.S_IMODE(status.st_mode):04o}" if status else None
-    shown = f" (mode {mode})" if mode else ""
-    fix = f"add owner read and search (execute) permission to {path}"
+    fix = f"add owner {permission} permission to {path}"
     if status and os.name != "nt":
         if status.st_uid != os.geteuid():
             fix = (f"{path} belongs to another user (uid {status.st_uid}): have its owner or an administrator give you "
-                   "read and search (execute) access to it, or its ownership")
-        elif status.st_mode & (stat.S_IRUSR | stat.S_IXUSR) == stat.S_IRUSR | stat.S_IXUSR:
-            fix = (f"its owner already has read and search permission, so an access control list or system privacy "
-                   f"setting denies access: allow this process to read and search {path}")
+                   f"{permission} access to it, or its ownership")
+        elif status.st_mode & needed == needed:
+            fix = (f"its owner already has {held} permission, so an access control list or system privacy "
+                   f"setting denies access: allow this process to {allow} {path}")
+    return mode, fix
+
+
+def inaccessible(path: Path, action: str, retry: str = "plan again") -> Blocked:
+    """A directory the OS refused to search or list, named with the fix instead of an error on one of its children (#54).
+
+    Read and search permission are both named: either alone leaves the directory uninspectable."""
+    mode, fix = permission_fix(path, stat.S_IRUSR | stat.S_IXUSR, "read and search (execute)", "read and search",
+                               "read and search")
+    shown = f" (mode {mode})" if mode else ""
     return Blocked(f"{path} cannot be {action}{shown}, so the installer cannot inspect what it holds; {fix}, then {retry}",
                    {"path": str(path), "mode": mode})
+
+
+def unwritable(path: Path, reason: str, retry: str) -> Blocked:
+    """A directory or file the OS refused to write before anything changed, named with the fix (#68).
+
+    Creating or opening an entry needs write and search permission on its directory, so both are named there."""
+    if os.path.isdir(str(path)):
+        mode, fix = permission_fix(path, stat.S_IWUSR | stat.S_IXUSR, "write and search (execute)", "write and search",
+                                   "write to and search")
+        action = "written or searched"
+    else:
+        mode, fix = permission_fix(path, stat.S_IWUSR, "write", "write", "write to")
+        action = "written"
+    shown = f" (mode {mode})" if mode else ""
+    return Blocked(f"{path} cannot be {action}{shown}, {reason}; {fix}, then {retry}", {"path": str(path), "mode": mode})
 
 
 def searchable_part(path: Path, retry: str) -> Path | None:
@@ -896,9 +920,18 @@ def maintenance_boundary(confirmed: bool) -> dict:
 class Lock:
     """Exclusive installer lock, released by the operating system if the process dies."""
 
-    def __init__(self, state: Path) -> None:
-        state.mkdir(parents=True, exist_ok=True)
-        self.stream = open(state / "LOCK", "a+b")
+    def __init__(self, state: Path, retry: str) -> None:
+        self.state, self.retry = state, retry
+        lock = state / "LOCK"
+        try:
+            state.mkdir(parents=True, exist_ok=True)
+            self.stream = open(lock, "a+b")
+        except OSError as error:
+            # Nothing has changed yet, so a refused setup is a blocked state with its fix, not an uncertain one (#68).
+            blocked = Lock.setup_blocked(state, error, retry)
+            if blocked is None:
+                raise  # Any other failure, or a type conflict gone before it is named, stays an unexpected error.
+            raise blocked from None
         try:
             if os.name == "nt":
                 import msvcrt
@@ -909,7 +942,50 @@ class Lock:
                 fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             self.stream.close()
-            raise Blocked(f"Another installer holds {state / 'LOCK'}")
+            raise Blocked(f"Another installer holds {lock}")
+
+    @staticmethod
+    def setup_blocked(state: Path, error: OSError, retry: str) -> Blocked | None:
+        lock = state / "LOCK"
+        # A path of the wrong type is named first: Windows reports a LOCK directory as a permission error, and
+        # mkdir(parents=True) can stop at any ancestor that is a file.
+        for path in (lock, state, *state.parents):
+            if exists(path) and os.path.isdir(str(path)) == (path == lock):
+                kind = "a directory, not the installer's lock file" if path == lock else "not a directory"
+                return Blocked(f"{path} is {kind}, so the installer cannot keep its state there; move it out of the way, "
+                               f"then {retry}", {"path": str(path)})
+        failed = Path(error.filename) if error.filename else lock
+        if error.errno == errno.EROFS:
+            volume = next((path for path in (failed, *failed.parents) if exists(path)), failed)
+            return Blocked(f"{volume} is on a read-only file system, so the installer cannot create its state directory "
+                           f"or lock file; make that file system writable, then {retry}", {"path": str(volume)})
+        if not isinstance(error, PermissionError):
+            return None
+        # The OS refused a write: to the file itself when it exists (a read-only LOCK), otherwise to the directory
+        # the missing path is created in. A LOCK in a directory that cannot be searched is not seen as existing.
+        path = failed if exists(failed) else failed.parent
+        reason = ("so the installer cannot take its lock" if path == lock
+                  else "so the installer cannot create its state directory or lock file in it")
+        return unwritable(path, reason, retry)
+
+    def require_writable(self) -> None:
+        """Block, before anything changes, when the state directory refuses the transaction directory, journal and
+        CURRENT pointer an action writes there (#68).
+
+        An existing writable LOCK opens without write permission on its directory, so the OS is asked directly to
+        create a file there, which also covers POSIX ACLs; a Windows ACL that allows files but denies folders is
+        refused where apply creates its transaction folder. A read-only mount already refused the LOCK. Only the
+        creation decides: removing the probe and any other failure stay unexpected errors, as in setup."""
+        # One attempt under a random name, as write_durable names its files: tempfile retries a Windows
+        # PermissionError as a name clash, up to os.TMP_MAX (2**31 - 1) times in a Python without the cpython
+        # gh-66305 fix, so a denied probe would hang.
+        probe = self.state / f".write-check-{uuid.uuid4().hex}"
+        try:
+            descriptor = os.open(str(probe), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except PermissionError:
+            raise unwritable(self.state, "so the installer cannot record its transaction in it", self.retry) from None
+        os.close(descriptor)
+        os.unlink(str(probe))
 
     def __enter__(self) -> "Lock":
         return self
@@ -1161,7 +1237,8 @@ def command_apply(options) -> dict:
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check()
-    with Lock(locations.state):
+    with Lock(locations.state, "run apply again") as lock:
+        lock.require_writable()
         fresh, package = make_plan(plan["runtime"], plan["home"], plan.get("config_root"), Path(plan["package"]["source"]),
                                    Path(options.checksums))
         changed = drift(plan, fresh)
@@ -1202,7 +1279,15 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
     before = plan["before"]
     transaction = locations.state / (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8])
     journal = transaction / "journal.json"
-    transaction.mkdir(parents=True)
+    try:
+        transaction.mkdir(parents=True)
+    except PermissionError:
+        # Nothing has changed yet: the lock and require_writable's probe file are the only earlier writes. That probe
+        # has just created a file here, so the refusal is of folders, as a Windows access control list allows (#68).
+        raise Blocked(f"{locations.state} accepts new files but refuses new folders, so the installer cannot create its "
+                      f"transaction folder in it; allow this account to create folders in {locations.state} (an access "
+                      "control list or security policy denies it), then run apply again",
+                      {"path": str(locations.state)}) from None
     begin(locations.state, journal)
     try:
         installer = keep_installer(package, transaction)
@@ -1379,7 +1464,8 @@ def command_rollback(options) -> dict:
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check("run rollback again")
-    with Lock(locations.state):
+    with Lock(locations.state, "run rollback again") as lock:
+        lock.require_writable()
         if exists(locations.state / "CURRENT"):
             raise Blocked(f"An interrupted transaction is recorded in {locations.state / 'CURRENT'}; run `recover` first")
         # A receipt field is untrusted input: only an integer mode is quoted back in guidance.
@@ -1543,10 +1629,12 @@ def command_recover(options) -> dict:
                            "`recover --plan <plan>` or `recover --receipt <receipt>`, which reuse the recorded directories.")
     if not exists(locations.state):
         return nothing
-    with Lock(locations.state):
+    with Lock(locations.state, "run recover again") as lock:
         current = locations.state / "CURRENT"
         if not exists(current):
             return nothing
+        # Every outcome below ends by removing CURRENT, possibly after restoring the target.
+        lock.require_writable()
         journal = locations.state / current.read_text(encoding="utf-8").strip()
         if not exists(journal):
             # The journal is written durably before the first rename, so nothing was renamed.

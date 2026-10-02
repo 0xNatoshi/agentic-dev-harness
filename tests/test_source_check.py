@@ -240,6 +240,24 @@ class SourceCheckTests(unittest.TestCase):
             self.assertIn(f"Email address outside the neutral allowlist: profiles/AGENTS.template.md:{line}", result.stderr)
             self.assertNotIn(address, result.stdout + result.stderr)
 
+    def test_source_gate_rejects_retrying_tempfile_creators_in_the_installer(self):
+        # Without the cpython gh-66305 fix they retry a Windows PermissionError for hours; the installer supports 3.8 (#71).
+        cases = [("descriptor, probe = tempfile.mkstemp(dir='.')", "tempfile.mkstemp"),
+                 ("from tempfile import mkdtemp", "tempfile.mkdtemp"),
+                 ("import tempfile as probe_files; probe_files.mkstemp()", "tempfile.mkstemp")]
+        for line, name in cases:
+            with self.subTest(line=line), tempfile.TemporaryDirectory(prefix="harness-runtime-tempfile-") as directory:
+                root = Path(directory)
+                source = self.copy_source(root)
+                installer = source / "scripts" / "install.py"
+                original = installer.read_text(encoding="utf-8")
+                installer.write_text(original + line + "\n", encoding="utf-8")
+                location = len(original.splitlines()) + 1
+                environment, _ = fixture_environment(root)
+                result = run([sys.executable, "scripts/check.py"], source, environment)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"scripts/install.py:{location}: {name} can retry a Windows PermissionError", result.stderr)
+
     def test_source_gate_accepts_neutral_email_forms(self):
         addresses = [
             "@".join(["fixture", "example.invalid"]),

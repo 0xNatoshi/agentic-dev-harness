@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import importlib.util
 import json
@@ -1074,6 +1075,241 @@ class InstallerTests(unittest.TestCase):
         skills.chmod(0o755)
         self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
         self.assertEqual(snapshot(self.target), after)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_an_unwritable_state_location_blocks_the_lock_with_its_fix(self):
+        # The lock is set up before anything changes, so a refused write there is blocked, not an unexpected error (#68).
+        before = self.v52_layout()
+        config, state = self.target.parent.parent, self.state()
+        plan = self.plan()
+        self.assertFalse(state.exists())
+        config.chmod(0o500)
+        try:
+            result = self.apply(plan)
+        finally:
+            config.chmod(0o755)
+        self.assert_refused(result, 2)
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], f"{config} cannot be written or searched (mode 0500), so the installer cannot "
+                                         f"create its state directory or lock file in it; add owner write and search "
+                                         f"(execute) permission to {config}, then run apply again")
+        self.assertEqual(error["details"], {"path": str(config), "mode": "0500"})
+        self.assertFalse(state.exists())
+        self.assertEqual(snapshot(self.target), before)
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        lock = state / "LOCK"
+        for command in (("rollback", "--receipt", receipt_path), ("recover", "--runtime", "claude", "--home", self.home)):
+            with self.subTest(command=command[0]):
+                lock.chmod(0o400)
+                try:
+                    result = self.run_installer(*command, "--maintenance-confirmed")
+                finally:
+                    lock.chmod(0o644)
+                self.assert_refused(result, 2)
+                error = json.loads(result.stderr)
+                self.assertEqual(error["error"], f"{lock} cannot be written (mode 0400), so the installer cannot take its "
+                                                 f"lock; add owner write permission to {lock}, then run {command[0]} again")
+                self.assertEqual(error["details"], {"path": str(lock), "mode": "0400"})
+                self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+                self.assertEqual(snapshot(self.target), after)
+        # A state directory that cannot be searched hides its LOCK, so the fix names search as well as write.
+        state.chmod(0o600)
+        try:
+            result = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+        finally:
+            state.chmod(0o755)
+        self.assert_refused(result, 2)
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], f"{state} cannot be written or searched (mode 0600), so the installer cannot "
+                                         f"create its state directory or lock file in it; add owner write and search "
+                                         f"(execute) permission to {state}, then run recover again")
+        self.assertEqual(error["details"], {"path": str(state), "mode": "0600"})
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+        self.assertEqual(snapshot(self.target), after)
+
+    def test_a_read_only_file_system_blocks_the_lock_and_other_setup_errors_stay_unexpected(self):
+        # A read-only mount raises a plain OSError (EROFS); it is blocked like a refused write (#68).
+        spec = importlib.util.spec_from_file_location("harness_installer_lock", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        state = self.base / "state"
+        state.mkdir()
+        lock = state / "LOCK"
+        refused = OSError(errno.EROFS, "Read-only file system", str(lock))
+        with mock.patch.object(installer, "open", create=True, side_effect=refused):
+            with self.assertRaises(installer.Blocked) as caught:
+                installer.Lock(state, "run apply again")
+        self.assertEqual(str(caught.exception), f"{state} is on a read-only file system, so the installer cannot create "
+                                                "its state directory or lock file; make that file system writable, then "
+                                                "run apply again")
+        self.assertEqual(caught.exception.details, {"path": str(state)})
+        full = OSError(errno.ENOSPC, "No space left on device", str(lock))
+        with mock.patch.object(installer, "open", create=True, side_effect=full):
+            with self.assertRaises(OSError) as caught:
+                installer.Lock(state, "run apply again")
+        self.assertIs(caught.exception, full)
+        self.assertFalse(lock.exists())
+
+    def test_a_state_path_of_the_wrong_type_blocks_the_lock(self):
+        # Windows reports opening a LOCK directory as a permission error; both systems name the path in the way (#68).
+        before = self.v52_layout()
+        state = self.state()
+        plan = self.plan()
+        state.write_bytes(b"not a directory\n")
+        result = self.apply(plan)
+        self.assert_refused(result, 2)
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], f"{state} is not a directory, so the installer cannot keep its state there; move "
+                                         "it out of the way, then run apply again")
+        self.assertEqual(error["details"], {"path": str(state)})
+        self.assertEqual(state.read_bytes(), b"not a directory\n")
+        self.assertEqual(snapshot(self.target), before)
+        state.unlink()
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        lock = state / "LOCK"
+        lock.unlink()
+        lock.mkdir()
+        for command in (("rollback", "--receipt", receipt_path), ("recover", "--runtime", "claude", "--home", self.home)):
+            with self.subTest(command=command[0]):
+                result = self.run_installer(*command, "--maintenance-confirmed")
+                self.assert_refused(result, 2)
+                error = json.loads(result.stderr)
+                self.assertEqual(error["error"], f"{lock} is a directory, not the installer's lock file, so the installer "
+                                                 f"cannot keep its state there; move it out of the way, then run "
+                                                 f"{command[0]} again")
+                self.assertEqual(error["details"], {"path": str(lock)})
+                self.assertTrue(lock.is_dir())
+                self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+                self.assertEqual(snapshot(self.target), after)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_an_unwritable_state_directory_with_a_writable_lock_blocks_before_any_change(self):
+        # A writable LOCK opens in a directory without write permission, and each action then writes there (#68).
+        before = self.v52_layout()
+        state = self.state()
+        plan = self.plan()
+        state.mkdir()
+        (state / "LOCK").touch()
+
+        def blocked(result, command):
+            self.assert_refused(result, 2)
+            error = json.loads(result.stderr)
+            self.assertEqual(error["error"], f"{state} cannot be written or searched (mode 0500), so the installer cannot "
+                                             f"record its transaction in it; add owner write and search (execute) "
+                                             f"permission to {state}, then run {command} again")
+            self.assertEqual(error["details"], {"path": str(state), "mode": "0500"})
+
+        state.chmod(0o500)
+        try:
+            result = self.apply(plan)
+        finally:
+            state.chmod(0o755)
+        blocked(result, "apply")
+        self.assertEqual(sorted(os.listdir(state)), ["LOCK"])
+        self.assertEqual(snapshot(self.target), before)
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        transaction, listing = receipt_path.parent, sorted(os.listdir(state))
+        held = sorted(os.listdir(transaction))
+        state.chmod(0o500)
+        try:
+            rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+            idle = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+        finally:
+            state.chmod(0o755)
+        blocked(rollback, "rollback")
+        self.assertEqual(sorted(os.listdir(transaction)), held)
+        # Without an interrupted transaction recover writes nothing, so it still says so.
+        self.assertEqual(idle.returncode, 0, idle.stderr)
+        self.assertEqual(json.loads(idle.stdout)["result"], "nothing to recover")
+        # An interrupted transaction ends by removing CURRENT, so recover blocks before acting on it.
+        current = state / "CURRENT"
+        current.write_text("missing/journal.json\n", encoding="utf-8")
+        state.chmod(0o500)
+        try:
+            result = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+        finally:
+            state.chmod(0o755)
+        blocked(result, "recover")
+        self.assertEqual(sorted(os.listdir(state)), sorted(listing + ["CURRENT"]))
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+        self.assertEqual(snapshot(self.target), after)
+
+    def test_a_state_directory_refusing_folders_blocks_apply_before_any_change(self):
+        # A Windows ACL can allow the files require_writable creates in the state directory and deny the folder
+        # apply then creates for its transaction; the OS refusal is injected on that folder alone (#68).
+        before = self.v52_layout()
+        state = self.state()
+        plan = self.plan()
+        script = ("import pathlib, runpy, sys\n"
+                  "state, create = pathlib.Path(sys.argv[1]), pathlib.Path.mkdir\n"
+                  "def mkdir(self, *arguments, **options):\n"
+                  "    if self.parent == state:\n"
+                  "        raise PermissionError(13, 'Access is denied', str(self))\n"
+                  "    return create(self, *arguments, **options)\n"
+                  "pathlib.Path.mkdir = mkdir\n"
+                  "sys.argv = sys.argv[2:]\n"
+                  "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+        result = subprocess.run([sys.executable, "-B", "-c", script, str(state), str(self.installer), "apply", "--plan",
+                                 str(plan), "--checksums", str(self.checksums), "--maintenance-confirmed"], cwd=self.base,
+                                env=self.environment(), capture_output=True, text=True, encoding="utf-8", timeout=120)
+        self.assert_refused(result, 2)
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], f"{state} accepts new files but refuses new folders, so the installer cannot "
+                                         f"create its transaction folder in it; allow this account to create folders in "
+                                         f"{state} (an access control list or security policy denies it), then run apply "
+                                         "again")
+        self.assertEqual(error["details"], {"path": str(state)})
+        self.assertEqual(sorted(os.listdir(state)), ["LOCK"])
+        self.assertEqual(snapshot(self.target), before)
+
+    def test_a_file_at_a_state_ancestor_blocks_apply_and_leaves_recover_nothing(self):
+        # The location checks find no link below a file, so the lock names the file in the way (#68).
+        plan = self.plan()
+        config = self.target.parent.parent
+        self.assertFalse(config.exists())
+        config.write_bytes(b"not a directory\n")
+        result = self.apply(plan)
+        self.assert_refused(result, 2)
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], f"{config} is not a directory, so the installer cannot keep its state there; "
+                                         "move it out of the way, then run apply again")
+        self.assertEqual(error["details"], {"path": str(config)})
+        # No state directory can exist below a file, so there is nothing to recover.
+        recover = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+        self.assertEqual(recover.returncode, 0, recover.stderr)
+        self.assertEqual(json.loads(recover.stdout)["result"], "nothing to recover")
+        self.assertEqual(config.read_bytes(), b"not a directory\n")
+
+    def test_a_held_lock_still_reports_the_other_installer(self):
+        # The setup diagnostics of #68 leave the contention message unchanged.
+        self.v52_layout()
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        lock = self.state() / "LOCK"
+        with open(lock, "a+b") as stream:
+            if os.name == "nt":
+                import msvcrt
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                for command in (("rollback", "--receipt", receipt_path),
+                                ("recover", "--runtime", "claude", "--home", self.home)):
+                    with self.subTest(command=command[0]):
+                        result = self.run_installer(*command, "--maintenance-confirmed")
+                        self.assert_refused(result, 2)
+                        self.assertEqual(json.loads(result.stderr)["error"], f"Another installer holds {lock}")
+                        self.assertEqual(snapshot(self.target), after)
+            finally:
+                if os.name == "nt":
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
 
     @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
     def test_the_selected_skill_directory_or_one_inside_it_that_cannot_be_searched_or_listed_blocks(self):
