@@ -720,10 +720,30 @@ MERGE_LABEL = (r'(?:self[\s-]?)?(?:merges?|merging|fusions?)(?:\s+polic(?:y|ies)
                r'|main|master|default\s+branch|branch(?:es)?|changes|code)\b){0,2}')
 # A bare refusal, alone or qualified only by an idiom, by who may not merge, or by a pointer to ask
 # first: 'never', 'Never under any circumstances', 'not yet', 'never by agents', 'never (ask me)'.
-# A refusal with its own object ('no direct pushes') or a status ('not applicable') is not one.
+# DECIDER and ROLE refuse a possessive, so 'the owner's decision' has its own pattern.
+WAIT_POSSESSIVE = (r'(?:(?:(?:the|a|an|your)\s+)?' + DECIDER_PREFIX + r'(?:' + DECIDER_BASE + r'|' + ROLE_BASE + r')[’\x27]s'
+                   r'|\bmy|\bour)\s+(?:(?:final|explicit)\s+)?(?:approv\w*|ok(?:ay)?|go(?:-ahead)?|sign[ -]?off|decision|review)\b')
+# A refusal with its own object ('no direct pushes') or a status ('not applicable') is not one, nor
+# one whose 'without' names only a gate ('never without green CI', 'never without a linked issue').
+# Naming an approval, the speaker or who decides keeps it ('never without exception', 'never without
+# the owner', 'never without green CI and my approval'). A participle after the person names what they
+# made only before an artifact ('never without human-written unit tests' clears, 'never without an
+# owner-provided OK' or 'an owner-written comment' holds). Only a listed modifier may come between them
+# ('human-written unit tests', 'maintainer-signed release tags'); any other word, which may name an
+# approval ('a maintainer-assigned accepted label'), keeps the hold.
+ARTIFACT_MODIFIER = (r'(?:unit|integration|e2e|end-to-end|regression|smoke|acceptance|gpg|release|required'
+                     r'|status|migration|api|ci|security|lint|branch|pr|coding|design|type|git)')
+ARTIFACT = (r'(?:' + ARTIFACT_MODIFIER + r'\s+){0,2}'
+            r'(?:commits?|tests?|labels?|code|docs?|documentation|changelogs?|titles?|descriptions?|tags?|files?'
+            r'|messages?|notes|scripts?|configs?|configuration|specs?|templates?|checklists?|criteria|rules?|checks?'
+            r'|settings?|protections?|workflows?|pipelines?|conventions?|standards?|fixtures?|screenshots?|sbom'
+            r'|changesets?|docstrings?|readmes?|benchmarks?|migrations?|schemas?|examples?|diagrams?|translations?'
+            r'|manifests?|lockfiles?|dependenc(?:y|ies)|versions?|stubs?|snapshots?|assets?)\b')
 REFUSAL = (r'(?:never|not|no|jamais|pas|do\s+not|don[’\x27]t)'
            r'(?:[\s,]+(?:yet|under|in\s+any|ever|again|at\s+all|whatsoever)\b[^.!?;:()]{0,60}'
-           r'|\s+without\s+[^.!?;:()]{0,40}?' + APPROVAL_OR_FIRST + r'[^.!?;:()]{0,30}'
+           r'|[\s,]+without\s+[^.!?;:()]{0,40}?(?:' + APPROVAL_OR_FIRST + r'|\b' + WAIT_POSSESSIVE + r'|\b' + DECIDER_ROLE
+           + r'(?!-(?:readable|friendly|like|sized|scale|level)\b)(?!-(?:signed|written|authored|assigned|defined'
+           r'|provided|configured|generated|tagged)\s+' + ARTIFACT + r')|\bexceptions?\b)[^.!?;:()]{0,30}'
            r'|\s+by\s+(?:an?\s+|the\s+|any\s+)?(?:agents?|bots?|ai|assistants?|automation)\b'
            r'|\s*[(,;\-–—]\s*(?:ask|check\s+with)\s+(?:me|us|the\s+owners?)\b[^.!?;:()]{0,30}\)?)?\s*[.!]?')
 # Waiting for someone who decides, as the whole answer to a merge label: '- Merging' above '- wait for
@@ -731,12 +751,24 @@ REFUSAL = (r'(?:never|not|no|jamais|pas|do\s+not|don[’\x27]t)'
 # 'do not wait for me' or 'no need to wait' does not start so. Only their decision may follow: '- wait
 # for a maintainer to publish the release' or '- then wait for the owner' names a step after the
 # merge, as 'After merging, wait for a maintainer to publish the release' does.
-WAIT_DECIDER = (r'(?:(?:always|first|please|just|(?:you\s+)?(?:must|should))\s+)?(?:wait\w*|attend\w*)\s+'
-                r'(?:for\s+|on\s+|upon\s+)?' + DECIDER_ROLE
-                + r'(?:[’\x27]s\s+(?:approv\w*|ok(?:ay)?|go|sign[ -]?off|decision|review)|\s+to\s+' + DECIDER_ACT + r')?'
-                r'(?:[\s,]+(?:first|before\s+(?:merging|any\s+merge|you\s+merge)))?\s*[.!]?')
+WAIT_TARGET = (r'(?:wait\w*|attend\w*)\s+(?:for\s+|on\s+|upon\s+)?(?:' + WAIT_POSSESSIVE + r'|' + DECIDER_ROLE
+               + r'(?:\s+to\s+(?:' + DECIDER_ACT + r'|decides?\b|reviews?\b))?)')
+WAIT_DECIDER = (r'(?:(?:always|first|please|just|(?:you\s+)?(?:must|should))\s+)?' + WAIT_TARGET
+                + r'(?:[\s,]+(?:first|always|before\s+(?:merging|any\s+merge|you\s+merge)))?\s*[.!]?')
 LABEL_REFUSAL = re.compile(MERGE_LABEL + r'\s*:\s*(?:' + REFUSAL + r'|' + WAIT_DECIDER + r')')
 LABEL_ITEM = re.compile(MERGE_LABEL + r'\s*:?')
+# A bare imperative step ('1. Merge PRs' above '2. Wait for the release manager') is followed by the
+# next step, not answered by it; a colon makes it a label again, and so does a policy noun ('- Merge
+# policy'). A refusal, a wait for the speaker or a wait that comes first still answers it ('- Merge PRs'
+# above '- never', '- wait for me' or '- wait for the owner first').
+STEP_ITEM = re.compile(r'merge\b(?!\s+polic)(?![^:]*:\W*$)', re.IGNORECASE)
+
+
+def next_step(text):
+    own = strip_markers(text).strip()
+    # 'please' and 'just' are courtesy; 'always' and 'must' make the wait a standing rule.
+    return bool(re.fullmatch(r'(?:(?:please|just)\s+)?' + WAIT_TARGET + r'\s*[.!]?', own)
+                and not re.search(FIRST_PERSON, own))
 BARE_REFUSAL = re.compile(REFUSAL)
 
 
@@ -785,10 +817,10 @@ FUNCTION_WORD = re.compile(LEAD_START + r'|of|it|them|to|a|an|do|if|as|so|long|o
 # '- Not applicable', '- [ ] Not needed' or '- Tests: not applicable' above '- Merge PRs with squash
 # after CI' (#73). Only list items: a table row or an item ending in a colon ('- Not needed:' above
 # '- merging PRs') still introduces what follows. 'Not supported' and 'not available' are not
-# statuses: they say what an agent may not do.
-# A label that names who it applies to is a rule, not a status: '- Agents: not supported' above
-# '- merging PRs'.
-STATUS_ITEM = re.compile(r'(?:\[[\sx]\]\s*)?(?:(?![^:]{0,40}\b(?:agents?|bots?|ai|assistants?|automation|claude|codex|copilot|llms?)\b)'
+# statuses: they say what an agent may not do, also under a label ('- Agents: not supported'). Nor is a
+# label that ends in an agent ('- Claude: not used'); '- AI review: not required' is a status.
+STATUS_ITEM = re.compile(r'(?:\[[\sx]\]\s*)?(?:(?![^:]{0,40}\b(?:agents?|bots?|ai|assistants?|automation|claude|codex'
+                         r'|copilot|llms?)(?:\s+(?:code|cli|use|usage|access|mode))?(?:\s*\([^):]*\))?[\W_]*:)'
                          r'[^\W\d_][^:]{0,40}:\s*)?(?:not|pas)\s+(?:applicable|needed|required'
                          r'|necessary|relevant|started|done|used|set|tested|planned|mandatory'
                          r'|nécessaires?|requise?s?|pertinente?s?|concernée?s?|applicables?)')
@@ -832,13 +864,40 @@ def dangling_lead(text):
     subject without its verb ('- No agent may'). A rule with its own object ('- No secrets',
     '- Never commit:') governs at most its own children and its direct later siblings (#73)."""
     plain = text.strip(' \t*_`:')
-    return bool(BARE_LEAD.fullmatch(plain) or DANGLING_POINTER.search(plain) or DANGLING_LEAD.fullmatch(plain))
+    negations = list(re.finditer(NEGATION, plain))
+    # A qualified negation names nothing only while every later word qualifies: '- Never do this
+    # lightly' and '- Never, ever commit secrets' name an object, so they reach their later siblings but
+    # not what is nested in them. A condition that ends the item keeps it a lead-in ('- Never, until
+    # further notice', '- Never, not even for hotfixes', '- Never on your own'), but not one an object
+    # follows ('- Never without green CI, deploy'). After an object, only a gate on the decision or on
+    # acting alone does ('- Do not do this before I approve', '- Never do any of this alone'), not
+    # '- Never do this before lunch'.
+    rest = plain[negations[-1].end():] if negations else ''
+    gate = LEAD_GATE.search(rest)
+    qualified = (all(FUNCTION_WORD.fullmatch(word) for word in re.findall(r'[^\W_]+', rest))
+                 or LEAD_CONDITION.fullmatch(rest)
+                 or gate and (gate.group('alone') or re.search(
+                     APPROVAL_WORD + r'|' + LEAD_DECISION + r'|' + CONDITION_SPEAKER.pattern, rest[gate.end():])))
+    return bool(BARE_LEAD.fullmatch(plain) and qualified or DANGLING_POINTER.search(plain)
+                or DANGLING_LEAD.fullmatch(plain))
 
 
-# A pointer that ends the lead-in: '- Do not do the following', '- Never do these'. 'Do not edit these
-# files' names its own object.
-DANGLING_POINTER = re.compile(NEGATION + r'.*\b(?:following|below|these|those|this|suivante?s?|ci[\s-]dessous|ces'
-                              r'|ceci)\W*$')
+LEAD_ALONE = (r'(?P<alone>alone|unattended|on\s+(?:your|their|its|one[’\x27]s)\s+own'
+              r'|by\s+(?:yourself|yourselves|themselves|itself))')
+LEAD_GATE = re.compile(r'\b(?:until|till|unless|before|without|pending|except|sans|avant|jusqu|sauf|' + LEAD_ALONE
+                       + r')\b')
+LEAD_DECISION = r'\b(?:ask\w*|told|tells?|says?|said|request\w*|instruct\w*|notice|demand\w*|ordre)\b'
+LEAD_CONDITION = re.compile(r'(?:\W*(?:under\s+any\s+circumstances?|in\s+any\s+case|ever))*\W*(?:not\s+|pas\s+)?'
+                            r'(?:until|till|unless|before|without|pending|except|even|regardless|(?:no\s+)?matter|whatever'
+                            r'|sans|avant|jusqu|sauf|même|' + LEAD_ALONE + r')\b[^,;:]*')
+
+
+# A pointer that ends the lead-in: '- Do not do the following', or a generic noun after a generic verb:
+# '- Never perform these actions', '- Do not do such things'. 'Do not edit these files' and 'Do not skip
+# these steps' name their own object.
+DANGLING_POINTER = re.compile(NEGATION + r'.*\b(?:(?:do|perform|take)\s+(?:the\s+)?(?:following|these|those|such)\s+'
+                              r'(?:actions?|steps?|things?|operations?|tasks?|activities)|following|below|these|those'
+                              r'|this|suivante?s?|ci[\s-]dessous|ces|ceci)\W*$')
 
 
 def terminated(block):
@@ -852,22 +911,99 @@ def terminated(block):
 # The parent must name an approval or the speaker's decision, so '- Until I say otherwise:' grants
 # instead. A parent or child that waives the approval ('- Without waiting for approval:', '- merge PRs
 # without waiting for them') grants too. A child that says it comes next ('- then merge with squash')
-# drops that word when the parent names who decides ('- Until I approve:'); otherwise it is read after
-# its parent, as written, so '- Requires one approval' above it stays a review count.
+# drops that word when the parent names who decides ('- Until I approve:', '- Requires approval from the
+# owner'); otherwise it is read after its parent, as written, so '- Requires one approval' above it stays a
+# review count.
 CONDITION_HOLD = re.compile(HOLD_FREE)
 SEQUENCE_START = re.compile(r'(?:and\s+)?(?:then|next|afterwards|puis|ensuite)\b[\s,]*')
-CONDITION_WORD = re.compile(APPROVAL_WORD + r'|\b(?:i|we)\s+(?:\w+\s+)?(?:confirm|agree|decide)\w*'
+# A decision verb names the condition ('- Until we agree:', 'Until I confirm in writing') unless what
+# follows names something else ('Until I decide otherwise'; for 'we', also a team process such as 'Until
+# we agree on a release process' or 'Until we confirm that the new CI works').
+CONDITION_WORD = re.compile(APPROVAL_WORD + r'|\bi\s+(?:\w+\s+)?(?:confirm|agree|decide)\w*\b(?!\s+otherwise\b)'
+                            r'|\bwe\s+(?:\w+\s+)?(?:confirm|agree|decide)\w*\b'
+                            r'(?!\s+(?:otherwise|that|whether|how|what|which|when|if|(?:on|upon)\s+(?:an?|the\s+(?:\w+\s+)?'
+                            r'(?:ci|process\w*|polic\w*|rules?|workflows?|tool\w*|approach|strategy|setup|config\w*'
+                            r'|pipelines?|model|conventions?)(?=[\W_]*$)))\b)'
                             r'|\bhear\s+(?:back\s+)?from\s+(?:me|us)\b')
-NO_APPROVAL = re.compile(r'\b(?:without\s+(?:(?:waiting|asking)\b|(?:(?:my|our|any|an|the|their)\s+)?'
-                         r'(?:approv\w*|sign[ -]?off|consent|permission)|(?:them|it)\s*[.!;]?$)'
-                         r'|unnecessary|needless|optional|needs?\s+none|no\s+need|not\s+(?:needed|required|necessary))')
-CONDITION_SPEAKER = re.compile(FIRST_PERSON + r'|\b' + DECIDER)
+# A waiver bound to the approval itself. Waiving anything else ('without waiting for CI', 'squash
+# optional') leaves the approval in force.
+APPROVAL_NOUN = r'(?:approv\w*|sign[ -]?off|consent|permission)'
+APPROVAL_DET = (r'(?:(?:my|our|any|an?|the|their|anyone[’\x27]s)\s+)?'
+                r'(?:(?:human|manual|explicit|final|prior|formal|written)\s+)?')
+# Waiting for the approval of someone who decides: 'without waiting for the owner's approval'.
+WAITED_APPROVAL = (APPROVAL_DET + r'(?:' + DECIDER_PREFIX + r'(?:' + DECIDER_BASE + r'|' + ROLE_BASE
+                   + r')(?:s?[’\x27]s?)?\s+)?' + APPROVAL_NOUN)
+# An approval named after another word is someone else's ('bot approval optional', 'no reviewer approval').
+OWN_APPROVAL = (r'(?:\b(?:my|our|any|the|their|human|manual|explicit|final|prior|formal|written)\s+|(?<![^\W\d_]\s)'
+                r'|\b' + DECIDER_PREFIX + DECIDER_BASE + r'(?:s?[’\x27]s?)?\s+)' + APPROVAL_NOUN)
+# Going without an approval waives only the speaker's or a decider's: 'without the owner's approval',
+# but not 'without reviewer approval'.
+NO_APPROVAL = (r'\bwithout\s+(?:(?:waiting|asking)\s+(?:(?:for|on)\s+)?' + WAITED_APPROVAL + r'|' + APPROVAL_DET
+               + r'(?:' + DECIDER_PREFIX + DECIDER_BASE + r'(?:s?[’\x27]s?)?\s+)?' + APPROVAL_NOUN + r')|(?:' + OWN_APPROVAL + r'|waiting(?:\s+(?:for|on)\s+' + WAITED_APPROVAL + r')?)'
+               r'(?:\s*[:(]\s*|\s+(?:(?:is|are)\s+)?)(?:unnecessary|needless|optional|not\s+(?:needed|required|necessary))'
+               r'|\bno\s+(?:need\s+(?:for|to\s+wait\s+for)\s+' + WAITED_APPROVAL + r'|' + APPROVAL_NOUN + r')')
+NO_APPROVAL_PARENT = re.compile(NO_APPROVAL)
+# A child may also point back at the approval its parent names: '- Approvals' above '- merge PRs
+# without waiting for them'.
+NO_APPROVAL_CHILD = re.compile(NO_APPROVAL + r'|\bwithout\s+(?:waiting|asking)\s+(?:(?:for|on)\s+)?(?:them|it|me|us)(?:\s+(?:first|again|beforehand))?\W*$'
+                               r'|\bneeds?\s+none\W*$')
+# Not waiting at all waives an approval nobody in particular gives once it has come ('- Once approved:'
+# above '- merge PRs without waiting for CI to rerun'), but not the speaker's own ('- Until I approve:')
+# nor one still pending ('- Until the release manager approves:').
+BARE_WAIT = re.compile(r'\bwithout\s+waiting\b|\bno\s+need\s+to\s+wait\b')
+# A parent that still waits for someone's approval: under one, a bare wait does not waive it ('- Until
+# the release manager approves:' above '- merge PRs without waiting for CI' holds). An approval nobody in
+# particular gives is waived as after 'Once approved' ('- Pending approval:', '- Until a reviewer
+# approves:', but not '- Until the reviewer approves:'), and 'Before approval' or 'Unless approval is
+# missing' does not wait for it.
+PENDING_PARENT = re.compile(r'\W*(?:until|till|pending|jusqu|tant\s+que|en\s+attendant)\b')
+NOBODY_PENDING = re.compile(r'^\W*(?:until|till|pending|jusqu\w*|tant\s+que|en\s+attendant)\W+(?:(?:an?|any|one|two)'
+                            r'\s+(?:\w+\s+)?reviewers?\b(?!.*\b(?:and|or|et|ou)\b)|(?:(?:the|an?|l|une?)\W*)?'
+                            r'(?:approv\w*|review\w*(?<!\bthe\sreviewer)(?<!\bthe\sreviewers)|validation|accord)\b(?!\s+(?:from|by|of|de|du|des|par)\b))')
+# A review count or an organisation's rule is not a decision a child's 'then' comes after: '- Requires
+# one approval from our team lead:' or '- Requires approval from our org owners:' above '- then merge'.
+# A count after the decider only adds to its decision ('- Requires approval from the owner, plus one
+# review:'). An indefinite or plural code owner is a review rule too ('- Requires approval from a code
+# owner:', '... from the code owners:'); any other code owner is a person ('the code owner', 'the
+# project's code owner'). The speaker or a decider joined after a count, an organisation or a code owner
+# decides as well ('- Requires one review and my approval:', '... and owner approval:', '- Requires
+# approval from a code owner and a maintainer:'); after a count or an organisation, only a decider
+# introduced as indefinite is part of it ('- Requires two approvals, one from a maintainer:').
+REVIEW_SCOPE = re.compile(r'\b(?:one|two|three|four|five|\d+|at\s+least|second|another|more)\s+(?:\w+\s+)?'
+                          r'(?:approv\w*|reviews?|sign[ -]?offs?)')
+TEAM_RULE = re.compile(r'\borg\w*\b')
+CODE_OWNER = re.compile(r'\bcode[ -]?owners\b|\bcodeowners\b|\b(?:an?|any|one|each|every)\s+code[ -]?owner\b')
+JOINED = re.compile(r'\b(?:and|plus|et)\b|[,&+]')
+INDEFINITE = re.compile(r'(?:an?|any|one|each|every|some|un|une)\s')
+INDEFINITE_BEFORE = re.compile(r'\b(?:an?|any|one|each|every|some|un|une)\s+$')
+# A parent whose approval has come already ('- After my approval:') names who decides, except a speaker
+# who only owns a listed thing the approval is about ('- After approval of my PRs:', '- After approval
+# in our tracker:', '- After approval, see my notes:').
+GIVEN_PARENT = re.compile(r'\W*(?:after|once|when|whenever|as\s+soon\s+as|après|une\s+fois|quand|lorsqu\w*|dès)\b')
+NOT_GIVER = re.compile(r'(?:(?<=\bof\s)|(?<=\bin\s)|(?<=\bon\s)|(?<=\bfor\s)|(?<=\bper\s)|(?<=\bsee\s)|(?<=\bwith\s))'
+                       r'(?:my|our)(?=\s+(?:\w+\s+)?(?:prs?|pull\s+requests?|branch(?:es)?|tracker|repos?|repositor(?:y|ies)'
+                       r'|changes?|code|work|commits?|issues?|projects?|modules?|notes?|experience|settings?|setup)\b)')
+# 'never without approval' or 'but never without asking me' refuses instead of waiving, and 'check with
+# me and merge PRs without asking me' contradicts itself, so the hold stays.
+WAIVER_REFUSED = re.compile(r'\b(?:never|not|no|nor|jamais|pas)\W*$')
+SPEAKER_ASKED = re.compile(r'\b(?:me|us)\b(?=.*\bwithout\s+(?:waiting|asking)\s+(?:(?:for|on)\s+)?(?:me|us)(?:\s+(?:first|again|beforehand))?\W*$)')
+
+
+def waived(pattern, text):
+    return not SPEAKER_ASKED.search(text) and any(
+        not WAIVER_REFUSED.search(text[:match.start()]) for match in pattern.finditer(text))
+# Who decides, for a child that says it comes next: the speaker or a named decider. 'We' and 'our'
+# decide ('- Until we approve:') unless they name a team process ('Requires one approval from our team',
+# 'we use CODEOWNERS').
+CONDITION_SPEAKER = re.compile(r'\bi\b(?!\.e\b)|\bj(?=[’\x27])|\b(?:me|my|mine|us|je|moi|mon|ma|mes|mien(?:ne)?s?)\b|\b' + DECIDER
+                               + r'|\b(?:we|our|nous|notre|nos)\b(?!\s+(?:use[sd]?|teams?|org\w*|process\w*|ci'
+                               r'|codeowners|polic\w*|rules?|équipes?|utilisons)\b(?!\s+(?:leads?|managers?|owners?)\b))')
 
 
 def condition_parent(text):
     """A short unterminated item without a merge word that names an approval it does not waive."""
     return (len(text) <= LEAD_LIMIT and not terminated(text) and not re.search(MERGE_WORD, text)
-            and bool(CONDITION_WORD.search(text)) and not NO_APPROVAL.search(text))
+            and bool(CONDITION_WORD.search(text)) and not NO_APPROVAL_PARENT.search(text))
 
 
 def conditioned(text, parent):
@@ -880,10 +1016,27 @@ def conditioned(text, parent):
         return False
     # '- merge PRs.' ends a bullet, not the sentence its parent completes.
     child = strip_markers(text).strip().rstrip('.;:!')
-    if NO_APPROVAL.search(child):
+    pending = PENDING_PARENT.match(strip_markers(parent))
+    if waived(NO_APPROVAL_CHILD, child):
+        return False
+    if (BARE_WAIT.search(child) and not CONDITION_SPEAKER.search(parent)
+            and not (pending and not NOBODY_PENDING.search(strip_markers(parent)))):
         return False
     sequence = SEQUENCE_START.match(child)
-    if sequence and CONDITION_SPEAKER.search(parent):
+    owners = list(CODE_OWNER.finditer(parent))
+    speakers = [match for match in CONDITION_SPEAKER.finditer(parent)
+                if not any(owner.start() <= match.start() < owner.end() for owner in owners)]
+    if GIVEN_PARENT.match(strip_markers(parent)):
+        speakers = [match for match in speakers if not NOT_GIVER.match(parent, match.start())]
+    # A count or a code owner after the decider only adds to its decision.
+    scopes = [match for match in (REVIEW_SCOPE.search(parent), *owners[:1])
+              if match and not (speakers and match.start() > speakers[0].start())]
+    rules = sorted((match.end(), match.re is CODE_OWNER) for match in (TEAM_RULE.search(parent), *scopes) if match)
+    decided = rules and any(
+        match.start() >= rules[-1][0] and JOINED.search(parent, rules[-1][0], match.start())
+        and (rules[-1][1] or not (INDEFINITE.match(match.group()) or INDEFINITE_BEFORE.search(parent, 0, match.start())))
+        for match in speakers)
+    if sequence and speakers and (pending or not rules or decided):
         child = child[sequence.end():]
     joined = parent + ' ' + child if SEQUENCE_START.match(child) else child + ' ' + parent
     return bool(CONDITION_HOLD.search(strip_markers(joined)))
@@ -1061,7 +1214,8 @@ def units(lines, hold_found, heading_found=lambda level: None):
             elif conditions and under_condition(text, conditions[-1][1]):
                 hold_found()  # '- Until I approve:' above '- merge PRs'
             elif (answers_label(text, parents[-1] if parents else None)
-                  or labelled and answers_label(text, sibling[1])):
+                  or labelled and not (STEP_ITEM.match(sibling[1]) and next_step(text))
+                  and answers_label(text, sibling[1])):
                 hold_found()  # '- Merges: never', '- Merging' above '- wait for me', nested or not
             pair = context(parents, near), text
             items.append((indent, text))
