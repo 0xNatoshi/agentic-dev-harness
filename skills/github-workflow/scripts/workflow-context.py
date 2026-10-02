@@ -1286,7 +1286,11 @@ def scan_text(text):
 
 
 def published_instructions(branch):
-    ref = 'refs/remotes/origin/' + branch
+    return instructions_at('refs/remotes/origin/' + branch)
+
+
+def instructions_at(ref):
+    """AGENTS.md of a local ref or commit, or None when its readable tree has none."""
     command('git', 'rev-parse', '--verify', ref + '^{tree}')
     entry = command('git', 'ls-tree', '-z', ref, '--', 'AGENTS.md')
     if not entry:
@@ -1296,6 +1300,348 @@ def published_instructions(branch):
     return command('git', 'show', ref + ':AGENTS.md')
 
 
+# Server-generated merge identity (issue #21). GitHub writes the squash/merge
+# commit itself. Its author name follows the merging account's profile display
+# name (observed, undocumented) and no REST, async, GraphQL or gh option sets it;
+# only the author email is selectable (GraphQL authorEmail, gh --author-email).
+# The committer is GitHub (web-flow). Local user.name/user.email evidence says
+# nothing about that commit: `identity` predicts it before merge and only
+# `published` proves it afterwards. The expected author name is the account login
+# unless the owner recorded another one in the published AGENTS.md. Names and
+# addresses read from the API or that file stay in memory; output is limited to
+# boolean facts, finding keys and the constructed noreply address.
+HANDLE = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}')
+PR_NUMBER = re.compile(r'[1-9][0-9]{0,9}')
+CREATED = re.compile(r'([0-9]{4})-([0-9]{2})-([0-9]{2})T')
+NOREPLY_CUTOFF = datetime.date(2017, 7, 18)
+# The noreply format and its cutoff are github.com facts; other hosts are unsupported.
+NOREPLY_HOST = 'github.com'
+# published reads one merge commit, so a rebase merge, which re-creates every PR commit, has no gated path.
+MERGE_METHODS = ('squash', 'merge')
+# One query reads the commit emails and the PR's server merge path: on a merge-queue branch gh pr merge
+# enables auto-merge or enqueues instead of merging, and an existing auto-merge request merges later.
+MERGE_EVIDENCE = ('query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name)'
+                  '{viewerPossibleCommitEmails viewerDefaultCommitEmail pullRequest(number:$number)'
+                  '{isMergeQueueEnabled isInMergeQueue autoMergeRequest{enabledAt}}}}')
+MERGE_PATH_KEYS = ('merge-queue-enabled', 'pr-in-merge-queue', 'auto-merge-enabled')
+# Any line containing the label, after compatibility normalization and with invisible characters, markup
+# and separators between its words ignored, must be the exact form, so a typo or a numbered, quoted, heading
+# or table variant blocks instead of being ignored; prose such as 'Merge author names follow...' has no
+# label colon and is not a setting.
+AUTHOR_NAME_LIKE = re.compile(r'merge[\W_]*author[\W_]*name[\W_]*:', re.IGNORECASE)
+# One space after a list marker: five or more spaces, or two tabs, would start a code block in the item.
+AUTHOR_NAME = re.compile(r'(?:[-*+] )?Merge author name: `([^`]+)`(?: +\([^()]*\))?\.?')
+AUTHOR_NAME_LIMIT = 100
+
+
+def api_json(host, endpoint, label):
+    try:
+        value = json.loads(command('gh', 'api', '--hostname', host, endpoint))
+    except ValueError as error:
+        raise EvidenceError('Unreadable ' + label + ' response') from error
+    if not isinstance(value, dict):
+        raise EvidenceError('Unexpected ' + label + ' response')
+    return value
+
+
+def field(record, key, kind, label):
+    value = record.get(key) if isinstance(record, dict) else None
+    # Exact type: a JSON boolean is not an account id.
+    if type(value) is not kind:
+        raise EvidenceError('Unexpected ' + label + ' response')
+    return value
+
+
+def identity_arguments(args, method=False):
+    """Validate before any read: owner/repository, PR number, handle and, for identity, the merge method."""
+    if len(args) != (5 if method else 4):
+        raise EvidenceError('Expected owner, repository, PR number, handle' + (' and merge method' if method else ''))
+    owner, name, number, handle = args[:4]
+    if not PR_NUMBER.fullmatch(number):
+        raise EvidenceError('Invalid PR number')
+    if not HANDLE.fullmatch(handle):
+        raise EvidenceError('Invalid GitHub handle')
+    if method and args[4] not in MERGE_METHODS:
+        raise EvidenceError('Merge method must be squash or merge; a rebase merge has no gated identity path')
+    return owner + '/' + name, number, handle
+
+
+def identity_origin(expected):
+    host, full, branch = origin_context(expected)
+    if host != NOREPLY_HOST:
+        raise EvidenceError('Server-author checks support only ' + NOREPLY_HOST + ' origins')
+    return host, full, branch
+
+
+def default_base(pull, branch):
+    """Both modes judge the author under the default branch's policy, which a merge elsewhere never met."""
+    if field(pull.get('base'), 'ref', str, 'pull request') != branch:
+        raise EvidenceError('Server-author checks support only pull requests into the default branch')
+
+
+# Text after which Markdown rendering needs a full parser: a fence or code span delimiter, an unpaired
+# backtick, HTML or a comment, math, front matter or a thematic break, or an indented line.
+UNCLEAR = re.compile(r'``|~~~|<|\$|^---')
+INDENTED = re.compile(r' {0,3}\t| {4}')
+
+
+def setting_lines(text):
+    """(line, hidden) for each line outside managed blocks; hidden means its rendering is not known.
+
+    Only lines in the file's leading clear region, before any line matching
+    UNCLEAR or holding an odd number of backticks, are known to render as
+    written. Tracking what a fence, code span, HTML block or comment hides
+    depends on containers such as list items, so every later line counts as
+    hidden, as does an indented line, which may be code. A line must also be
+    its own block, between blank lines or the file's edges: a link reference
+    title, code span, lazy continuation or setext underline cannot cross a
+    blank line. The managed block's start marker is a comment, so its content
+    is never read here.
+    """
+    lines = text.split('\n')
+    # Markdown's blank line holds only spaces and tabs; str.strip() would also drop NBSP or a form feed.
+    blank = [line.strip(' \t') == '' for line in lines]
+    clear = True
+    managed = False
+    for index, line in enumerate(lines):
+        # A line's own markers matter only for later lines; the exact-form check rejects them on the line.
+        hidden = (not clear or INDENTED.match(line) is not None
+                  or (index > 0 and not blank[index - 1])
+                  or (index + 1 < len(lines) and not blank[index + 1]))
+        clear = clear and (blank[index] or (not UNCLEAR.search(line) and not INDENTED.match(line)
+                                            and line.count('`') % 2 == 0))
+        if START.match(line):
+            managed = True
+        elif END.match(line):
+            managed = False
+        elif not managed:
+            yield line, hidden
+
+
+def configured_author_name(text):
+    """The owner's recorded merge author name in an AGENTS.md text, or None for the account login.
+
+    Callers pass only published text, outside managed blocks: the default branch
+    before merge, the merge commit's first parent after it. A PR therefore cannot
+    authorize its own alias, and the PR recording one meets the profile-name
+    decision. A PR changing an existing alias passes only while the profile still
+    matches the old one, after which later merges block until profile and line
+    agree, so the change still needs the owner. Malformed or conflicting lines,
+    and lines after the leading clear region, block.
+    """
+    if text is None:
+        return None
+    # GitHub's renderer drops a leading BOM, so a fence on the first line still opens.
+    text = text[1:] if text.startswith('\ufeff') else text
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    names = set()
+    for line, hidden in setting_lines(text):
+        folded = ''.join(c for c in unicodedata.normalize('NFKC', line) if not invisible(c))
+        if not AUTHOR_NAME_LIKE.search(folded):
+            continue
+        if hidden:
+            raise EvidenceError('Merge author name line must stand alone between blank lines above all code, HTML '
+                                'and comments in published AGENTS.md')
+        line = line.strip()
+        # A second label, even inside the note, would show two names for one setting.
+        found = AUTHOR_NAME.fullmatch(line) if len(AUTHOR_NAME_LIKE.findall(folded)) == 1 else None
+        name = found.group(1) if found else ''
+        # A profile display name is printable text; '<name>' is a template placeholder, not a decision.
+        if (not name or name != name.strip() or len(name) > AUTHOR_NAME_LIMIT or '<' in name or '>' in name
+                or '@' in name or any(not (c == ' ' or c.isprintable()) or invisible(c) for c in name)):
+            raise EvidenceError('Malformed merge author name line in published AGENTS.md')
+        names.add(name)
+    if len(names) > 1:
+        raise EvidenceError('Conflicting merge author names in published AGENTS.md')
+    return names.pop() if names else None
+
+
+def same_ascii(left, right):
+    """Equal up to ASCII case only: Unicode casefold would equate lookalikes such as U+FB01 and 'fi'."""
+    return left.isascii() and right.isascii() and left.lower() == right.lower()
+
+
+def handle_account(host, handle):
+    account = api_json(host, 'users/' + handle, 'account')
+    login = field(account, 'login', str, 'account')
+    field(account, 'id', int, 'account')
+    if not same_ascii(login, handle):
+        raise EvidenceError('Account lookup returned another login')
+    field(account, 'created_at', str, 'account')
+    return account
+
+
+def noreply(account):
+    found = CREATED.match(account['created_at'])
+    if not found:
+        raise EvidenceError('Unexpected account response')
+    if datetime.date(*map(int, found.groups())) <= NOREPLY_CUTOFF:
+        raise EvidenceError('legacy account: confirm the noreply address in account settings')
+    return '{}+{}@users.noreply.github.com'.format(account['id'], account['login'])
+
+
+def merge_evidence(host, full, number):
+    """Possible and default commit emails, then the queue and auto-merge facts of the PR."""
+    owner, name = full.split('/')
+    try:
+        value = json.loads(command('gh', 'api', '--hostname', host, 'graphql', '-f', 'owner=' + owner,
+                                   '-f', 'name=' + name, '-F', 'number=' + number, '-f', 'query=' + MERGE_EVIDENCE))
+    except ValueError as error:
+        raise EvidenceError('Unreadable commit-email and merge-path response') from error
+    if not isinstance(value, dict) or value.get('errors'):
+        raise EvidenceError('Unexpected commit-email and merge-path response')
+    data = value.get('data')
+    repository = data.get('repository') if isinstance(data, dict) else None
+    if not isinstance(repository, dict):
+        raise EvidenceError('Unexpected commit-email and merge-path response')
+    possible = repository.get('viewerPossibleCommitEmails')
+    default = repository.get('viewerDefaultCommitEmail')
+    if possible is not None and not (isinstance(possible, list) and all(isinstance(e, str) for e in possible)):
+        raise EvidenceError('Unexpected commit-email response')
+    pull = repository.get('pullRequest')
+    auto = pull.get('autoMergeRequest', False) if isinstance(pull, dict) else False
+    # Absent, null or mistyped queue facts are not evidence of a direct merge.
+    if auto is not None and not isinstance(auto, dict):
+        raise EvidenceError('Unexpected merge-path response')
+    path = (field(pull, 'isMergeQueueEnabled', bool, 'merge-path'), field(pull, 'isInMergeQueue', bool, 'merge-path'),
+            auto is not None)
+    return possible, default if isinstance(default, str) else None, path
+
+
+def report(mode, facts, findings):
+    """Print booleans and finding keys only; 2 if indeterminate, else 1 if blocked."""
+    for key, value in facts:
+        print(mode + ': ' + key + '=' + ('true' if value else 'false'), file=sys.stderr)
+    for kind, key in findings:
+        print(mode + ': ' + kind + '=' + key, file=sys.stderr)
+    kinds = {kind for kind, _ in findings}
+    return 2 if 'indeterminate' in kinds else 1 if 'blocker' in kinds else 0
+
+
+def identity_mode(args):
+    """Pre-merge prediction of the server author; exit 0 prints only the noreply."""
+    expected, number, handle = identity_arguments(args, method=True)
+    host, full, branch = identity_origin(expected)
+    configured = configured_author_name(published_instructions(branch))
+    viewer = api_json(host, 'user', 'viewer')
+    viewer_id = field(viewer, 'id', int, 'viewer')
+    account = handle_account(host, handle)
+    pull = api_json(host, 'repos/' + full + '/pulls/' + number, 'pull request')
+    default_base(pull, branch)
+    author_id = field(pull.get('user'), 'id', int, 'pull request')
+    state = field(pull, 'state', str, 'pull request')
+    merged = field(pull, 'merged', bool, 'pull request')
+    possible, default, path = merge_evidence(host, full, number)
+    address = noreply(account)
+    # The squash author name is the merging account's own profile name; the public users/<handle> record may lag.
+    name = viewer.get('name')
+    author = account['login'] if configured is None else configured
+
+    facts = [
+        ('merger-is-handle', viewer_id == account['id']),
+        ('pr-open', state == 'open' and not merged),
+        # Undocumented which identity authors the squash when these differ.
+        ('pr-author-is-merger', author_id == viewer_id),
+    ]
+    findings = [('blocker', key) for key, value in facts[:2] if not value]
+    if not facts[2][1]:
+        findings.append(('indeterminate', 'pr-author-is-merger'))
+    facts.append(('author-name-configured', configured is not None))
+    if isinstance(name, str) and name:
+        # Exact, case included: published compares the squash author name the same way.
+        facts.append(('profile-name-is-expected', name == author))
+        if name != author:
+            findings.append(('blocker', 'profile-name'))
+    else:
+        findings.append(('indeterminate', 'profile-name-unset'))
+    # The default gh token scopes return an empty list, which shows nothing. The ID noreply of an account
+    # created after the cutoff is a documented address of that account; --author-email pins it, and GitHub
+    # has been observed to refuse the merge, not to substitute, when it rejects the requested author email.
+    # published then proves the result. A readable list without the noreply is contrary evidence and blocks.
+    if not possible:
+        findings.append(('warning', 'possible-commit-emails-unreadable'))
+    else:
+        allowed = any(same_ascii(email, address) for email in possible)
+        facts.append(('noreply-is-possible-commit-email', allowed))
+        if not allowed:
+            findings.append(('blocker', 'noreply-not-possible-commit-email'))
+    is_default = default is not None and same_ascii(default, address)
+    facts.append(('default-commit-email-is-noreply', is_default))
+    if not is_default:
+        # Neutralized by the pinned --author-email; reported for transparency.
+        findings.append(('warning', 'default-commit-email'))
+    # Exit 0 covers only a direct merge by the next command; a queued or auto merge has an undocumented author.
+    merge_path = list(zip(MERGE_PATH_KEYS, path))
+    facts.extend(merge_path)
+    findings.extend(('indeterminate', key) for key, value in merge_path if value)
+    code = report('identity', facts, findings)
+    if ('blocker', 'profile-name') in findings:
+        print('identity: decision required: the server-generated merge author name follows the profile display '
+              'name, which differs from the expected author name, case included: the account login, or the name the '
+              'owner recorded as a standalone `Merge author name:` line in the published AGENTS.md above the managed '
+              'block. The merge stays blocked until they match or the user decides.', file=sys.stderr)
+    if not possible:
+        print('identity: possible commit emails are unreadable or empty, as under the default gh token scopes; the '
+              'pinned --author-email and the published check cover the noreply.', file=sys.stderr)
+    if any(path):
+        print('identity: a merge queue or auto-merge would merge this PR instead of the gated command, with an '
+              'undocumented author; no gated path exists while either applies.', file=sys.stderr)
+    if code == 0:
+        print(address)
+    return code
+
+
+def published_mode(args):
+    """Post-merge proof: compare the PR's merge commit with the handle; report booleans and finding keys."""
+    expected, number, handle = identity_arguments(args)
+    host, full, branch = identity_origin(expected)
+    pull = api_json(host, 'repos/' + full + '/pulls/' + number, 'pull request')
+    default_base(pull, branch)
+    sha = pull.get('merge_commit_sha')
+    if pull.get('merged') is not True or not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}', sha):
+        raise EvidenceError('Pull request is not merged or has no merge commit')
+    account = handle_account(host, handle)
+    commit = api_json(host, 'repos/' + full + '/commits/' + sha, 'commit')
+    if commit.get('sha') != sha:
+        raise EvidenceError('Unexpected commit response')
+    parents = commit.get('parents')
+    parent = parents[0].get('sha') if isinstance(parents, list) and parents and isinstance(parents[0], dict) else None
+    if not isinstance(parent, str) or not re.fullmatch('[0-9a-f]{40}', parent):
+        raise EvidenceError('Unexpected commit response')
+    # Judge the merge under the policy it was gated by: the base it merged into, not the default branch now,
+    # which already holds this PR's own AGENTS.md change. The merge must have been fetched.
+    configured = configured_author_name(instructions_at(parent))
+    details = commit.get('commit')
+    author = details.get('author') if isinstance(details, dict) else None
+    name = field(author, 'name', str, 'commit')
+    email = field(author, 'email', str, 'commit')
+    committer = details.get('committer')
+    field(committer, 'name', str, 'commit')
+    address = noreply(account)
+    # An unlinked author is an empty object or null: its login and id are absent.
+    user = commit.get('author') if isinstance(commit.get('author'), dict) else {}
+    login = user.get('login')
+    facts = [
+        ('author-name-is-expected', name == (account['login'] if configured is None else configured)),
+        ('author-email-is-noreply', same_ascii(email, address)),
+        ('author-login-is-handle', isinstance(login, str) and same_ascii(login, account['login'])),
+        ('author-id-matches', type(user.get('id')) is int and user['id'] == account['id']),
+    ]
+    findings = [('blocker', key) for key, value in facts if not value]
+    # The committer email is a GitHub service address: never read or compare it.
+    web_flow = (isinstance(commit.get('committer'), dict) and commit['committer'].get('login') == 'web-flow'
+                and committer['name'] == 'GitHub')
+    facts.append(('committer-is-web-flow', web_flow))
+    if not web_flow:
+        findings.append(('indeterminate', 'committer-is-web-flow'))
+    verification = details.get('verification')
+    verified = isinstance(verification, dict) and verification.get('verified') is True
+    facts.append(('signature-verified', verified))
+    if not verified:
+        findings.append(('warning', 'signature-verified'))
+    return report('published', facts, findings)
+
+
 def main():
     mode, *args = sys.argv[1:]
     if mode == 'origin':
@@ -1303,8 +1649,17 @@ def main():
             raise EvidenceError('origin expects at most owner/repository')
         print('\t'.join(origin_context(args[0] if args else None)))
         return 0
+    if mode in ('identity', 'published'):
+        try:
+            return identity_mode(args) if mode == 'identity' else published_mode(args)
+        except (EvidenceError, OSError, UnicodeError, ValueError):
+            raise
+        except Exception as error:
+            # Exit 1 is a user decision in these modes: any other failure must block as indeterminate.
+            raise EvidenceError('Unexpected ' + mode + ' evidence failure') from error
     if mode != 'suspension' or not args:
-        raise EvidenceError('Expected origin or suspension <all applicable instruction files>')
+        raise EvidenceError('Expected origin, suspension <all applicable instruction files>, '
+                            'identity <owner> <repo> <pr> <handle> <method> or published <owner> <repo> <pr> <handle>')
     _, _, branch = origin_context()
     inputs = []
     for name in args:

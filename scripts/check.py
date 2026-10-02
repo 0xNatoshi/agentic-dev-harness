@@ -239,7 +239,15 @@ def main():
         check_emails(relative, python_text(text) if path.suffix == ".py" else text)
         require(not re.search(r"(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{24,}|-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----)", text), f"Possible credential: {relative}")
         if path.suffix == ".py":
-            ast.parse(text, filename=relative)
+            tree = ast.parse(text, filename=relative)
+            # A second module-level binding silently replaces the first for every earlier caller (#21).
+            bound = [target.id for node in tree.body if isinstance(node, (ast.Assign, ast.AnnAssign))
+                     for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                     if isinstance(target, ast.Name)]
+            bound += [node.name for node in tree.body
+                      if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+            duplicates = sorted({name for name in bound if bound.count(name) > 1})
+            require(not duplicates, f"Module-level name bound twice in {relative}: {', '.join(duplicates)}")
         elif path.suffix == ".toml":
             tomllib.loads(text)
         elif path.suffix == ".json":

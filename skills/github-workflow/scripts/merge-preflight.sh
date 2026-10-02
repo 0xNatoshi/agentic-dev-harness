@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Read-only checks. Exit 0: clear; 1: blocker; 2: unreadable or invalid evidence.
+# Modes: origin, suspension, reviews, pages, identity (predicted server-generated
+# merge author before merge; exit 0 prints only the noreply) and published (the
+# merged PR's commit author and committer, as booleans and finding keys).
 # Requires Bash, awk, Git, gh and Python 3.8+; no external jq.
 set -u
 fail() { printf '%s\n' "$*" >&2; exit 2; }
-mode=${1:-}; shift || fail 'Expected origin, suspension, reviews or pages.'
+mode=${1:-}; shift || fail 'Expected origin, suspension, reviews, pages, identity or published.'
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || fail 'Cannot locate skill scripts.'
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; assert sys.version_info >= (3,8)' 2>/dev/null; then
@@ -16,7 +19,8 @@ else
   fail 'Python 3.8+ is required for Unicode/origin checks; install Python 3 on Windows and reopen Git Bash.'
 fi
 case "$mode" in
-  origin|suspension)
+  origin|suspension|identity|published)
+    case "$mode" in identity|published) command -v gh >/dev/null 2>&1 || fail 'GitHub CLI (gh) is required.' ;; esac
     "${python_cmd[@]}" "$script_dir/workflow-context.py" "$mode" "$@"
     exit $?
     ;;
@@ -29,7 +33,7 @@ case "$mode" in
     response=$(mktemp) || fail 'Cannot allocate response file.'
     trap 'rm -f "$response"' EXIT
     ;;
-  *) fail 'Expected origin, suspension, reviews or pages.' ;;
+  *) fail 'Expected origin, suspension, reviews, pages, identity or published.' ;;
 esac
 
 if [ "$mode" = reviews ]; then

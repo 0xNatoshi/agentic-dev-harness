@@ -320,6 +320,8 @@ class SourceCheckTests(unittest.TestCase):
         ]
         snippets.extend("value = " + quote + imported + "\ntext\n" + quote for quote in ("'''", '"""'))
         snippets.append('target.write_text(f"' + imported + r'\n\n```bash\n{command}\n```\n", encoding="utf-8")')
+        # Distinct names: the source gate rejects a module-level name bound twice.
+        snippets = [snippet.replace("value = ", "value%d = " % index, 1) for index, snippet in enumerate(snippets)]
         with tempfile.TemporaryDirectory(prefix="harness-python-import-") as directory:
             root = Path(directory)
             source = self.copy_source(root)

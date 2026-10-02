@@ -25,6 +25,7 @@ from pathlib import Path
 import sys
 
 args = sys.argv[1:]
+host = os.getenv('FIXTURE_HOST', 'github.example')
 with Path(os.environ['FIXTURE_LOG']).open('a', encoding='utf-8') as log:
     log.write(json.dumps(args) + '\\n')
 if args[:2] == ['repo', 'view']:
@@ -34,7 +35,7 @@ if args[:2] == ['repo', 'view']:
     full = 'fixture/repo' if explicit else os.getenv('FIXTURE_SELECTED', 'fixture/repo')
     print(json.dumps({
         'nameWithOwner': full,
-        'url': 'https://github.example/' + full,
+        'url': 'https://' + host + '/' + full,
         'defaultBranchRef': {'name': 'main'},
     }))
     sys.exit(0)
@@ -43,11 +44,84 @@ if not args or args[0] != 'api' or '--repo' in args:
 if '--hostname' not in args:
     sys.exit(91)
 index = args.index('--hostname')
-if args[index + 1] != 'github.example':
+if args[index + 1] != host:
     sys.exit(92)
 del args[index:index + 2]
+if os.getenv('FIXTURE_API_FAIL') == args[1]:
+    sys.exit(1)
+env = os.getenv
+if args[1] == 'graphql' and any('viewerPossibleCommitEmails' in arg for arg in args):
+    if env('FIXTURE_GRAPHQL_ERRORS') == '1':
+        print(json.dumps({'data': None, 'errors': [{'message': 'person@example.invalid'}]}))
+        sys.exit(0)
+    if env('FIXTURE_GRAPHQL_DATA') is not None:
+        print(json.dumps({'data': env('FIXTURE_GRAPHQL_DATA')}))
+        sys.exit(0)
+    possible = env('FIXTURE_POSSIBLE', '1001+octo-fixture@users.noreply.github.com')
+    possible = None if possible == '__null__' else possible.split(',')
+    shape = env('FIXTURE_POSSIBLE_SHAPE')
+    payload = {'data': {'repository': {
+        'viewerPossibleCommitEmails': possible if shape is None else json.loads(shape),
+        'viewerDefaultCommitEmail': env('FIXTURE_DEFAULT_EMAIL', '1001+octo-fixture@users.noreply.github.com'),
+    }}}
+    # Like GraphQL, the PR's merge-path fields appear only when the query selects them for the typed number.
+    if any('pullRequest(number:$number)' in arg for arg in args):
+        if args[args.index('-F') + 1:args.index('-F') + 2] != ['number=7']:
+            sys.exit(94)
+        auto = {'enabledAt': '2026-01-01T00:00:00Z'} if env('FIXTURE_AUTO_MERGE') == 'true' else None
+        pull = {'isMergeQueueEnabled': env('FIXTURE_MERGE_QUEUE') == 'true',
+                'isInMergeQueue': env('FIXTURE_IN_QUEUE') == 'true', 'autoMergeRequest': auto}
+        pull_shape = env('FIXTURE_MERGE_PATH_SHAPE')
+        payload['data']['repository']['pullRequest'] = pull if pull_shape is None else json.loads(pull_shape)
+    if env('FIXTURE_GRAPHQL_ERRORS') == 'partial':
+        payload['errors'] = [{'message': 'person@example.invalid'}]
+    print(json.dumps(payload))
+    sys.exit(0)
 if args[1] == 'graphql':
     print('false\\t0')
+    sys.exit(0)
+# Nesting beyond the JSON decoder's recursion limit raises RecursionError, not ValueError.
+DEEP = '[' * 100000
+if args[1] == 'user':
+    if env('FIXTURE_VIEWER_SHAPE') == 'deep':
+        print(DEEP)
+        sys.exit(0)
+    name = env('FIXTURE_PROFILE_NAME', 'octo-fixture')
+    print(json.dumps({'login': env('FIXTURE_VIEWER', 'octo-fixture'), 'id': json.loads(env('FIXTURE_VIEWER_ID', '1001')),
+                      'name': {'__null__': None, '__empty__': ''}.get(name, name)}))
+    sys.exit(0)
+if args[1] == 'users/octo-fixture':
+    print(json.dumps({'login': env('FIXTURE_ACCOUNT_LOGIN', 'octo-fixture'),
+                      'id': json.loads(env('FIXTURE_ACCOUNT_ID', '1001')),
+                      'created_at': env('FIXTURE_CREATED', '2020-01-01T00:00:00Z'),
+                      'name': env('FIXTURE_PUBLIC_NAME', 'octo-fixture')}))
+    sys.exit(0)
+MERGE_SHA = '0123456789abcdef' * 2 + '01234567'
+if args[1] == 'repos/fixture/repo/pulls/7':
+    if env('FIXTURE_PR_SHAPE') is not None:
+        print({'list': '[]', 'deep': DEEP}[env('FIXTURE_PR_SHAPE')])
+        sys.exit(0)
+    print(json.dumps({'user': {'login': 'octo-fixture', 'id': int(env('FIXTURE_PR_AUTHOR_ID', '1001'))},
+                      'state': env('FIXTURE_PR_STATE', 'open'), 'merged': env('FIXTURE_PR_MERGED') == 'true',
+                      'base': {'ref': env('FIXTURE_PR_BASE', 'main')},
+                      'merge_commit_sha': env('FIXTURE_MERGE_SHA', MERGE_SHA)}))
+    sys.exit(0)
+if args[1] == 'repos/fixture/repo/commits/' + MERGE_SHA:
+    login = env('FIXTURE_COMMIT_LOGIN', 'octo-fixture')
+    author = {'__none__': {}, '__null__': None}.get(login, {'login': login, 'id': int(env('FIXTURE_COMMIT_ID', '1001'))})
+    # The committer email is deliberately absent: the check must never read it.
+    print(json.dumps({
+        'sha': env('FIXTURE_COMMIT_SHA', MERGE_SHA),
+        'parents': [] if env('FIXTURE_PARENT') == '__none__' else [{'sha': env('FIXTURE_PARENT')}],
+        'commit': {
+            'author': {'name': env('FIXTURE_COMMIT_NAME', 'octo-fixture'),
+                       'email': env('FIXTURE_COMMIT_EMAIL', '1001+octo-fixture@users.noreply.github.com')},
+            'committer': {'name': env('FIXTURE_COMMITTER_NAME', 'GitHub')},
+            'verification': {'verified': env('FIXTURE_VERIFIED', 'true') == 'true'},
+        },
+        'author': author,
+        'committer': {'login': env('FIXTURE_COMMITTER_LOGIN', 'web-flow')},
+    }))
     sys.exit(0)
 if args[1] != 'repos/fixture/repo/pages':
     sys.exit(93)
@@ -67,6 +141,9 @@ class Case:
     environment: tuple[tuple[str, str], ...] = ()
     setup: str | None = None
     api_calls: int = 0
+    stderr: tuple[str, ...] = ()
+    arguments: tuple[str, ...] = ("7", "octo-fixture")
+    stdout: str | None = None
 
 
 TEXT_CASES = (
@@ -1299,11 +1376,356 @@ ROUTING_CASES = (
     Case("review routing", 0, mode="reviews", api_calls=1),
     Case("push/fetch mismatch", 2, mode="pages", setup="push_mismatch"),
     Case("published-only veto", 1, setup="published_wait"),
-    Case("unreadable published ref", 2, setup="missing_published_ref"),
+    Case("unreadable published ref", 2, setup="missing_published_ref", stderr=("Command failed: git rev-parse",)),
+    # The recorded decision line must not read as a merge hold.
+    Case("merge author name line clears suspension", 0, "- Merge author name: `Fixture Alias` (owner decision on #21, 2026-01-01)\n"),
 )
-ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 995 or len({case.name for case in ALL_CASES}) != 995:
-    raise RuntimeError("Merge fixture inventory must contain 995 unique cases")
+# Server-generated merge author (#21). Fixture values are neutral; PRIVATE values
+# stand for a personal display name or address and must never be echoed.
+NOREPLY = "1001+octo-fixture@users.noreply.github.com"
+PRIVATE = ("Fixture Alias", "Other Alias", "person@example.invalid")
+VERIFIED_LOCAL_AUTHOR = tuple(
+    (f"GIT_{role}_{part}", value)
+    for role in ("AUTHOR", "COMMITTER")
+    for part, value in (("NAME", "octo-fixture"), ("EMAIL", NOREPLY))
+)
+MERGED = (("FIXTURE_PR_STATE", "closed"), ("FIXTURE_PR_MERGED", "true"))
+MERGE_SHA = "0123456789abcdef" * 2 + "01234567"
+ALIAS = "- Merge author name: `Fixture Alias` (owner decision on #21, 2026-01-01)\n"
+MANAGED = "<!-- github-workflow:start v6.4 -->\n- Merge author name: `Fixture Alias` (owner decision on #21, 2026-01-01)\n<!-- github-workflow:end -->\n"
+
+
+# The noreply format is a github.com fact, so the identity fixtures use that origin host.
+def identity_case(name, expected, *environment, stderr=(), api_calls=4, host="github.com", **options):
+    stderr = (stderr,) if isinstance(stderr, str) else stderr
+    options.setdefault("arguments", ("7", "octo-fixture", "squash"))
+    return Case(name, expected, mode="identity", environment=(("FIXTURE_HOST", host), *environment), stderr=stderr,
+                api_calls=api_calls, **options)
+
+
+def published_case(name, expected, *environment, stderr=(), api_calls=3, host="github.com", **options):
+    stderr = (stderr,) if isinstance(stderr, str) else stderr
+    return Case(name, expected, mode="published", environment=(("FIXTURE_HOST", host), *MERGED, *environment),
+                stderr=stderr, api_calls=api_calls, **options)
+
+
+IDENTITY_CASES = (
+    identity_case("identity compliant", 0, stderr=("identity: profile-name-is-expected=true",
+                  "identity: merge-queue-enabled=false", "identity: pr-in-merge-queue=false",
+                  "identity: auto-merge-enabled=false")),
+    # gh pr merge enqueues or enables auto-merge on a merge-queue branch; neither author is documented.
+    identity_case("identity merge queue enabled", 2, ("FIXTURE_MERGE_QUEUE", "true"),
+                  stderr=("identity: indeterminate=merge-queue-enabled", "no gated path exists")),
+    identity_case("identity PR in merge queue", 2, ("FIXTURE_IN_QUEUE", "true"),
+                  stderr=("identity: indeterminate=pr-in-merge-queue", "no gated path exists")),
+    identity_case("identity auto-merge enabled", 2, ("FIXTURE_AUTO_MERGE", "true"),
+                  stderr=("identity: indeterminate=auto-merge-enabled", "no gated path exists")),
+    identity_case("identity merge path null", 2, ("FIXTURE_MERGE_PATH_SHAPE", "null"), stderr="merge-path response"),
+    identity_case("identity merge queue flag not boolean", 2, ("FIXTURE_MERGE_PATH_SHAPE", json.dumps(
+                  {"isMergeQueueEnabled": "false", "isInMergeQueue": False, "autoMergeRequest": None})),
+                  stderr="merge-path response"),
+    identity_case("identity in-queue flag missing", 2, ("FIXTURE_MERGE_PATH_SHAPE", json.dumps(
+                  {"isMergeQueueEnabled": False, "autoMergeRequest": None})), stderr="merge-path response"),
+    # An absent auto-merge request is not a null one.
+    identity_case("identity auto-merge request missing", 2, ("FIXTURE_MERGE_PATH_SHAPE", json.dumps(
+                  {"isMergeQueueEnabled": False, "isInMergeQueue": False})), stderr="merge-path response"),
+    identity_case("identity auto-merge request not an object", 2, ("FIXTURE_MERGE_PATH_SHAPE", json.dumps(
+                  {"isMergeQueueEnabled": False, "isInMergeQueue": False, "autoMergeRequest": True})),
+                  stderr="merge-path response"),
+    # A verified local author never covers the server-generated squash author.
+    identity_case("identity verified local author with profile alias", 1, *VERIFIED_LOCAL_AUTHOR,
+                  ("FIXTURE_PROFILE_NAME", "Fixture Alias"), setup="local_author_verified",
+                  stderr=("identity: blocker=profile-name", "differs from the expected author name")),
+    identity_case("identity viewer is not handle", 1, ("FIXTURE_VIEWER", "other-account"), ("FIXTURE_VIEWER_ID", "2002"),
+                  ("FIXTURE_PR_AUTHOR_ID", "2002"), stderr="identity: blocker=merger-is-handle"),
+    identity_case("identity PR author differs from merger", 2, ("FIXTURE_PR_AUTHOR_ID", "2002"),
+                  stderr="identity: indeterminate=pr-author-is-merger"),
+    identity_case("identity profile name unset", 2, ("FIXTURE_PROFILE_NAME", "__null__"),
+                  stderr="identity: indeterminate=profile-name-unset"),
+    # published compares the author name exactly, so a case variant must not clear here.
+    identity_case("identity profile name case variant", 1, ("FIXTURE_PROFILE_NAME", "Octo-Fixture"),
+                  stderr="identity: blocker=profile-name"),
+    identity_case("identity profile name lookalike", 1, ("FIXTURE_PROFILE_NAME", "octo-ﬁxture"),
+                  stderr="identity: blocker=profile-name"),
+    identity_case("identity unsupported host", 2, api_calls=0, host="github.example",
+                  stderr="support only github.com"),
+    # The owner may record another expected author name in the published AGENTS.md (#21).
+    identity_case("identity configured author name", 0, ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
+                  text=ALIAS, setup="published_text",
+                  stderr=("identity: author-name-configured=true", "identity: profile-name-is-expected=true")),
+    # Once configured, the alias replaces the login: a profile name equal to the login no longer matches.
+    identity_case("identity configured author name replaces login", 1, text=ALIAS, setup="published_text",
+                  stderr=("identity: profile-name-is-expected=false", "identity: blocker=profile-name")),
+    # A PR cannot authorize its own alias: only the published copy counts.
+    identity_case("identity unpublished author name", 1, ("FIXTURE_PROFILE_NAME", "Fixture Alias"), text=ALIAS,
+                  stderr=("identity: author-name-configured=false", "identity: blocker=profile-name")),
+    identity_case("identity author name in managed block", 1, ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
+                  text=MANAGED, setup="published_text", stderr="identity: author-name-configured=false"),
+    identity_case("identity conflicting author names", 2, ("FIXTURE_PROFILE_NAME", "Fixture Alias"), api_calls=0,
+                  text=ALIAS + '\nMerge author name: `Other Alias`\n', setup="published_text",
+                  stderr="Conflicting merge author names"),
+    identity_case("identity author name placeholder", 2, api_calls=0, text='Merge author name: `<name>`\n',
+                  setup="published_text", stderr="Malformed merge author name"),
+    identity_case("identity emphasized author name label", 2, api_calls=0, text='**Merge author name:** `Fixture Alias`\n',
+                  setup="published_text", stderr="Malformed merge author name"),
+    identity_case("identity author name with invisible character", 2, api_calls=0,
+                  text='Merge author name: `Fixture\u200bAlias`\n', setup="published_text",
+                  stderr="Malformed merge author name"),
+    identity_case("identity author name prose", 0, text="Merge author names follow the profile.\n", setup="published_text",
+                  stderr="identity: author-name-configured=false"),
+    identity_case("identity unreadable published ref", 2, api_calls=0, setup="missing_published_ref",
+                  stderr="Command failed: git rev-parse"),
+    identity_case("identity duplicate identical author names", 0, ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
+                  text=ALIAS + "\n" + ALIAS, setup="published_text", stderr="identity: author-name-configured=true"),
+    identity_case("identity author name with trailing period", 0, ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
+                  text="Merge author name: `Fixture Alias`.\n", setup="published_text",
+                  stderr="identity: profile-name-is-expected=true"),
+    identity_case("identity author name at length limit", 0, ("FIXTURE_PROFILE_NAME", "A" * 100),
+                  text="Merge author name: `" + "A" * 100 + "`\n", setup="published_text",
+                  stderr="identity: profile-name-is-expected=true"),
+    identity_case("identity author name over length limit", 2, api_calls=0,
+                  text="Merge author name: `" + "A" * 101 + "`\n", setup="published_text",
+                  stderr="Malformed merge author name"),
+    identity_case("identity configured author name with profile name unset", 2, ("FIXTURE_PROFILE_NAME", "__null__"),
+                  text=ALIAS, setup="published_text", stderr="identity: indeterminate=profile-name-unset"),
+    # Rendered Markdown does not show these as settings: they can neither set nor silently revoke an alias.
+    identity_case("identity author name in code fence", 2, api_calls=0, text="```\n" + ALIAS + "```\n",
+                  setup="published_text", stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name in tilde fence", 2, api_calls=0, text="~~~~ text\n" + ALIAS + "~~~~\n",
+                  setup="published_text", stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name commented out", 2, api_calls=0, text="<!--\n" + ALIAS + "-->\n",
+                  setup="published_text", stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name in inline comment", 2, api_calls=0,
+                  text="<!-- Merge author name: `Fixture Alias` -->\n", setup="published_text",
+                  stderr="Malformed merge author name"),
+    identity_case("identity author name in indented code", 2, api_calls=0, text="    " + ALIAS, setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    # Only the leading clear region counts: what a fence or comment hides needs a full parser (#21 cycle 3).
+    identity_case("identity author name after closed fence and comment", 2, api_calls=0,
+                  text="```\nexample\n```\n<!-- note -->\n" + ALIAS, setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name above managed block", 0, ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
+                  text="# AGENTS.md\n\n" + ALIAS + "\n" + MANAGED + "```\ncode\n```\n", setup="published_text",
+                  stderr="identity: author-name-configured=true"),
+    identity_case("identity author name below managed block", 2, api_calls=0, text=MANAGED + ALIAS,
+                  setup="published_text", stderr="stand alone between blank lines above all code"),
+    # Delta-review inputs on 5e216a7: the fence pairing is shifted by a comment marker inside code.
+    identity_case("identity comment opened inside fence", 2, api_calls=0,
+                  text="```\n<!--\n```\n```\n-->\n" + ALIAS + "```\n", setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    identity_case("identity comment marker in code span", 2, api_calls=0,
+                  text="Use `<!--` to start a comment.\n```\n-->\n" + ALIAS + "```\n", setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    # A list item or HTML block changes which fence lines pair up.
+    identity_case("identity fence ended with its list item", 2, api_calls=0,
+                  text="- item\n  ```\nfoo\n```\n" + ALIAS, setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    identity_case("identity fence line in HTML block", 2, api_calls=0,
+                  text="<div>\n```\n\n```\n" + ALIAS, setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    identity_case("identity fence opened in list marker line", 2, api_calls=0,
+                  text="- ```\n  ```\n```\n" + ALIAS, setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name in multiline code span", 2, api_calls=0,
+                  text="Run ``\n" + ALIAS + "`` first.\n", setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    # Delta-review inputs on fa51b2e: without blank lines around it, the line can join another block.
+    identity_case("identity author name in link reference title", 2, api_calls=0,
+                  text="# T\n\n[x]: /url (\n" + ALIAS + ")\n", setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name in quoted link title", 2, api_calls=0,
+                  text='[//]: # "\n' + ALIAS + '"\n', setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name after escaped backtick", 2, api_calls=0,
+                  text="Escaped \\` and ` start\n" + ALIAS, setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name as lazy quote continuation", 2, api_calls=0, text="> q\n" + ALIAS,
+                  setup="published_text", stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name as setext heading", 2, api_calls=0, text=ALIAS + "---\n",
+                  setup="published_text", stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name as table row", 2, api_calls=0, text="a | b\n--- | ---\n" + ALIAS,
+                  setup="published_text", stderr="stand alone between blank lines above all code"),
+    # CommonMark expands a tab after up to three spaces to column 4: indented code.
+    identity_case("identity author name after space and tab", 2, api_calls=0, text="# T\n\n \t" + ALIAS,
+                  setup="published_text", stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name in math block", 2, api_calls=0, text="$$\n\n" + ALIAS + "\n$$\n",
+                  setup="published_text", stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name in front matter", 2, api_calls=0,
+                  text="---\ntitle: x\n\n" + ALIAS + "\n---\n", setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name between NBSP lines in link title", 2, api_calls=0,
+                  text="# T\n\n[x]: /url (\n\u00a0\n" + ALIAS + "\u00a0\n)\n", setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name between form feed lines in link title", 2, api_calls=0,
+                  text="# T\n\n[x]: /url (\n\x0c\n" + ALIAS + "\x0c\n)\n", setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    identity_case("identity author name in list item code block", 2, api_calls=0,
+                  text="# T\n\n-     Merge author name: `Fixture Alias`\n", setup="published_text",
+                  stderr="Malformed merge author name"),
+    identity_case("identity author name after list marker tabs", 2, api_calls=0,
+                  text="# T\n\n-\t\tMerge author name: `Fixture Alias`\n", setup="published_text",
+                  stderr="Malformed merge author name"),
+    identity_case("identity author name after whitespace only line", 0, ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
+                  text="# T\n    \n\t\n\n" + ALIAS, setup="published_text",
+                  stderr="identity: author-name-configured=true"),
+    identity_case("identity numbered author name", 2, api_calls=0, text="1. Merge author name: `Fixture Alias`\n",
+                  setup="published_text", stderr="Malformed merge author name"),
+    identity_case("identity quoted author name", 2, api_calls=0, text="> Merge author name: `Fixture Alias`\n",
+                  setup="published_text", stderr="Malformed merge author name"),
+    identity_case("identity heading author name", 2, api_calls=0, text="## Merge author name: `Fixture Alias`\n",
+                  setup="published_text", stderr="Malformed merge author name"),
+    identity_case("identity table author name", 2, api_calls=0, text="| Merge author name: | `Fixture Alias` |\n",
+                  setup="published_text", stderr="Malformed merge author name"),
+    identity_case("identity hyphenated author name label", 2, api_calls=0,
+                  text="Merge-author-name: `Fixture Alias`\n", setup="published_text",
+                  stderr="Malformed merge author name"),
+    identity_case("identity full-width colon author name", 2, api_calls=0,
+                  text="Merge author name\uff1a `Fixture Alias`\n", setup="published_text",
+                  stderr="Malformed merge author name"),
+    identity_case("identity invisible character in author name label", 2, api_calls=0,
+                  text="Merge author\u200b name: `Fixture Alias`\n", setup="published_text",
+                  stderr="Malformed merge author name"),
+    # Inside an HTML comment a fence line is comment text, so it cannot end the comment early (#21 review).
+    identity_case("identity fence line inside comment", 2, api_calls=0,
+                  text="<!--\n```\n-->\n```\n-->\n" + ALIAS + "```\n", setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    # The list item ends at the column-0 comment, closing its fence, so the alias renders inside the comment.
+    identity_case("identity fence in list item ended by comment", 2, api_calls=0,
+                  text="- item\n  ```\n<!--\n```\n" + ALIAS + "-->\n```\n", setup="published_text",
+                  stderr="stand alone between blank lines above all code"),
+    # GitHub drops a leading BOM, so the first-line fence still hides the alias.
+    identity_case("identity author name in fence after BOM", 2, api_calls=0, text="\ufeff```\n" + ALIAS + "```\n",
+                  setup="published_text", stderr="stand alone between blank lines above all code"),
+    identity_case("identity second label in author name note", 2, api_calls=0,
+                  text="Merge author name: `Fixture Alias` (Merge author name: `Other Alias`)\n",
+                  setup="published_text", stderr="Malformed merge author name"),
+    # The alias is the default branch's policy; another base was never gated by it.
+    identity_case("identity non-default base", 2, ("FIXTURE_PR_BASE", "release"), api_calls=3,
+                  stderr="only pull requests into the default branch"),
+    # A visible exact line cannot hide a second, look-alike one that would replace it.
+    identity_case("identity look-alike beside exact author name", 2, api_calls=0,
+                  text=ALIAS + "\n1. Merge author name: `Other Alias`\n", setup="published_text",
+                  stderr="Malformed merge author name"),
+    identity_case("identity indeterminate outranks blocker", 2, ("FIXTURE_PR_AUTHOR_ID", "2002"),
+                  ("FIXTURE_PROFILE_NAME", "Fixture Alias"),
+                  stderr=("identity: indeterminate=pr-author-is-merger", "identity: blocker=profile-name")),
+    identity_case("identity PR open but merged", 1, ("FIXTURE_PR_MERGED", "true"), stderr="identity: blocker=pr-open"),
+    identity_case("identity GraphQL errors", 2, ("FIXTURE_GRAPHQL_ERRORS", "1"), stderr="commit-email"),
+    # A partial response is not evidence, even when its data looks complete.
+    identity_case("identity GraphQL partial errors", 2, ("FIXTURE_GRAPHQL_ERRORS", "partial"), stderr="commit-email"),
+    identity_case("identity GraphQL data not an object", 2, ("FIXTURE_GRAPHQL_DATA", "fixture"),
+                  stderr="commit-email"),
+    identity_case("identity possible commit emails not a list", 2, ("FIXTURE_POSSIBLE_SHAPE", json.dumps(NOREPLY)),
+                  stderr="commit-email"),
+    identity_case("identity possible commit email not a string", 2,
+                  ("FIXTURE_POSSIBLE_SHAPE", json.dumps([NOREPLY, 7])), stderr="commit-email"),
+    # PRIVATE as the returned login: the mismatch must be reported without echoing it.
+    identity_case("identity account login differs", 2, ("FIXTURE_ACCOUNT_LOGIN", "Fixture Alias"), api_calls=2,
+                  stderr="another login"),
+    # The noreply keeps the account login's case, as GitHub forms it; the handle argument may differ in case.
+    identity_case("identity account login case kept in noreply", 0, ("FIXTURE_ACCOUNT_LOGIN", "Octo-Fixture"),
+                  ("FIXTURE_PROFILE_NAME", "Octo-Fixture"), stdout="1001+Octo-Fixture@users.noreply.github.com\n"),
+    identity_case("identity account id is boolean", 2, ("FIXTURE_ACCOUNT_ID", "true"), api_calls=2,
+                  stderr="account response"),
+    identity_case("identity noreply not a possible commit email", 1, ("FIXTURE_POSSIBLE", "person@example.invalid"),
+                  ("FIXTURE_DEFAULT_EMAIL", "person@example.invalid"),
+                  stderr="identity: blocker=noreply-not-possible-commit-email"),
+    # The default gh token scopes return an empty list, which shows nothing: the ID noreply is always a commit
+    # email of the account, --author-email pins it and published proves it, so this only warns.
+    identity_case("identity possible commit emails unreadable", 0, ("FIXTURE_POSSIBLE", "__null__"),
+                  stderr="identity: warning=possible-commit-emails-unreadable"),
+    identity_case("identity possible commit emails empty", 0, ("FIXTURE_POSSIBLE_SHAPE", "[]"),
+                  stderr=("identity: warning=possible-commit-emails-unreadable", "default gh token scopes")),
+    identity_case("identity default commit email is personal", 0, ("FIXTURE_POSSIBLE", NOREPLY + ",person@example.invalid"),
+                  ("FIXTURE_DEFAULT_EMAIL", "person@example.invalid"), stderr="identity: warning=default-commit-email"),
+    identity_case("identity legacy account", 2, ("FIXTURE_CREATED", "2017-07-18T12:00:00Z"), stderr="legacy account"),
+    identity_case("identity PR closed", 1, ("FIXTURE_PR_STATE", "closed"), stderr="identity: blocker=pr-open"),
+    identity_case("identity user endpoint fails", 2, ("FIXTURE_API_FAIL", "user"), api_calls=1),
+    identity_case("identity upstream selection", 2, ("FIXTURE_SELECTED", "upstream/repo"), api_calls=0),
+    identity_case("identity invalid PR", 2, api_calls=0, arguments=("07", "octo-fixture", "squash")),
+    identity_case("identity invalid handle", 2, api_calls=0, arguments=("7", "../x", "squash")),
+    identity_case("identity merge commit method", 0, arguments=("7", "octo-fixture", "merge")),
+    # published reads one merge commit and cannot check the commits a rebase merge re-creates.
+    identity_case("identity rebase method", 2, api_calls=0, arguments=("7", "octo-fixture", "rebase"),
+                  stderr="squash or merge"),
+    identity_case("identity missing method", 2, api_calls=0, arguments=("7", "octo-fixture"),
+                  stderr="merge method"),
+    identity_case("identity viewer id is boolean", 2, ("FIXTURE_VIEWER_ID", "true"), api_calls=1,
+                  stderr="viewer response"),
+    identity_case("identity profile name empty", 2, ("FIXTURE_PROFILE_NAME", "__empty__"),
+                  stderr="identity: indeterminate=profile-name-unset"),
+    # The merging account's own record governs; a stale public profile name does not.
+    identity_case("identity viewer profile name governs", 0, ("FIXTURE_PUBLIC_NAME", "Fixture Alias"),
+                  stderr="identity: profile-name-is-expected=true"),
+    identity_case("identity created date malformed", 2, ("FIXTURE_CREATED", "2020-01-01"), stderr="account response"),
+    identity_case("identity created date non-ASCII digits", 2, ("FIXTURE_CREATED", "\u0662\u0660\u0662\u0660-01-01T00:00:00Z"),
+                  stderr="account response"),
+    identity_case("identity pull request not an object", 2, ("FIXTURE_PR_SHAPE", "list"), api_calls=3,
+                  stderr="pull request response"),
+    # Exit 1 is a user decision here, so an unexpected failure must not surface as 1.
+    identity_case("identity unexpected failure", 2, ("FIXTURE_VIEWER_SHAPE", "deep"), api_calls=1,
+                  stderr="Unexpected identity evidence failure"),
+    published_case("published compliant", 0, stderr="published: author-name-is-expected=true"),
+    # The observed squash shape: display name as author, noreply email, linked account, web-flow.
+    published_case("published display-name author", 1, ("FIXTURE_COMMIT_NAME", "Fixture Alias"),
+                   stderr="published: blocker=author-name-is-expected"),
+    published_case("published personal author email", 1, ("FIXTURE_COMMIT_EMAIL", "person@example.invalid"),
+                   stderr="published: blocker=author-email-is-noreply"),
+    published_case("published author login differs", 1, ("FIXTURE_COMMIT_LOGIN", "other-account"),
+                   ("FIXTURE_COMMIT_ID", "2002"), stderr="published: blocker=author-login-is-handle"),
+    published_case("published unlinked author", 1, ("FIXTURE_COMMIT_LOGIN", "__none__"),
+                   stderr="published: blocker=author-id-matches"),
+    published_case("published committer not web-flow", 2, ("FIXTURE_COMMITTER_LOGIN", "octo-fixture"),
+                   stderr="published: indeterminate=committer-is-web-flow"),
+    published_case("published unverified signature", 0, ("FIXTURE_VERIFIED", "false"),
+                   stderr="published: warning=signature-verified"),
+    published_case("published PR not merged", 2, ("FIXTURE_PR_MERGED", "false"), api_calls=1),
+    published_case("published commit endpoint fails", 2, ("FIXTURE_API_FAIL", "repos/fixture/repo/commits/" + MERGE_SHA)),
+    published_case("published committer name not GitHub", 2, ("FIXTURE_COMMITTER_NAME", "octo-fixture"),
+                   stderr="published: indeterminate=committer-is-web-flow"),
+    published_case("published author id differs", 1, ("FIXTURE_COMMIT_ID", "2002"),
+                   stderr="published: blocker=author-id-matches"),
+    published_case("published null author", 1, ("FIXTURE_COMMIT_LOGIN", "__null__"),
+                   stderr=("published: blocker=author-login-is-handle", "published: blocker=author-id-matches")),
+    published_case("published author name case variant", 1, ("FIXTURE_COMMIT_NAME", "Octo-Fixture"),
+                   stderr="published: blocker=author-name-is-expected"),
+    published_case("published author email ASCII case", 0, ("FIXTURE_COMMIT_EMAIL", NOREPLY.upper()),
+                   stderr="published: author-email-is-noreply=true"),
+    published_case("published author email lookalike", 1,
+                   ("FIXTURE_COMMIT_EMAIL", NOREPLY.replace("users", "uſers")),
+                   stderr="published: blocker=author-email-is-noreply"),
+    published_case("published commit SHA differs", 2, ("FIXTURE_COMMIT_SHA", "f" * 40), stderr="commit response"),
+    published_case("published malformed merge SHA", 2, ("FIXTURE_MERGE_SHA", MERGE_SHA.upper()), api_calls=1,
+                   stderr="no merge commit"),
+    published_case("published unsupported host", 2, api_calls=0, host="github.example",
+                   stderr="support only github.com"),
+    published_case("published unexpected failure", 2, ("FIXTURE_PR_SHAPE", "deep"), api_calls=1,
+                   stderr="Unexpected published evidence failure"),
+    published_case("published configured author name", 0, ("FIXTURE_COMMIT_NAME", "Fixture Alias"), text=ALIAS,
+                   setup="published_text", stderr="published: author-name-is-expected=true"),
+    published_case("published configured author name replaces login", 1, text=ALIAS, setup="published_text",
+                   stderr="published: blocker=author-name-is-expected"),
+    # A PR cannot authorize its own alias after merge either: only its base, the merge's first parent, counts.
+    published_case("published unpublished author name", 1, ("FIXTURE_COMMIT_NAME", "Fixture Alias"), text=ALIAS,
+                   stderr="published: blocker=author-name-is-expected"),
+    published_case("published author name added by the merge", 1, ("FIXTURE_COMMIT_NAME", "Fixture Alias"),
+                   text=ALIAS, setup="alias_added_by_merge", stderr="published: blocker=author-name-is-expected"),
+    published_case("published author name in managed block", 1, ("FIXTURE_COMMIT_NAME", "Fixture Alias"),
+                   text=MANAGED, setup="published_text", stderr="published: blocker=author-name-is-expected"),
+    published_case("published merge parent not fetched", 2, ("FIXTURE_PARENT", "f" * 40),
+                   stderr="Command failed: git rev-parse"),
+    published_case("published non-default base", 2, ("FIXTURE_PR_BASE", "release"), api_calls=1,
+                   stderr="only pull requests into the default branch"),
+    published_case("published merge commit without parent", 2, ("FIXTURE_PARENT", "__none__"),
+                   stderr="Unexpected commit response"),
+    published_case("published conflicting author names", 2,
+                   text=ALIAS + '\nMerge author name: `Other Alias`\n', setup="published_text",
+                   stderr="Conflicting merge author names"),
+)
+ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES + IDENTITY_CASES
+INVENTORY = 996 + len(IDENTITY_CASES)
+if len(ALL_CASES) != INVENTORY or len({case.name for case in ALL_CASES}) != INVENTORY:
+    raise RuntimeError(f"Merge fixture inventory must contain {INVENTORY} unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
@@ -1337,21 +1759,45 @@ class MergePreflightTests(unittest.TestCase):
             write_fixture(self.instructions, (ROOT / case.source).read_bytes().decode("utf-8"))
         elif case.text is not None:
             write_fixture(self.instructions, case.text)
+        environment = self.environment | dict(case.environment)
+        if "FIXTURE_HOST" in environment:
+            self.git("remote", "set-url", "origin", f"https://{environment['FIXTURE_HOST']}/fixture/repo.git")
         if case.setup == "push_mismatch":
             self.git("remote", "set-url", "--push", "origin", "https://github.example/other/repo.git")
+        elif case.setup == "local_author_verified":
+            # Establish the premise: git itself reports the verified handle and noreply locally.
+            for variable in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"):
+                ident = run(["git", "var", variable], self.repo, environment)
+                self.assertTrue(ident.stdout.startswith(f"octo-fixture <{NOREPLY}> "), ident.stdout)
         elif case.setup == "published_wait":
             write_fixture(self.instructions, "Autonomous merge suspended — asked on 2026-09-27\n")
             self.git("add", "AGENTS.md")
             self.git("commit", "-qm", "published wait")
             self.git("update-ref", "refs/remotes/origin/main", "HEAD")
             write_fixture(self.instructions, "Local clear.\n")
+        elif case.setup == "published_text":
+            # Publish the case text as origin's AGENTS.md; the local copy says nothing.
+            self.git("add", "AGENTS.md")
+            self.git("commit", "-qm", "published text")
+            self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+            write_fixture(self.instructions, "Local clear.\n")
+        elif case.setup == "alias_added_by_merge":
+            # The merge's base has no alias; the default branch after the merge does.
+            environment["FIXTURE_PARENT"] = self.git("rev-parse", "HEAD")
+            self.git("add", "AGENTS.md")
+            self.git("commit", "-qm", "merged alias")
+            self.git("update-ref", "refs/remotes/origin/main", "HEAD")
         elif case.setup == "missing_published_ref":
             self.git("update-ref", "-d", "refs/remotes/origin/main")
+        if case.mode == "published" and "FIXTURE_PARENT" not in environment:
+            # By default the merge was based on the published default branch.
+            environment["FIXTURE_PARENT"] = self.git("rev-parse", "refs/remotes/origin/main")
         write_fixture(self.log, "")
-        environment = self.environment | dict(case.environment)
         arguments = [str(self.instructions)] if case.mode == "suspension" else ["fixture", "repo"]
         if case.mode == "reviews":
             arguments.append("1")
+        elif case.mode in ("identity", "published"):
+            arguments.extend(case.arguments)
         result = run(["bash", str(PREFLIGHT), case.mode, *arguments], self.repo, environment)
         calls = [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
         api_calls = sum(call[0] == "api" for call in calls)
@@ -1359,6 +1805,14 @@ class MergePreflightTests(unittest.TestCase):
             (result.returncode, api_calls), (case.expected, case.api_calls),
             f"{case.name}: stdout={result.stdout!r}, stderr={result.stderr!r}, gh={calls!r}",
         )
+        if case.mode in ("identity", "published"):
+            # Only a clear identity result prints, and only the noreply address.
+            printed = NOREPLY + "\n" if (case.mode, case.expected) == ("identity", 0) else ""
+            self.assertEqual(result.stdout, printed if case.stdout is None else case.stdout)
+            for value in PRIVATE:
+                self.assertNotIn(value, result.stdout + result.stderr, case.name)
+        for text in case.stderr:
+            self.assertIn(text, result.stderr, case.name)
 
 
 def make_test(case: Case):
