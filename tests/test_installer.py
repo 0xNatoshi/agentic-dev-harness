@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 import warnings
 import zipfile
 
@@ -63,6 +64,22 @@ def visible_copies(*roots: Path) -> list:
             if skill.parent.name == "github-workflow" or "\nname: github-workflow\n" in text:
                 found.append(skill)
     return found
+
+
+def link_directory(link: Path, target: Path) -> None:
+    """A directory link: a junction on Windows, which needs no symlink privilege."""
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True, capture_output=True)
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def unlink_directory(link: Path) -> None:
+    """Remove a directory link without touching its target; a Windows junction is removed as a directory."""
+    if os.name == "nt":
+        os.rmdir(link)
+    else:
+        os.unlink(link)
 
 
 class InstallerTests(unittest.TestCase):
@@ -774,6 +791,630 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(".", [item["path"] for item in json.loads(rollback.stderr)["details"]])
         self.assertEqual(stat.S_IMODE(os.stat(self.target).st_mode), 0o700)
 
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_plan_blocks_a_directory_without_owner_write_permission(self):
+        self.v52_layout()
+        for path in (self.target, self.target.parent):
+            with self.subTest(path=path.name):
+                path.chmod(0o555)
+                self.addCleanup(path.chmod, 0o755)
+                before = snapshot(self.target)
+                output = self.base / "plan.json"
+                result = self.run_installer("plan", "--runtime", "claude", "--home", self.home, "--checksums", self.checksums,
+                                            "--output", output)
+                self.assert_refused(result, 2)
+                error = json.loads(result.stderr)
+                self.assertIn(f"add owner write permission to {path}, then plan again", error["error"])
+                self.assertEqual(error["details"], {"path": str(path), "mode": "0555"})
+                self.assertFalse(output.exists())
+                self.assertEqual(snapshot(self.target), before)
+                path.chmod(0o755)
+        plan = self.plan()
+        self.target.chmod(0o555)
+        # apply plans again, so it blocks before the park rename instead of failing there.
+        self.assert_refused(self.apply(plan), 2)
+        self.assertFalse((self.state() / "CURRENT").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_rollback_blocks_a_target_without_owner_write_permission_before_any_rename(self):
+        self.v52_layout()
+        # An explicit mode, so the recorded mode does not depend on the umask.
+        self.target.chmod(0o750)
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        recorded = json.loads(receipt_path.read_text(encoding="utf-8"))["after"]["."]["mode"]
+        self.assertEqual(recorded, 0o750)
+        self.target.chmod(0o555)
+        self.addCleanup(self.target.chmod, recorded)
+        result = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(result, 2)
+        self.assertIn(f"add owner write permission to {self.target} (the receipt records mode 0750), then run rollback again",
+                      json.loads(result.stderr)["error"])
+        self.assertEqual(snapshot(self.target), after)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+        self.assertFalse((self.state() / "CURRENT").exists())
+        self.target.chmod(recorded)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+
+    def legacy_owner_write_receipt(self):
+        """A receipt recording root mode 0550, as an older installer run by root could write, for a root at 0750."""
+        self.v52_layout()
+        self.target.chmod(0o750)
+        before = snapshot(self.target)
+        receipt_path = self.installed()
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["after"]["."]["mode"] = 0o550
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        self.addCleanup(lambda: self.target.exists() and self.target.chmod(0o750))
+        return before, receipt_path
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_rollback_of_a_receipt_recording_a_root_without_owner_write_accepts_the_owner_write_fix(self):
+        before, receipt_path = self.legacy_owner_write_receipt()
+        self.target.chmod(0o550)
+        blocked = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(blocked, 2)
+        self.assertIn(f"add owner write permission to {self.target} (the receipt records mode 0550; rollback also accepts "
+                      "0750), then run rollback again", json.loads(blocked.stderr)["error"])
+        self.target.chmod(0o750)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual(snapshot(self.target), before)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "rolled back")
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_owner_write_fix_still_refuses_any_other_drift(self):
+        _, receipt_path = self.legacy_owner_write_receipt()
+        pristine = self.base / "pristine"
+        shutil.copytree(self.home, pristine, symlinks=True)
+
+        def edit_with_owner_write():
+            (self.target / "SKILL.md").chmod(0o644)
+            (self.target / "SKILL.md").write_bytes(b"edited\n")
+
+        for name, change in (("another root mode", lambda: self.target.chmod(0o700)),
+                             ("owner write and an edited file", edit_with_owner_write)):
+            with self.subTest(drift=name):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home, symlinks=True)
+                change()
+                drifted = snapshot(self.target)
+                rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(rollback, 1)
+                self.assertEqual(snapshot(self.target), drifted)
+                self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+                self.assertFalse((self.state() / "CURRENT").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_interrupted_rollback_after_the_owner_write_fix_recovers(self):
+        before, receipt_path = self.legacy_owner_write_receipt()
+        after = snapshot(self.target)
+        pristine = self.base / "pristine"
+        shutil.copytree(self.home, pristine, symlinks=True)
+        names = self.checkpoints("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertIn("rollback:activated", names)
+        for name in names:
+            with self.subTest(checkpoint=name):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home, symlinks=True)
+                crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": name})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                recover = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assertEqual(recover.returncode, 0, recover.stderr)
+                self.assertFalse((self.state() / "CURRENT").exists())
+                state = json.loads(receipt_path.read_text(encoding="utf-8"))["state"]
+                # Until the commit, recovery puts back the tree as found: the owner-write fix, not the recorded mode.
+                self.assertEqual((snapshot(self.target), state),
+                                 (before, "rolled back") if name == "rollback:committed" else (after, "installed"))
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_rollback_refusal_names_the_recorded_root_mode(self):
+        self.v52_layout()
+        # An explicit mode, so the recorded mode does not depend on the umask.
+        self.target.chmod(0o755)
+        receipt_path = self.installed()
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["after"]["."]["mode"], 0o755)
+        self.target.chmod(0o700)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(rollback, 1)
+        self.assertIn(f"restore mode 0755 on {self.target} (now 0700)", json.loads(rollback.stderr)["error"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_a_duplicate_or_its_root_without_owner_write_blocks_before_any_rename(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        plan = self.plan("codex")
+        for path, reason in ((legacy, "so this duplicate cannot be moved to another directory"),
+                             (legacy.parent, f"so the duplicate {legacy} cannot be moved out of it")):
+            with self.subTest(path=str(path)):
+                mode = stat.S_IMODE(os.stat(path).st_mode)
+                path.chmod(0o555)
+                # Restored here, not by addCleanup: the final apply moves the duplicate away.
+                try:
+                    output = self.base / "blocked-plan.json"
+                    result = self.run_installer("plan", "--runtime", "codex", "--home", self.home, "--checksums",
+                                                self.checksums, "--output", output)
+                    self.assert_refused(result, 2)
+                    error = json.loads(result.stderr)
+                    self.assertIn(f"{path} has no owner write permission (mode 0555), {reason}; "
+                                  f"add owner write permission to {path}, then plan again", error["error"])
+                    self.assertEqual(error["details"], {"path": str(path), "mode": "0555"})
+                    self.assertFalse(output.exists())
+                    # apply plans again, so it blocks before retiring the duplicate instead of failing at that rename.
+                    self.assert_refused(self.apply(plan, "--retire-duplicate", legacy), 2)
+                    self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+                finally:
+                    path.chmod(mode)
+                self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+        result = self.apply(plan, "--retire-duplicate", legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes")
+    def test_rollback_blocks_a_duplicate_root_without_owner_write_before_any_rename(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt_path = Path(json.loads(result.stdout)["receipt"])
+        receipt = receipt_path.read_bytes()
+        after = snapshot(target)
+        mode = stat.S_IMODE(os.stat(legacy.parent).st_mode)
+        legacy.parent.chmod(0o555)
+        self.addCleanup(legacy.parent.chmod, mode)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(rollback, 2)
+        self.assertIn(f"{legacy.parent} has no owner write permission (mode 0555), so the retired duplicate {legacy} "
+                      f"cannot be moved back into it; add owner write permission to {legacy.parent}, then run rollback again",
+                      json.loads(rollback.stderr)["error"])
+        self.assertEqual(receipt_path.read_bytes(), receipt)
+        self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+        self.assertEqual(snapshot(target), after)
+        self.assertFalse(legacy.exists())
+        legacy.parent.chmod(mode)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_rollback_blocks_a_linked_duplicate_root_whose_target_has_no_owner_write(self):
+        if not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        # The secondary root is a link unchanged since apply; its own mode (0777) is not where the rename writes.
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        physical = Path(os.path.realpath(self.base / "codex-skills"))
+        before, legacy_before = self.v52_layout(target), self.v52_layout(physical / "github-workflow")
+        (self.home / ".codex").mkdir()
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        link_directory(legacy.parent, physical)
+        # plan, and the plan apply repeats, check the same physical parent before the duplicate leaves it.
+        physical.chmod(0o555)
+        try:
+            output = self.base / "blocked-plan.json"
+            result = self.run_installer("plan", "--runtime", "codex", "--home", self.home, "--checksums",
+                                        self.checksums, "--output", output)
+            self.assert_refused(result, 2)
+            self.assertIn(f"{legacy.parent} leads to {physical}, which has no owner write permission (mode 0555), so the "
+                          f"duplicate {legacy} cannot be moved out of it; add owner write permission to {physical}, then "
+                          "plan again", json.loads(result.stderr)["error"])
+            self.assertFalse(output.exists())
+        finally:
+            physical.chmod(0o755)
+        result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt_path = Path(json.loads(result.stdout)["receipt"])
+        receipt, after = receipt_path.read_bytes(), snapshot(target)
+        physical.chmod(0o555)
+        self.addCleanup(physical.chmod, 0o755)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(rollback, 2)
+        error = json.loads(rollback.stderr)
+        self.assertIn(f"{legacy.parent} leads to {physical}, which has no owner write permission (mode 0555), so the "
+                      f"retired duplicate {legacy} cannot be moved back into it; add owner write permission to {physical}, "
+                      "then run rollback again", error["error"])
+        self.assertEqual(error["details"], {"path": str(legacy.parent), "mode": "0555", "physical": str(physical)})
+        self.assertEqual(receipt_path.read_bytes(), receipt)
+        self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+        self.assertEqual(snapshot(target), after)
+        self.assertFalse((physical / "github-workflow").exists())
+        physical.chmod(0o755)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual((snapshot(target), snapshot(physical / "github-workflow")), (before, legacy_before))
+
+    # The OS enforces these modes only for an unprivileged user; root reads and searches any directory.
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_a_directory_that_cannot_be_searched_or_listed_blocks_with_its_fix(self):
+        before = self.v52_layout()
+        skills, config = self.target.parent, self.target.parent.parent
+        nested = skills / "other-skill" / "nested"
+        nested.mkdir(parents=True)
+        (nested / "notes.md").write_bytes(b"notes\n")
+        cases = ((skills, 0o444, "searched"), (skills, 0o400, "searched"), (skills, 0o300, "listed"), (config, 0o444, "searched"),
+                 (nested, 0o444, "searched"), (nested, 0o300, "listed"), (nested, 0o000, "listed"))
+        for path, mode, action in cases:
+            with self.subTest(path=str(path), mode=f"{mode:04o}"):
+                path.chmod(mode)
+                # Restored before the next case even when an assertion fails, so one failure does not cascade.
+                try:
+                    output = self.base / "blocked-plan.json"
+                    result = self.run_installer("plan", "--runtime", "claude", "--home", self.home, "--checksums",
+                                                self.checksums, "--output", output)
+                    self.assert_refused(result, 2)
+                    error = json.loads(result.stderr)
+                    self.assertIn(f"{path} cannot be {action} (mode {mode:04o}), so the installer cannot inspect what it "
+                                  f"holds; add owner read and search (execute) permission to {path}, then plan again",
+                                  error["error"])
+                    self.assertEqual(error["details"], {"path": str(path), "mode": f"{mode:04o}"})
+                    self.assertFalse(output.exists())
+                finally:
+                    path.chmod(0o755)
+                self.assertEqual(snapshot(self.target), before)
+        plan = self.plan()
+        skills.chmod(0o444)
+        self.addCleanup(skills.chmod, 0o755)
+        self.assert_refused(self.apply(plan), 2)
+        skills.chmod(0o755)
+        self.assertFalse((self.state() / "CURRENT").exists())
+        self.assertEqual(snapshot(self.target), before)
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        skills.chmod(0o444)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(rollback, 2)
+        self.assertIn(f"add owner read and search (execute) permission to {skills}, then run rollback again",
+                      json.loads(rollback.stderr)["error"])
+        recover = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+        self.assert_refused(recover, 2)
+        self.assertIn(f"add owner read and search (execute) permission to {skills}, then run recover again",
+                      json.loads(recover.stderr)["error"])
+        skills.chmod(0o755)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+        self.assertEqual(snapshot(self.target), after)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_the_selected_skill_directory_or_one_inside_it_that_cannot_be_searched_or_listed_blocks(self):
+        before = self.v52_layout()
+
+        def blocked(path, command, retry):
+            # Each mode keeps owner write, so only the search or list check can block.
+            for mode, action in ((0o600, "searched"), (0o300, "listed")):
+                with self.subTest(command=command[0], path=str(path), mode=f"{mode:04o}"):
+                    path.chmod(mode)
+                    try:
+                        result = self.run_installer(*command)
+                        self.assert_refused(result, 2)
+                        error = json.loads(result.stderr)
+                        self.assertIn(f"{path} cannot be {action} (mode {mode:04o}), so the installer cannot inspect what "
+                                      f"it holds; add owner read and search (execute) permission to {path}, then {retry}",
+                                      error["error"])
+                        self.assertEqual(error["details"], {"path": str(path), "mode": f"{mode:04o}"})
+                    finally:
+                        path.chmod(0o755)
+
+        output = self.base / "blocked-plan.json"
+        for path in (self.target, self.target / "templates"):
+            blocked(path, ("plan", "--runtime", "claude", "--home", self.home, "--checksums", self.checksums,
+                           "--output", output), "plan again")
+            self.assertFalse(output.exists())
+            self.assertEqual(snapshot(self.target), before)
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        inside = self.target / "agents"
+        for path in (self.target, inside):
+            blocked(path, ("rollback", "--receipt", receipt_path, "--maintenance-confirmed"), "run rollback again")
+            self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+            self.assertFalse((self.state() / "CURRENT").exists())
+            self.assertEqual(snapshot(self.target), after)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_a_directory_above_the_receipt_that_cannot_be_searched_blocks_rollback_and_recover(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        receipt, after = receipt_path.read_bytes(), snapshot(self.target)
+        commands = ((("rollback", "--receipt", receipt_path, "--maintenance-confirmed"), "run rollback again"),
+                    (("recover", "--receipt", receipt_path, "--maintenance-confirmed"), "run recover again"))
+        # The configuration directory holds both the skills and the installer state; the receipt is read first.
+        for path in (self.target.parent.parent, self.state()):
+            mode = path.stat().st_mode & 0o7777
+            for command, retry in commands:
+                with self.subTest(path=str(path), command=command[0]):
+                    path.chmod(0o600)
+                    try:
+                        result = self.run_installer(*command)
+                        self.assert_refused(result, 2)
+                        error = json.loads(result.stderr)
+                        self.assertIn(f"{path} cannot be searched (mode 0600), so the installer cannot inspect what it "
+                                      f"holds; add owner read and search (execute) permission to {path}, then {retry}",
+                                      error["error"])
+                        self.assertEqual(error["details"], {"path": str(path), "mode": "0600"})
+                    finally:
+                        path.chmod(mode)
+                    self.assertEqual(receipt_path.read_bytes(), receipt)
+                    self.assertFalse((self.state() / "CURRENT").exists())
+                    self.assertEqual(snapshot(self.target), after)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_a_directory_above_the_plan_that_cannot_be_searched_blocks_apply(self):
+        before = self.v52_layout()
+        plans = self.base / "plans"
+        plans.mkdir()
+        plan = self.plan().replace(plans / "plan.json")
+        plans.chmod(0o600)
+        try:
+            result = self.apply(plan)
+            self.assert_refused(result, 2)
+            error = json.loads(result.stderr)
+            self.assertIn(f"{plans} cannot be searched (mode 0600), so the installer cannot inspect what it holds; "
+                          f"add owner read and search (execute) permission to {plans}, then run apply again", error["error"])
+            self.assertEqual(error["details"], {"path": str(plans), "mode": "0600"})
+        finally:
+            plans.chmod(0o755)
+        self.assertFalse((self.state() / "CURRENT").exists())
+        self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX owners and modes")
+    def test_the_fix_for_an_inaccessible_directory_follows_its_owner_and_mode(self):
+        spec = importlib.util.spec_from_file_location("harness_installer_hints", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        folder = self.base / "denied"
+        folder.mkdir(mode=0o700)
+        folder.chmod(0o700)
+        # The owner already has read and search permission, so its mode is not what denies access.
+        blocked = installer.inaccessible(folder, "listed")
+        self.assertIn(f"{folder} cannot be listed (mode 0700), so the installer cannot inspect what it holds; its owner "
+                      "already has read and search permission, so an access control list or system privacy setting "
+                      f"denies access: allow this process to read and search {folder}, then plan again", str(blocked))
+        # A directory another user owns: only that owner or an administrator can change its mode.
+        owner = folder.stat().st_uid
+        with mock.patch.object(installer.os, "geteuid", return_value=owner + 1):
+            blocked = installer.inaccessible(folder, "searched", "run rollback again")
+        self.assertIn(f"{folder} belongs to another user (uid {owner}): have its owner or an administrator give you "
+                      "read and search (execute) access to it, or its ownership, then run rollback again", str(blocked))
+        self.assertEqual(blocked.details, {"path": str(folder), "mode": "0700"})
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_a_second_codex_root_that_cannot_be_searched_or_listed_blocks_plan(self):
+        self.v52_layout(self.home / ".agents" / "skills" / "github-workflow")
+        second = self.home / ".codex" / "skills"
+        (second / "other-skill").mkdir(parents=True)
+        output = self.base / "blocked-plan.json"
+        for mode, action in ((0o444, "searched"), (0o300, "listed")):
+            with self.subTest(mode=f"{mode:04o}"):
+                second.chmod(mode)
+                try:
+                    result = self.run_installer("plan", "--runtime", "codex", "--home", self.home, "--checksums",
+                                                self.checksums, "--output", output)
+                    self.assert_refused(result, 2)
+                    self.assertIn(f"{second} cannot be {action} (mode {mode:04o})", json.loads(result.stderr)["error"])
+                    self.assertFalse(output.exists())
+                finally:
+                    second.chmod(0o755)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_rollback_blocks_a_folder_its_retired_duplicate_cannot_be_searched_back_into(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        vendor = self.home / ".codex" / "skills" / "vendor"
+        legacy = vendor / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt_path = Path(json.loads(result.stdout)["receipt"])
+        receipt = receipt_path.read_bytes()
+        after = snapshot(target)
+        # Owner write without search: a write-only check would let the renames start and fail at the move back.
+        vendor.chmod(0o644)
+        try:
+            rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(rollback, 2)
+            self.assertIn(f"{vendor} cannot be searched (mode 0644), so the installer cannot inspect what it holds; "
+                          f"add owner read and search (execute) permission to {vendor}, then run rollback again",
+                          json.loads(rollback.stderr)["error"])
+        finally:
+            vendor.chmod(0o755)
+        self.assertEqual(receipt_path.read_bytes(), receipt)
+        self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+        self.assertEqual(snapshot(target), after)
+        self.assertFalse(legacy.exists())
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+
+    def test_rollback_blocks_a_folder_replaced_by_a_link_its_retired_duplicate_would_return_through(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        vendor = self.home / ".codex" / "skills" / "vendor"
+        legacy = vendor / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt_path = Path(json.loads(result.stdout)["receipt"])
+        receipt = receipt_path.read_bytes()
+        retired_from = json.loads(receipt)["duplicates"][0]["resolved"]
+        after = snapshot(target)
+        # The emptied folder is replaced by a link to a directory outside every skill root.
+        elsewhere = self.base / "elsewhere"
+        elsewhere.mkdir()
+        vendor.rmdir()
+        link_directory(vendor, elsewhere)
+        try:
+            for older in (False, True):
+                with self.subTest(older_receipt=older):
+                    if older:
+                        # A receipt without the resolved path: the link below the root still blocks.
+                        recorded = json.loads(receipt)
+                        del recorded["duplicates"][0]["resolved"]
+                        receipt_path.write_text(json.dumps(recorded), encoding="utf-8")
+                    content = receipt_path.read_bytes()
+                    rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                    self.assert_refused(rollback, 2)
+                    error = json.loads(rollback.stderr)
+                    self.assertIn(f"The retired duplicate {legacy} would be restored to ", error["error"])
+                    self.assertIn("a link or junction on the way was added or retargeted after apply; restore that "
+                                  "folder, then run rollback again", error["error"])
+                    self.assertEqual(error["details"]["resolves_to"], str(Path(os.path.realpath(elsewhere)) / legacy.name))
+                    self.assertEqual(error["details"]["retired_from"], retired_from)
+                    self.assertEqual(list(elsewhere.iterdir()), [])
+                    self.assertEqual(receipt_path.read_bytes(), content)
+                    self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+                    self.assertEqual(snapshot(target), after)
+        finally:
+            unlink_directory(vendor)
+        vendor.mkdir()
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+
+    def test_rollback_blocks_a_secondary_root_or_its_config_root_replaced_by_a_link(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        for folder in (legacy.parent, legacy.parent.parent):
+            with self.subTest(folder=folder.name):
+                result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                receipt_path = Path(json.loads(result.stdout)["receipt"])
+                receipt = receipt_path.read_bytes()
+                older_receipt = json.loads(receipt)
+                del older_receipt["duplicates"][0]["resolved"]
+                after = snapshot(target)
+                # The folder moves outside the home and is replaced by a link to it there.
+                elsewhere = self.base / ("elsewhere" + folder.name)
+                shutil.move(str(folder), str(elsewhere))
+                link_directory(folder, elsewhere)
+                try:
+                    for older in (False, True):
+                        if older:
+                            # Nothing in a receipt without the resolved path shows where the link pointed.
+                            receipt_path.write_text(json.dumps(older_receipt), encoding="utf-8")
+                        content = receipt_path.read_bytes()
+                        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                        self.assert_refused(rollback, 2)
+                        error = json.loads(rollback.stderr)
+                        if older:
+                            self.assertIn(f"{folder} is a link or junction, and this receipt predates the record of "
+                                          "where each retired duplicate was", error["error"])
+                            self.assertEqual(error["details"]["link"], str(folder))
+                        else:
+                            self.assertIn(f"The retired duplicate {legacy} would be restored to ", error["error"])
+                            self.assertEqual(error["details"]["retired_from"],
+                                             json.loads(receipt)["duplicates"][0]["resolved"])
+                        self.assertFalse(legacy.exists())
+                        self.assertEqual(receipt_path.read_bytes(), content)
+                        self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+                        self.assertEqual(snapshot(target), after)
+                finally:
+                    unlink_directory(folder)
+                    shutil.move(str(elsewhere), str(folder))
+                # Once the folder is back, either receipt rolls back: the older one for skills, the current one
+                # for .codex.
+                if folder == legacy.parent.parent:
+                    receipt_path.write_bytes(receipt)
+                rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assertEqual(rollback.returncode, 0, rollback.stderr)
+                self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+
+    def test_rollback_restores_a_retired_duplicate_through_a_config_root_link_unchanged_since_apply(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        # A config root kept elsewhere and linked into the home, as dotfile managers do.
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        dotfiles = self.base / "dotfiles" / "codex"
+        legacy_source = dotfiles / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy_source)
+        link_directory(self.home / ".codex", dotfiles)
+        try:
+            legacy = self.home / ".codex" / "skills" / "github-workflow"
+            result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(legacy_source.exists())
+            receipt_path = Path(json.loads(result.stdout)["receipt"])
+            receipt = receipt_path.read_bytes()
+            # A recorded location that is not a path is refused, not read as an older receipt.
+            malformed = json.loads(receipt)
+            malformed["duplicates"][0]["resolved"] = None
+            receipt_path.write_text(json.dumps(malformed), encoding="utf-8")
+            rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(rollback, 1)
+            self.assertIn(f"no valid location for the retired duplicate {legacy}", json.loads(rollback.stderr)["error"])
+            # A receipt without the resolved path cannot show that the link is unchanged, so it blocks.
+            older_receipt = json.loads(receipt)
+            del older_receipt["duplicates"][0]["resolved"]
+            receipt_path.write_text(json.dumps(older_receipt), encoding="utf-8")
+            content = receipt_path.read_bytes()
+            rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(rollback, 2)
+            error = json.loads(rollback.stderr)
+            self.assertEqual(error["details"]["link"], str(self.home / ".codex"))
+            self.assertIn("or, if it still points there, roll back with the installer that wrote this receipt",
+                          error["error"])
+            self.assertEqual(receipt_path.read_bytes(), content)
+            self.assertFalse(legacy_source.exists())
+            receipt_path.write_bytes(receipt)
+            rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assertEqual(rollback.returncode, 0, rollback.stderr)
+            self.assertEqual((snapshot(target), snapshot(legacy_source)), (before, legacy_before))
+        finally:
+            unlink_directory(self.home / ".codex")
+
+    def test_rollback_restores_a_retired_duplicate_for_a_receipt_recording_a_root_without_owner_write(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "vendor" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt_path = Path(json.loads(result.stdout)["receipt"])
+        # As an older installer run by root could record it; rollback accepts the root with owner write added.
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["after"]["."]["mode"] &= ~stat.S_IWUSR
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_a_failed_recover_the_journal_cannot_record_still_reports_its_cause_and_retry(self):
+        before, parked = self.crash_after_parking()
+        transaction = parked.parent.parent
+        # The journal and the undo both write in the transaction directory, so both fail.
+        transaction.chmod(0o500)
+        try:
+            failed = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+            self.assert_refused(failed, 3)
+            error = json.loads(failed.stderr)["error"]
+            self.assertRegex(error, r"^Restoration incomplete: .*Permission denied.* \(the journal could not record it: "
+                                    r".*Permission denied.*\)\. Recovery data kept in ")
+            self.assertTrue(error.endswith(f"{transaction}; fix the cause and run `recover` again"), error)
+        finally:
+            transaction.chmod(0o755)
+        self.assertTrue((self.state() / "CURRENT").exists())
+        self.recover()
+        self.assertEqual(snapshot(self.target), before)
+
+    def test_a_failed_undo_the_journal_cannot_record_still_reports_its_cause_and_recover(self):
+        spec = importlib.util.spec_from_file_location("harness_installer_undo", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        journal = self.base / "transaction" / "journal.json"
+        operation = mock.Mock(path=journal, record={})
+        operation.undo.side_effect = OSError("disk full while undoing")
+        # The cause that stopped the undo (a full disk, an unwritable state directory) also stops the journal.
+        with mock.patch.object(installer, "write_json", side_effect=OSError("disk full while journaling")):
+            with self.assertRaises(installer.Incomplete) as caught:
+                installer.undo_or_report(operation, installer.Blocked("The original blocker"))
+        self.assertEqual(str(caught.exception),
+                         "The original blocker; restoration incomplete: disk full while undoing (the journal could not "
+                         f"record it: disk full while journaling). Recovery data kept in {journal.parent}; run `recover` "
+                         "with the same --plan or --receipt before any other step")
+        self.assertEqual(operation.record, {"undo_error": "disk full while undoing"})
+
     def test_rerun_recover_sets_a_stale_restoration_copy_aside(self):
         before, parked = self.crash_after_parking()
         shutil.rmtree(parked)
@@ -858,6 +1499,70 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("put back as found", json.loads(stderr)["error"])
         self.assertEqual(snapshot(self.target), edited)
         self.assertNotEqual(edited, before)
+        self.assertFalse((self.state() / "CURRENT").exists())
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "pauses the installer with a named pipe; POSIX modes")
+    def test_a_directory_made_unlistable_during_apply_restores_the_original_state(self):
+        before = self.v52_layout()
+        other = self.home / ".claude" / "skills" / "other-skill"
+        other.mkdir()
+        plan = self.plan()
+
+        def paused_apply(name, fault=None):
+            pipe = self.base / name
+            os.mkfifo(pipe)
+            env = {"DEV_HARNESS_INSTALL_TEST_TRACE": str(pipe)}
+            if fault:
+                env["DEV_HARNESS_INSTALL_TEST_FAULT"] = fault
+            earlier = set(self.state().glob("*/staged/github-workflow"))
+            process = subprocess.Popen([sys.executable, "-B", str(self.installer), "apply", "--plan", str(plan),
+                                        "--checksums", str(self.checksums), "--maintenance-confirmed"], cwd=self.base,
+                                       env=self.environment(env), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True, encoding="utf-8")
+            reader = None
+            try:
+                # Paused at apply:staged, after every check and before the first rename: only the discovery that
+                # follows the renames can meet the unlistable directory. A copy staged by an earlier run is not
+                # this run's pause.
+                for _ in range(600):
+                    staged = [path for path in self.state().glob("*/staged/github-workflow") if path not in earlier]
+                    if staged or process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                self.assertIsNone(process.poll(), "the installer did not pause before its first rename")
+                self.assertTrue(staged, "the installer did not stage the new copy within 30 seconds")
+                other.chmod(0o300)
+                try:
+                    reader = os.open(str(pipe), os.O_RDONLY | os.O_NONBLOCK)
+                    stdout, stderr = process.communicate(timeout=120)
+                finally:
+                    other.chmod(0o755)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+                if reader is not None:
+                    os.close(reader)
+            return process.returncode, stdout + stderr, stderr
+
+        code, output, stderr = paused_apply("trace.fifo")
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"{other} cannot be listed (mode 0300)", json.loads(stderr)["error"])
+        self.assertIn("the original state was restored", json.loads(stderr)["error"])
+        self.assertEqual(snapshot(self.target), before)
+        self.assertFalse((self.state() / "CURRENT").exists())
+        # An undo that fails after that discovery names the unlistable directory and the recovery command.
+        code, output, stderr = paused_apply("trace-undo.fifo", "apply:undo-park")
+        self.assertEqual(code, 3, output)
+        error = json.loads(stderr)["error"]
+        self.assertIn(f"{other} cannot be listed (mode 0300)", error)
+        self.assertIn("restoration incomplete", error)
+        self.assertIn("run `recover`", error)
+        journals = [json.loads(path.read_text(encoding="utf-8")) for path in self.state().glob("*/journal.json")]
+        self.assertTrue(any("undo_error" in journal for journal in journals), journals)
+        recover = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+        self.assertEqual(recover.returncode, 0, recover.stderr)
+        self.assertEqual(snapshot(self.target), before)
         self.assertFalse((self.state() / "CURRENT").exists())
 
     def test_recover_uses_the_recorded_config_root(self):
@@ -965,6 +1670,27 @@ class InstallerTests(unittest.TestCase):
                 self.recover("codex")
                 self.assertEqual(snapshot(target), before)
                 self.assertEqual(snapshot(legacy), legacy_before)
+
+    def test_rollback_refuses_a_receipt_without_an_after_inventory(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt_path.write_text(json.dumps(dict(receipt, after=None)), encoding="utf-8")
+        result = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(result, 1)
+        self.assertIn("after-inventory", json.loads(result.stderr)["error"])
+
+    def test_rollback_refuses_a_receipt_with_a_non_integer_root_mode(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["after"]["."]["mode"] = "0755"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        result = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(result, 1)
+        error = json.loads(result.stderr)["error"]
+        self.assertIn("after-inventory", error)
+        self.assertNotIn("restore mode", error)
 
     def test_rollback_refuses_a_receipt_copy_that_differs(self):
         self.v52_layout()
