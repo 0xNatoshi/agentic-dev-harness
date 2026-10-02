@@ -838,6 +838,78 @@ class InstallerTests(unittest.TestCase):
         rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
         self.assertEqual(rollback.returncode, 0, rollback.stderr)
 
+    @unittest.skipIf(os.name == "nt", "POSIX owners")
+    def test_a_directory_this_process_cannot_write_blocks_with_the_fix_for_its_cause(self):
+        # The owner write bit passes for a target another user owns (one a sudo run of apply left), one an ACL
+        # denies and one on a read-only file system; the OS answers for this process instead (#76).
+        installer = self.load_installer()
+        self.v52_layout()
+        locations = installer.Locations("claude", str(self.home))
+        target = locations.target
+        status = os.stat(str(target))
+        mode, access = f"{stat.S_IMODE(status.st_mode):04o}", installer.os.access
+
+        def denied(path, *arguments, **options):
+            return False if os.path.realpath(str(path)) == os.path.realpath(str(target)) else access(path, *arguments, **options)
+
+        writable = mock.Mock(f_flag=0)
+        read_only = mock.Mock(f_flag=os.ST_RDONLY)
+        causes = (("another owner", status.st_uid + 1, writable,
+                   f"{target} cannot be written (mode {mode}), so it cannot be moved to another directory; {target} "
+                   f"belongs to another user (uid {status.st_uid}): have its owner or an administrator give you write "
+                   "access to it, or its ownership, then plan again"),
+                  ("access control list", status.st_uid, writable,
+                   f"{target} cannot be written (mode {mode}), so it cannot be moved to another directory; its owner "
+                   "already has write permission, so an access control list or system privacy setting denies access: "
+                   f"allow this process to write to {target}, then plan again"),
+                  ("read-only file system", status.st_uid, read_only,
+                   f"{target} is on a read-only file system, so it cannot be moved to another directory; make that file "
+                   "system writable, then plan again"))
+        for cause, user, volume, message in causes:
+            with self.subTest(cause=cause), mock.patch.object(installer.os, "access", side_effect=denied), \
+                    mock.patch.object(installer.os, "geteuid", return_value=user), \
+                    mock.patch.object(installer.os, "statvfs", return_value=volume):
+                with self.assertRaises(installer.Blocked) as caught:
+                    locations.require_movable()
+                self.assertEqual(str(caught.exception), message)
+                self.assertEqual(caught.exception.details, {"path": str(target), "mode": mode})
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX owners for an unprivileged user")
+    def test_a_target_or_skill_root_another_user_owns_blocks_plan_and_rollback_before_any_rename(self):
+        # A sudo run of apply leaves the target, and a skill root it created, owned by root with owner write, which
+        # the owner bit accepted until the first rename failed (#76). Only a CI runner's passwordless sudo changes
+        # the owner here; a rename needs write access to the moved directory itself, not to what it holds.
+        if os.environ.get("GITHUB_ACTIONS") != "true" or subprocess.run(["sudo", "-n", "true"],
+                                                                          capture_output=True).returncode:
+            self.skipTest("changing an owner needs the CI runner's passwordless sudo")
+        self.v52_layout()
+        receipt_path = self.installed()
+        after, state = snapshot(self.target), self.state()
+        owner, refused = f"{os.getuid()}:{os.getgid()}", self.base / "refused.json"
+        for path, reason in ((self.target, "so it cannot be moved to another directory"),
+                             (self.target.parent, "so github-workflow cannot be moved in or out of it")):
+            mode = f"{stat.S_IMODE(os.stat(str(path)).st_mode):04o}"
+            with self.subTest(path=path):
+                subprocess.run(["sudo", "-n", "chown", "0:0", str(path)], check=True)
+                try:
+                    planned = self.run_installer("plan", "--runtime", "claude", "--home", self.home, "--checksums",
+                                                 self.checksums, "--output", refused)
+                    rolled_back = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                finally:
+                    subprocess.run(["sudo", "-n", "chown", owner, str(path)], check=True)
+                for result, retry in ((planned, "plan again"), (rolled_back, "run rollback again")):
+                    self.assert_refused(result, 2)
+                    self.assertEqual(json.loads(result.stderr)["error"],
+                                     f"{path} cannot be written (mode {mode}), {reason}; {path} belongs to another user "
+                                     "(uid 0): have its owner or an administrator give you write access to it, or its "
+                                     f"ownership, then {retry}")
+                self.assertFalse(refused.exists())
+                self.assertFalse((state / "CURRENT").exists())
+                self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+                self.assertEqual(snapshot(self.target), after)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+
     def legacy_owner_write_receipt(self):
         """A receipt recording root mode 0550, as an older installer run by root could write, for a root at 0750."""
         self.v52_layout()

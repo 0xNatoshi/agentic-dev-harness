@@ -620,11 +620,13 @@ class Locations:
         self.state = self.skills.parent / "dev-harness-install"
 
     def require_movable(self, recorded_mode: int | None = None, retry: str = "plan again", moves=()) -> None:
-        """Block before any rename when the selected skill directory, its skill root or a moved duplicate lacks owner write permission.
+        """Block before any rename when this process cannot write the selected skill directory, its skill root or a
+        moved duplicate.
 
-        A conservative precondition of this installer, not a full access check: POSIX refuses to move a
-        directory to another parent without write permission on it, or to rename inside a root without
-        write permission there, so apply and rollback would stop at their first rename. It runs after the
+        POSIX refuses to move a directory to another parent without write permission on it, or to rename inside a
+        root without write permission there, so apply and rollback would stop at their first rename. The owner
+        write bit is required first, also for root; then the OS is asked for this process, which covers a directory
+        another user owns (one a sudo run of apply left), an ACL and a read-only file system (#76). It runs after the
         location checks, which already block a root that cannot be searched or listed (#54). Windows is not
         checked: a directory's read-only attribute does not prevent renames there, and Explorer sets it on
         customized folders.
@@ -649,20 +651,27 @@ class Locations:
                 continue  # A dangling link is not refused here, as before: its own mode passed too.
             except PermissionError:
                 raise inaccessible(physical.parent, "searched", retry) from None
+            mode = f"{stat.S_IMODE(status.st_mode):04o}"
+            named = str(path) if physical == path else f"{path} leads to {physical}, which"
+            details = {"path": str(path), "mode": mode}
+            if physical != path:
+                details["physical"] = str(physical)
             if not status.st_mode & stat.S_IWUSR:
-                mode = stat.S_IMODE(status.st_mode)
                 hint = f"add owner write permission to {physical}"
                 if path == self.target and recorded_mode is not None:
                     hint += f" (the receipt records mode {recorded_mode:04o}"
                     if not recorded_mode & stat.S_IWUSR:
                         hint += f"; rollback also accepts {recorded_mode | stat.S_IWUSR:04o}"
                     hint += ")"
-                named = str(path) if physical == path else f"{path} leads to {physical}, which"
-                details = {"path": str(path), "mode": f"{mode:04o}"}
-                if physical != path:
-                    details["physical"] = str(physical)
-                raise Blocked(f"{named} has no owner write permission (mode {mode:04o}), {reason}; {hint}, then {retry}",
+                raise Blocked(f"{named} has no owner write permission (mode {mode}), {reason}; {hint}, then {retry}",
                               details)
+            # A rename needs write access to the moved directory itself, not to what it holds.
+            if not os.access(str(physical), os.W_OK, effective_ids=os.access in os.supports_effective_ids):
+                if os.statvfs(str(physical)).f_flag & os.ST_RDONLY:
+                    raise Blocked(f"{named} is on a read-only file system, {reason}; make that file system writable, "
+                                  f"then {retry}", details)
+                fix = permission_fix(physical, stat.S_IWUSR, "write", "write", "write to")[1]
+                raise Blocked(f"{named} cannot be written (mode {mode}), {reason}; {fix}, then {retry}", details)
 
     def describe(self) -> dict:
         return {
