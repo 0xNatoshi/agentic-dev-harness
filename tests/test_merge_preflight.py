@@ -1316,18 +1316,21 @@ LIST_COLUMN_CASES = (
     Case("list column reset paragraph", 0, '- Never\n\nDone.\n\n - merge PRs'),
     Case("list column reset sibling", 0, '- Notes\n  - Never\n- Other\n  - merge PRs'),
 )
-# Issue #73: a negated lead-in item governs its later siblings and everything nested in them, including
-# continuations and fenced blocks, until the list ends or an item sits left of it ("list column reset
-# sibling" above). A merge label answered by a bare refusal or by waiting for the person who decides is a
-# hold, and so is a merge item under a parent that states its approval condition, read as the one sentence
-# 'Merge PRs until I approve'. A checklist status such as '- Not applicable' answers the item before it
-# and introduces nothing.
+# Issue #73: a negated lead-in item governs its own children and its direct later siblings, as before. A
+# childless dangling one ('- Never', '- Do not do the following', '- No agent may') also governs what is
+# nested in its later siblings, including continuations and fenced blocks, until the list ends or an item
+# sits left of it ("list column reset sibling" above); a lead-in with its own object or children does not
+# ('- Don't:' above '- Do:'). A merge label ('Merges', 'Merging PRs', 'Self-merge', not 'Rebase merging'
+# or 'Merged') answered by a bare refusal, or by waiting for the person who decides, is a hold. So is a
+# merge item under a parent that names an approval, read as the one sentence 'Merge PRs until I approve'.
+# A list item that states a status ('- Not applicable', '- Tests: not applicable') introduces nothing,
+# unless it ends in a colon.
 LEAD_SCOPE_CASES = (
     Case("lead scope later sibling child", 2, '- Never\n- Rules\n  - merge PRs'),
     Case("lead scope pointer later sibling child", 2, '- Do not do the following\n- Notes\n  - merge PRs'),
     Case("lead scope later sibling continuation", 2, '- No agent may\n- push to main\n\n  merge PRs'),
     Case("lead scope later sibling fence", 2, '- Never\n- x\n  ```\n  merge PRs\n  ```'),
-    Case("lead scope nested lead fence", 2, '- Never\n  - x\n- Rules\n  ```\n  git merge main\n  ```'),
+    Case("lead scope nested lead fence", 0, '- Never\n  - x\n- Rules\n  ```\n  git merge main\n  ```'),
     Case("lead scope dangling modal sibling", 2, '- No agent may\n- merge PRs'),
     Case("lead scope parent child", 2, '- Never\n  - merge PRs'),
     Case("lead scope sibling", 2, '- Never\n- merge PRs'),
@@ -1361,6 +1364,78 @@ LEAD_SCOPE_CASES = (
     Case("lead scope status not applicable", 0, '- Checklist\n- Not applicable\n- Merge PRs with squash after CI'),
     Case("lead scope status jitter", 0, '- Checklist\n - Not applicable\n- Merge PRs with squash after CI'),
     Case("lead scope status not needed", 0, '- Not needed\n- Merge PRs with squash'),
+    Case("lead scope dont do layout", 0, "- Don't:\n  - commit secrets\n  - push to main\n- Do:\n  - open a PR\n  - merge with squash after CI"),
+    Case("lead scope bold dont do layout", 0, "- **Don't**\n  - commit secrets\n- **Do**\n  - merge with squash after CI"),
+    Case("lead scope never do this always", 0, '- Never do this:\n  - commit secrets\n- Always:\n  - merge with squash after CI'),
+    Case("lead scope what not to do", 0, '- What not to do\n  - commit secrets\n- What to do\n  - merge with squash after CI'),
+    Case("lead scope never commit then workflow", 0, '- Never commit:\n  - `.env`\n  - build output\n- Workflow\n  - Merge with squash after CI'),
+    Case("lead scope do not touch then workflow", 0, '- Do not touch\n  - `vendor/`\n- Workflow\n  - merge with squash after CI'),
+    Case("lead scope do not edit then workflow", 0, '- Do NOT edit\n  - generated files\n- Workflow\n  - merge PRs with squash'),
+    Case("lead scope no secrets then process", 0, '- No secrets\n- Process\n  - Merge PRs with squash after CI'),
+    Case("lead scope no exceptions then process", 0, '- No exceptions\n- Process\n  - Merge PRs with squash after CI'),
+    Case("lead scope no todos then process", 0, '- No TODOs\n- Process\n  - Merge PRs with squash after CI'),
+    Case("lead scope no print then process", 0, '- No `print`\n- Process\n  - Merge PRs with squash after CI'),
+    Case("lead scope dont panic then process", 0, "- Don't panic\n- Process\n  - Merge PRs with squash after CI"),
+    Case("lead scope no emojis then process", 0, '- No emojis\n- Process\n  - Merge PRs with squash after CI'),
+    Case("lead scope nested no secrets release", 0, '- Security\n  - No secrets\n  - Release\n    - Merge with squash'),
+    Case("lead scope no secrets example fence", 0, '- No secrets\n- Example:\n\n  ```bash\n  gh pr merge 12 --squash\n  ```\n'),
+    Case("lead scope never with child release fence", 0, '- Never\n  - commit .env\n- Release steps:\n\n  ```bash\n  git merge --ff-only origin/main\n  ```\n'),
+    Case("lead scope no exceptions sync paragraph", 0, '- No exceptions\n- Sync your branch\n\n  Merge `origin/main` into it; never rebase.'),
+    Case("lead scope approval not required for child", 0, '- Approval is not required for\n  - merging PRs'),
+    Case("lead scope my approval not required child", 0, '- My approval is not required:\n  - merge PRs once CI is green'),
+    Case("lead scope review not required for child", 0, '- Review is not required for\n  - merging docs-only PRs'),
+    Case("lead scope not yet notes child", 0, '- Not yet\n  - Notes\n    - merge PRs'),
+    Case("lead scope not supported colon sibling", 2, '- Not supported:\n- merging PRs'),
+    Case("lead scope bold not supported colon sibling", 2, '- **Not supported:**\n- merge PRs'),
+    Case("lead scope not required colon sibling", 2, '- Not required:\n- merge PRs'),
+    Case("lead scope not applicable colon sibling", 2, '- Not applicable:\n- merge PRs'),
+    Case("lead scope bold not needed colon sibling", 2, '- **Not needed:**\n- merge PRs'),
+    Case("lead scope capabilities not supported colon", 2, '## Agent capabilities\n\n- Supported:\n  - opening PRs\n- Not supported:\n- merging PRs'),
+    Case("lead scope table not supported row", 2, '| Rule | |\n|---|---|\n| Not supported | |\n| merge PRs | |'),
+    Case("lead scope labelled status then workflow child", 0, '- Tests: not applicable\n- Workflow\n  - Merge PRs after CI'),
+    Case("lead scope checkbox status then workflow child", 0, '- [ ] Not applicable\n- [ ] Workflow\n  - [ ] Merge PRs after CI'),
+    Case("lead scope labelled status sibling", 0, '- Tests: not applicable\n- Merge PRs after CI'),
+    Case("lead scope checkbox status sibling", 0, '- [ ] Not applicable\n- [ ] Merge PRs after CI'),
+    Case("lead scope rebase merging no", 0, '- Rebase merging: no'),
+    Case("lead scope squash merge no", 0, '- Squash merge: no'),
+    Case("lead scope fast-forward merges no", 0, '- Fast-forward merges: no'),
+    Case("lead scope rebase merging never", 0, '- Rebase merging: never'),
+    Case("lead scope repository settings list", 0, '## Repository settings\n\n- Allow squash merging: yes\n- Allow merge commits: no\n- Allow rebase merging: no\n- Automatically delete head branches: yes'),
+    Case("lead scope auto-merge no", 0, '- Auto-merge: no'),
+    Case("lead scope allow auto-merge no", 0, '- Allow auto-merge: no'),
+    Case("lead scope automerge never", 0, '- Automerge: never'),
+    Case("lead scope delete branch on merge no", 0, '- Delete branch on merge: no'),
+    Case("lead scope pr merged no", 0, '- PR merged: no'),
+    Case("lead scope merged no", 0, '- Merged: no'),
+    Case("lead scope status merged no", 0, '- Status\n  - Merged: no'),
+    Case("lead scope merge to main never", 2, '- Merge to main: never'),
+    Case("lead scope self-merge never", 2, '- Self-merge: never'),
+    Case("lead scope merges never by agents", 2, '- Merges: never by agents'),
+    Case("lead scope merges not by agents", 2, '- Merges: not by agents'),
+    Case("lead scope merges never ask me first", 2, '- Merges: never, ask me first'),
+    Case("lead scope merges never ask me parens", 2, '- Merges: never (ask me)'),
+    Case("lead scope bold merges not yet child", 2, '- **Merges:**\n  - not yet'),
+    Case("lead scope merge policy never", 2, '- Merge policy: never'),
+    Case("lead scope merges never paragraph", 2, 'Merges: never'),
+    Case("lead scope merge autonomously dont wait", 0, "- Merge ready PRs autonomously; don't wait for me"),
+    Case("lead scope merge autonomously do not wait owner", 0, 'Merge autonomously when gates pass; do not wait for the owner.'),
+    Case("lead scope merge no need to wait owner", 0, '- Merge once CI is green - no need to wait for the owner'),
+    Case("lead scope merge directly no need to wait", 0, '- Merge directly; no need to wait for me'),
+    Case("lead scope merge when ready do not wait", 0, '- Merge when ready, do not wait for me'),
+    Case("lead scope merge without waiting owner", 0, 'Merge PRs without waiting for the owner.'),
+    Case("lead scope never wait for a maintainer", 0, 'Merge PRs when CI is green; never wait for a maintainer.'),
+    Case("lead scope merging child do not wait", 0, '- Merging\n  - do not wait for me'),
+    Case("lead scope after merging wait to publish", 0, 'After merging, wait for a maintainer to publish the release.'),
+    Case("lead scope once merged wait to verify", 0, 'Once merged, wait for the human to verify the preview deploy.'),
+    Case("lead scope merge then wait to publish", 0, '- Merge the release PR\n- Wait for the maintainers to publish the release'),
+    Case("lead scope release steps wait to publish", 0, '- Release\n  1. Merge the release PR\n  2. Wait for the owner to publish the GitHub release'),
+    Case("lead scope bold merges child wait for me", 2, '- **Merges:**\n  - wait for me'),
+    Case("lead scope until i say otherwise child", 0, '- Until I say otherwise:\n  - merge ready PRs'),
+    Case("lead scope requires one approval then merge", 0, '- Requires one approval\n  - then merge with squash'),
+    Case("lead scope flat requires one approving review", 0, '- Merge with squash; requires 1 approving review'),
+    Case("lead scope after approval child", 2, '- After approval:\n  - merge with squash'),
+    Case("lead scope unclosed fence under dangling sibling", 2, '- Never\n- x\n  ```\n  merge PRs'),
+    Case("lead scope shallowest lead-in governs", 2, '  * Never\n       1. Never\n  * merge PRs'),
 )
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
 # classify U+10D6E as Pd, so its conservative exit is 2 on that interpreter.
@@ -1397,8 +1472,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + LIST_COLUMN_CASES + LEAD_SCOPE_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 1074 or len({case.name for case in ALL_CASES}) != 1074:
-    raise RuntimeError("Merge fixture inventory must contain 1074 unique cases")
+if len(ALL_CASES) != 1146 or len({case.name for case in ALL_CASES}) != 1146:
+    raise RuntimeError("Merge fixture inventory must contain 1146 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
