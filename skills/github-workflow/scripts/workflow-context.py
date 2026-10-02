@@ -1378,34 +1378,33 @@ def default_base(pull, branch):
         raise EvidenceError('Server-author checks support only pull requests into the default branch')
 
 
-def setting_lines(text):
-    """(line, hidden) for each line outside managed blocks; hidden means code or an HTML comment.
+# Text after which Markdown rendering needs a full parser: a fence or code span delimiter, an unpaired
+# backtick, HTML or a comment, or an indented line.
+UNCLEAR = re.compile(r'``|~~~|<|^(?: {4}|\t)')
 
-    Rendered Markdown does not show such a line as a setting, so it can neither
-    set nor silently revoke one.
+
+def setting_lines(text):
+    """(line, hidden) for each line outside managed blocks; hidden means its rendering is not known.
+
+    Only lines in the file's leading clear region, before any line matching
+    UNCLEAR or holding an odd number of backticks, are known to render as
+    written. Tracking what a fence, code span, HTML block or comment hides
+    depends on containers such as list items, so every later line counts as
+    hidden, as does an indented line, which may be code. The managed block's
+    start marker is a comment, so its content is never read here.
     """
-    fence = None
-    comment = False
-    for line in outside_managed(text, (text,)).split('\n'):
-        opened = FENCE.match(line)
-        hidden = fence is not None or comment or opened is not None or line.startswith(('    ', '\t'))
-        if fence is not None:
-            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence) \
-                    and not opened.group(2).strip():
-                fence = None
-        elif opened and not comment:
-            fence = opened.group(1)
-        # Comment markers count even inside a fence: a fence in a list item ends with the item, which
-        # this scan does not track, so treating the marker as real can only hide more lines (exit 2).
-        position = 0
-        while True:
-            marker = line.find('-->' if comment else '<!--', position)
-            if marker < 0:
-                break
-            hidden = True
-            comment = not comment
-            position = marker + 3
-        yield line, hidden
+    clear = True
+    managed = False
+    for line in text.split('\n'):
+        # A line's own markers matter only for later lines; the exact-form check rejects them on the line.
+        hidden = not clear or line.startswith(('    ', '\t'))
+        clear = clear and not UNCLEAR.search(line) and line.count('`') % 2 == 0
+        if START.match(line):
+            managed = True
+        elif END.match(line):
+            managed = False
+        elif not managed:
+            yield line, hidden
 
 
 def configured_author_name(text):
@@ -1416,8 +1415,8 @@ def configured_author_name(text):
     authorize its own alias, and the PR recording one meets the profile-name
     decision. A PR changing an existing alias passes only while the profile still
     matches the old one, after which later merges block until profile and line
-    agree, so the change still needs the owner. Malformed, hidden or conflicting
-    lines block.
+    agree, so the change still needs the owner. Malformed or conflicting lines,
+    and lines after the leading clear region, block.
     """
     if text is None:
         return None
@@ -1430,7 +1429,7 @@ def configured_author_name(text):
         if not AUTHOR_NAME_LIKE.search(folded):
             continue
         if hidden:
-            raise EvidenceError('Merge author name line inside code or an HTML comment in published AGENTS.md')
+            raise EvidenceError('Merge author name line not above all code, HTML and comments in published AGENTS.md')
         line = line.strip()
         # A second label, even inside the note, would show two names for one setting.
         found = AUTHOR_NAME.fullmatch(line) if len(AUTHOR_NAME_LIKE.findall(folded)) == 1 else None
@@ -1567,7 +1566,7 @@ def identity_mode(args):
     if ('blocker', 'profile-name') in findings:
         print('identity: decision required: the server-generated merge author name follows the profile display '
               'name, which differs from the expected author name, case included: the account login, or the name the '
-              'owner recorded as `Merge author name:` in the published AGENTS.md outside the managed block. The merge '
+              'owner recorded as `Merge author name:` in the published AGENTS.md above the managed block. The merge '
               'stays blocked until they match or the user decides.', file=sys.stderr)
     if not possible:
         print('identity: possible commit emails are unreadable or empty, as under the default gh token scopes; the '
