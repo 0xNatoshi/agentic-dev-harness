@@ -209,9 +209,14 @@ def write_json(path: Path, value: object) -> None:
     write_durable(path, (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
-def read_json(path: Path) -> dict:
+def read_json(path: Path, retry: str | None = None) -> dict:
+    """With retry, a directory on the way to path that cannot be searched blocks with its fix (#54)."""
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except PermissionError as error:
+        if retry is not None:
+            searchable_part(Path(os.path.abspath(path)), retry)
+        raise Refused(f"Cannot read {path}: {error}")
     except (OSError, ValueError) as error:
         raise Refused(f"Cannot read {path}: {error}")
     if not isinstance(value, dict):
@@ -238,13 +243,56 @@ def exists(path: Path) -> bool:
     return os.path.lexists(str(path))
 
 
-def inventory(root: Path) -> dict | None:
+def inaccessible(path: Path, action: str, retry: str = "plan again") -> Blocked:
+    """A directory the OS refused to search or list, named with the fix instead of an error on one of its children (#54).
+
+    Read and search permission are both named: either alone leaves the directory uninspectable. On POSIX the
+    fix follows the owner and mode: a directory another user owns (one created with sudo) or one whose owner
+    already has both permissions (an ACL or a macOS privacy control) is not fixed by the owner's mode."""
+    try:
+        status = os.stat(str(path))
+    except OSError:
+        status = None
+    mode = f"{stat.S_IMODE(status.st_mode):04o}" if status else None
+    shown = f" (mode {mode})" if mode else ""
+    fix = f"add owner read and search (execute) permission to {path}"
+    if status and os.name != "nt":
+        if status.st_uid != os.geteuid():
+            fix = (f"{path} belongs to another user (uid {status.st_uid}): have its owner or an administrator give you "
+                   "read and search (execute) access to it, or its ownership")
+        elif status.st_mode & (stat.S_IRUSR | stat.S_IXUSR) == stat.S_IRUSR | stat.S_IXUSR:
+            fix = (f"its owner already has read and search permission, so an access control list or system privacy "
+                   f"setting denies access: allow this process to read and search {path}")
+    return Blocked(f"{path} cannot be {action}{shown}, so the installer cannot inspect what it holds; {fix}, then {retry}",
+                   {"path": str(path), "mode": mode})
+
+
+def searchable_part(path: Path, retry: str) -> Path | None:
+    """The deepest existing path on the way to path, or None when none exists.
+
+    Top-down with lstat, as in check(): a directory that cannot be searched is named with its fix,
+    never taken for an absent one."""
+    found = None
+    for part in reversed([path, *path.parents]):
+        try:
+            os.lstat(str(part))
+        except (FileNotFoundError, NotADirectoryError):
+            break
+        except PermissionError:
+            raise inaccessible(part.parent, "searched", retry) from None
+        found = part
+    return found
+
+
+def inventory(root: Path, retry: str | None = None) -> dict | None:
     """Relative POSIX path -> type, mode and, for files, SHA-256 and size. None when absent.
 
     The root itself is the `.` entry, so its mode takes part in every drift and restoration check.
 
     A link, junction or special file anywhere in the tree blocks: its target is outside what an
     exact rollback can own.
+    With retry, given by a command checking before any rename, a directory in the tree that cannot be
+    listed or searched blocks with its fix (#54); inside a transaction the error stays an OSError.
     """
     if not exists(root):
         return None
@@ -256,13 +304,25 @@ def inventory(root: Path) -> dict | None:
     pending = [(root, "")]
     while pending:
         directory, prefix = pending.pop()
-        with os.scandir(str(directory)) as listing:
+        try:
+            listing = os.scandir(str(directory))
+        except PermissionError:
+            if retry is None:
+                raise
+            raise inaccessible(directory, "listed", retry) from None
+        with listing:
             for item in listing:
                 relative = prefix + item.name
                 path = directory / item.name
-                if is_link(path):
+                try:
+                    # Listing needs read permission only; reaching an entry also needs search permission.
+                    linked, status = is_link(path), os.lstat(str(path))
+                except PermissionError:
+                    if retry is None:
+                        raise
+                    raise inaccessible(directory, "searched", retry) from None
+                if linked:
                     raise Blocked(f"Link or junction inside the tree: {path}", {"path": str(path)})
-                status = os.lstat(str(path))
                 if stat.S_ISDIR(status.st_mode):
                     entries[relative] = {"type": "dir", "mode": stat.S_IMODE(status.st_mode)}
                     pending.append((path, relative + "/"))
@@ -500,32 +560,50 @@ class Locations:
         self.target = self.skills / SKILL
         self.state = self.skills.parent / "dev-harness-install"
 
-    def require_movable(self, recorded_mode: int | None = None, retry: str = "plan again") -> None:
-        """Block before any rename when the selected skill directory or its skill root lacks owner write permission.
+    def require_movable(self, recorded_mode: int | None = None, retry: str = "plan again", moves=()) -> None:
+        """Block before any rename when the selected skill directory, its skill root or a moved duplicate lacks owner write permission.
 
         A conservative precondition of this installer, not a full access check: POSIX refuses to move a
         directory to another parent without write permission on it, or to rename inside a root without
         write permission there, so apply and rollback would stop at their first rename. It runs after the
-        location checks, so it covers an accessible root; retired duplicates and an inaccessible discovery
-        parent are not diagnosed here (#54). Windows is not checked: a directory's read-only attribute does
-        not prevent renames there, and Explorer sets it on customized folders.
+        location checks, which already block a root that cannot be searched or listed (#54). Windows is not
+        checked: a directory's read-only attribute does not prevent renames there, and Explorer sets it on
+        customized folders.
         recorded_mode is the target mode a receipt expects, named so one fix also satisfies its drift check;
         a recorded mode without owner write is also satisfied by that mode with owner write added.
+        moves adds (directory, reason) pairs for retired duplicates, which leave their parent on apply and
+        return to it on rollback.
         """
         if os.name == "nt":
             return
         for path, reason in ((self.skills, f"so {SKILL} cannot be moved in or out of it"),
-                             (self.target, "so it cannot be moved to another directory")):
-            if exists(path) and not os.lstat(str(path)).st_mode & stat.S_IWUSR:
-                mode = stat.S_IMODE(os.lstat(str(path)).st_mode)
-                hint = f"add owner write permission to {path}"
+                             (self.target, "so it cannot be moved to another directory"), *moves):
+            if not exists(path):
+                continue
+            # A rename writes to the physical directory, so a link the location checks accept (a secondary root
+            # linked since apply) is followed: the link's own mode, often 0777, says nothing about its target.
+            # Links above path are already followed by lstat.
+            physical = Path(os.path.realpath(str(path))) if is_link(path) else path
+            try:
+                status = os.stat(str(path))
+            except FileNotFoundError:
+                continue  # A dangling link is not refused here, as before: its own mode passed too.
+            except PermissionError:
+                raise inaccessible(physical.parent, "searched", retry) from None
+            if not status.st_mode & stat.S_IWUSR:
+                mode = stat.S_IMODE(status.st_mode)
+                hint = f"add owner write permission to {physical}"
                 if path == self.target and recorded_mode is not None:
                     hint += f" (the receipt records mode {recorded_mode:04o}"
                     if not recorded_mode & stat.S_IWUSR:
                         hint += f"; rollback also accepts {recorded_mode | stat.S_IWUSR:04o}"
                     hint += ")"
-                raise Blocked(f"{path} has no owner write permission (mode {mode:04o}), {reason}; {hint}, then {retry}",
-                              {"path": str(path), "mode": f"{mode:04o}"})
+                named = str(path) if physical == path else f"{path} leads to {physical}, which"
+                details = {"path": str(path), "mode": f"{mode:04o}"}
+                if physical != path:
+                    details["physical"] = str(physical)
+                raise Blocked(f"{named} has no owner write permission (mode {mode:04o}), {reason}; {hint}, then {retry}",
+                              details)
 
     def describe(self) -> dict:
         return {
@@ -537,8 +615,26 @@ class Locations:
             "state_root": str(self.state),
         }
 
-    def check(self) -> None:
+    def check(self, retry: str = "plan again") -> None:
         """Block when the target's canonical source or the state location cannot be owned safely."""
+        # Top-down, so a directory that cannot be searched or listed is named before any of its children is
+        # inspected (#54). The OS decides, so ownership and ACLs need no mode reasoning: lstat needs search
+        # permission on the parent, listdir read permission on the directory itself.
+        for root in self.roots:
+            for path in reversed([root / SKILL, root, *root.parents]):
+                try:
+                    os.lstat(str(path))
+                except (FileNotFoundError, NotADirectoryError):
+                    break
+                except PermissionError:
+                    raise inaccessible(path.parent, "searched", retry) from None
+                if path in (self.skills.parent, self.skills) and is_link(path):
+                    break  # Refused as a link below, before anything behind it is inspected.
+                if path == root and os.path.isdir(str(root)):
+                    try:
+                        os.listdir(str(root))
+                    except PermissionError:
+                        raise inaccessible(root, "listed", retry) from None
         for path in (self.skills.parent, self.skills, self.target):
             if is_link(path):
                 raise Blocked(f"{path} is a link or junction; its canonical source is not identified", {"path": str(path)})
@@ -577,8 +673,13 @@ def declares_skill(directory: Path) -> bool:
 def discoverable(roots) -> list:
     """Every directory under the skill roots that a runtime could load as github-workflow.
 
-    Linked directories are reported, not followed, so the plan can block on them.
+    Linked directories are reported, not followed, so the plan can block on them. A directory that cannot
+    be listed or searched blocks: whether it holds another copy cannot be established (#54).
     """
+    def unlisted(error: OSError) -> None:
+        if isinstance(error, PermissionError):
+            raise inaccessible(Path(error.filename), "listed") from None
+
     found = []
     existing = [root for root in roots if root.is_dir()]
     for index, root in enumerate(existing):
@@ -587,14 +688,23 @@ def discoverable(roots) -> list:
         if any(contains(str(other), str(root)) and (not contains(str(root), str(other)) or position < index)
                for position, other in enumerate(existing) if position != index):
             continue
-        for directory, subdirectories, names in os.walk(str(root)):
+        for directory, subdirectories, names in os.walk(str(root), onerror=unlisted):
             kept = []
-            for name in sorted(subdirectories):
-                path = Path(directory) / name
-                if not is_link(path):
-                    kept.append(name)
-                elif name == SKILL or declares_skill(path):
-                    found.append(str(path))
+            try:
+                if subdirectories or names:
+                    # Listing needs read permission only; reaching any entry also needs search permission.
+                    try:
+                        os.lstat(os.path.join(directory, [*subdirectories, *names][0]))
+                    except FileNotFoundError:
+                        pass
+                for name in sorted(subdirectories):
+                    path = Path(directory) / name
+                    if not is_link(path):
+                        kept.append(name)
+                    elif name == SKILL or declares_skill(path):
+                        found.append(str(path))
+            except PermissionError:
+                raise inaccessible(Path(directory), "searched") from None
             subdirectories[:] = kept
             path = Path(directory)
             if "SKILL.md" in names and (path.name == SKILL or declares_skill(path)):
@@ -642,7 +752,7 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
     package = load_package(package_source)
     verification = verify_package(package, checksums)
     package_files = package.skill_files()
-    before = inventory(locations.target)
+    before = inventory(locations.target, "plan again")
     classification = {name: classify(name, entry, package_files) for name, entry in (before or {}).items()}
     preserved = [name for name, kind in classification.items() if kind in PRESERVED]
     kept = [name for name, kind in classification.items() if kind == "directory"]
@@ -667,6 +777,10 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
     if overlapping:
         raise Blocked("A github-workflow SKILL.md overlaps a skill root, the target or another copy. Owner: the operator. "
                       "Trigger: move the stray SKILL.md or nested copy out of the skill roots, then plan again", overlapping)
+    # Each duplicate leaves its root on apply (--retire-duplicate) and returns on rollback (#54).
+    locations.require_movable(moves=[move for path in duplicates for move in (
+        (Path(path).parent, f"so the duplicate {path} cannot be moved out of it"),
+        (Path(path), "so this duplicate cannot be moved to another directory"))])
     plan = {
         "plan_format": 1,
         "installer_version": INSTALLER_VERSION,
@@ -684,7 +798,7 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
                                       "give each retired file's retired_copy and backup location, and a rollback_command "
                                       "that runs the package installer's verified copy kept in that directory"},
         "duplicates": duplicates,
-        "duplicate_inventories": {path: inventory(Path(path)) for path in duplicates},
+        "duplicate_inventories": {path: inventory(Path(path), "plan again") for path in duplicates},
         "legacy_commands": [str(path) for path in locations.legacy if exists(path)],
         "interrupted": str(locations.state / "CURRENT") if exists(locations.state / "CURRENT") else None,
     }
@@ -988,6 +1102,29 @@ def finish(state: Path) -> None:
     sync_directory(state)
 
 
+def record_undo_error(operation: Operation, error: Exception) -> str:
+    """Journal why an undo failed; when the journal cannot record it either, say so in the report instead.
+
+    The same cause (a full disk, an unwritable state directory) can stop both, and the report must still
+    name the original failure and `recover` (#54)."""
+    operation.record["undo_error"] = str(error)
+    try:
+        write_json(operation.path, operation.record)
+    except OSError as unrecorded:
+        return f" (the journal could not record it: {unrecorded})"
+    return ""
+
+
+def undo_or_report(operation: Operation, failure: object) -> None:
+    """Restore the origin state after failure, or record why not and report an incomplete restoration."""
+    try:
+        operation.undo()
+    except (Failure, OSError) as error:
+        raise Incomplete(f"{failure}; restoration incomplete: {error}{record_undo_error(operation, error)}. Recovery "
+                         f"data kept in {operation.path.parent}; run `recover` with the same --plan or --receipt before "
+                         "any other step", getattr(error, "details", None))
+
+
 def attempt(operation: Operation, state: Path) -> None:
     """Run an operation; on failure restore the origin state or report an incomplete restoration."""
     try:
@@ -998,14 +1135,7 @@ def attempt(operation: Operation, state: Path) -> None:
         failure = Refused(f"Rename failed: {error}")
     else:
         return
-    try:
-        operation.undo()
-    except (Failure, OSError) as error:
-        operation.record["undo_error"] = str(error)
-        write_json(operation.path, operation.record)
-        raise Incomplete(f"{failure}; restoration incomplete: {error}. Recovery data kept in {operation.path.parent}; "
-                         "run `recover` with the same --plan or --receipt",
-                         getattr(error, "details", None))
+    undo_or_report(operation, failure)
     finish(state)
     raise Refused(f"{failure}; the original state was restored and verified", failure.details)
 
@@ -1024,7 +1154,7 @@ def command_plan(options) -> dict:
 
 
 def command_apply(options) -> dict:
-    plan = read_json(Path(options.plan))
+    plan = read_json(Path(options.plan), "run apply again")
     if plan.get("plan_format") != 1:
         raise Refused("Unsupported plan format")
     locations = Locations(plan["runtime"], plan["home"], plan.get("config_root"))
@@ -1091,8 +1221,10 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
             fsync_tree(duplicate_backup)
             if differences(duplicate_inventory, inventory(duplicate_backup)):
                 raise Refused(f"The backup copy of {path} does not match its inventory")
+            # Where the copy physically was, so rollback can refuse a link added or retargeted since (#54).
             moves.append({"from": str(path), "to": str(transaction / "duplicates" / str(index) / path.name),
-                          "inventory": duplicate_inventory, "backup": str(duplicate_backup)})
+                          "inventory": duplicate_inventory, "backup": str(duplicate_backup),
+                          "resolved": os.path.realpath(str(path))})
         staged = transaction / "staged" / SKILL
         stage(staged, package_files, locations.target, before or {}, plan["classification"])
         fsync_tree(staged)
@@ -1119,15 +1251,20 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         "moves": moves,
     })
     attempt(operation, locations.state)
-    discovered = discoverable(locations.roots)
-    if len(discovered) != 1 or not same_path(discovered[0], str(locations.target)):
+    try:
+        discovered, unreadable = discoverable(locations.roots), None
+    except Blocked as error:
+        # A directory made unreadable after the checks hides whether another copy exists: the renames are
+        # undone as for a second copy, never left in place behind an exit 2 (#54).
+        discovered, unreadable = None, error
+    if unreadable or len(discovered) != 1 or not same_path(discovered[0], str(locations.target)):
         operation.record["discovered"] = discovered
-        try:
-            operation.undo()
-        except (Failure, OSError) as error:
-            raise Incomplete(f"Exactly one discoverable copy was not established and restoration is incomplete: {error}")
+        failure = unreadable or "Exactly one discoverable copy was not established"
+        undo_or_report(operation, failure)
         finish(locations.state)
-        raise Refused("Exactly one discoverable copy was not established; the original state was restored", discovered)
+        if unreadable:
+            raise Refused(f"{unreadable}; the original state was restored", unreadable.details)
+        raise Refused(f"{failure}; the original state was restored", discovered)
     classification = plan["classification"]
     receipt_path = transaction / "receipt.json"
     receipt = {
@@ -1147,8 +1284,8 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         "dropped_paths": sorted(name for name, kind in classification.items() if kind == "regenerable cache"),
         "preserved_paths": sorted(name for name, kind in classification.items() if kind in PRESERVED),
         "replaced_paths": sorted(name for name, kind in classification.items() if kind == "package"),
-        "duplicates": [{"path": move["from"], "retired_to": move["to"], "backup": move["backup"], "inventory": move["inventory"]}
-                       for move in moves],
+        "duplicates": [{"path": move["from"], "retired_to": move["to"], "backup": move["backup"], "inventory": move["inventory"],
+                        "resolved": move["resolved"]} for move in moves],
         "legacy_commands": plan["legacy_commands"],
         "instruction_files": file_hashes(locations.instructions),
         "maintenance_boundary": boundary,
@@ -1221,7 +1358,8 @@ def staging_problems(staged: dict, package_files: dict, before: dict, classifica
 
 def command_rollback(options) -> dict:
     given = Path(os.path.abspath(options.receipt))
-    receipt = read_json(given)
+    # The receipt is read before Locations.check(), so an unsearchable directory above it is diagnosed here.
+    receipt = read_json(given, "run rollback again")
     if receipt.get("receipt_format") != 1:
         raise Refused("Unsupported receipt format")
     locations = Locations(receipt["runtime"], receipt["home"], receipt.get("config_root"))
@@ -1232,7 +1370,7 @@ def command_rollback(options) -> dict:
     receipt_path = transaction / "receipt.json"
     if transaction.parent != locations.state:
         raise Refused("The receipt's transaction is not in the runtime's installer state directory")
-    if not same_path(str(given), str(receipt_path)) and canonical(read_json(receipt_path)) != canonical(receipt):
+    if not same_path(str(given), str(receipt_path)) and canonical(read_json(receipt_path, "run rollback again")) != canonical(receipt):
         raise Refused(f"The receipt differs from the canonical receipt {receipt_path}; roll back with that one")
     if receipt.get("state") != "installed":
         raise Refused(f"The receipt state is {receipt.get('state')!r}; only an installed receipt can be rolled back")
@@ -1240,7 +1378,7 @@ def command_rollback(options) -> dict:
         raise Refused("The receipt has no after-inventory; rollback refused")
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
-    locations.check()
+    locations.check("run rollback again")
     with Lock(locations.state):
         if exists(locations.state / "CURRENT"):
             raise Blocked(f"An interrupted transaction is recorded in {locations.state / 'CURRENT'}; run `recover` first")
@@ -1248,8 +1386,47 @@ def command_rollback(options) -> dict:
         root = receipt["after"].get(".")
         recorded = root.get("mode") if isinstance(root, dict) else None
         recorded = recorded if type(recorded) is int else None
-        locations.require_movable(recorded, "run rollback again")
-        active = inventory(locations.target)
+        # Each retired duplicate returns to its original root, or below its nearest existing ancestor (#54).
+        # The retired copy itself is not checked: its inventory records its mode, so one that lost owner
+        # write no longer matches and the verified backup is restored instead.
+        # The parent the duplicate returns through must be searchable as well as writable.
+        restoring = []
+        for duplicate in receipt["duplicates"]:
+            original = Path(duplicate["path"])
+            parent = searchable_part(original, "run rollback again")
+            if parent == original:
+                parent = original.parent
+            if parent is not None:
+                restoring.append((parent, f"so the retired duplicate {original} cannot be moved back into it"))
+            # The copy must go back to the directory it was retired from. A link or junction added or retargeted
+            # on the way since apply (inside the skill root, at a secondary root, at its config root or above)
+            # would send it elsewhere; a link that still resolves to the same place, as with dotfiles, is accepted.
+            retired_from = duplicate.get("resolved")
+            if "resolved" in duplicate and not isinstance(retired_from, str):
+                raise Refused(f"The receipt records no valid location for the retired duplicate {original}; rollback refused")
+            skill_root = next((path for path in locations.roots if path in original.parents), None)
+            if retired_from is None and skill_root is not None:
+                # Older receipts, such as those of installer 1.0.0, do not record where the copy was. Nothing in
+                # them shows where a link at its skill root or at the directory holding that root (the config
+                # root for <config>/skills) pointed at apply, so such a link blocks. Discovery never follows
+                # links below a root, so the copy was retired from its path below the root's resolution.
+                linked = next((path for path in (skill_root.parent, skill_root)
+                               if os.path.isdir(str(path.parent)) and is_link(path)), None)
+                if linked is not None:
+                    raise Blocked(f"{linked} is a link or junction, and this receipt predates the record of where each "
+                                  f"retired duplicate was, so rollback cannot confirm that {original} would return to "
+                                  f"the folder it was retired from; replace {linked} with the folder it pointed to at "
+                                  "apply, then run rollback again, or, if it still points there, roll back with the "
+                                  "installer that wrote this receipt", {"path": str(original), "link": str(linked)})
+                retired_from = os.path.join(os.path.realpath(str(skill_root)), os.path.relpath(str(original), str(skill_root)))
+            resolved = os.path.realpath(str(original))
+            if isinstance(retired_from, str) and os.path.normcase(resolved) != os.path.normcase(retired_from):
+                raise Blocked(f"The retired duplicate {original} would be restored to {resolved}, not {retired_from} where "
+                              "it was retired from: a link or junction on the way was added or retargeted after apply; "
+                              "restore that folder, then run rollback again",
+                              {"path": str(original), "resolves_to": resolved, "retired_from": retired_from})
+        locations.require_movable(recorded, "run rollback again", restoring)
+        active = inventory(locations.target, "run rollback again")
         origin = receipt["after"]
         if (recorded is not None and not recorded & stat.S_IWUSR and isinstance(active, dict)
                 and isinstance(active.get("."), dict) and active["."].get("mode") == recorded | stat.S_IWUSR):
@@ -1346,7 +1523,7 @@ def mark_rolled_back(record: dict, tolerant: bool = False) -> bool:
 def command_recover(options) -> dict:
     if options.plan or options.receipt:
         # The recorded config root, so recovery finds the state whatever the environment now says.
-        recorded = read_json(Path(options.plan or options.receipt))
+        recorded = read_json(Path(options.plan or options.receipt), "run recover again")
         locations = Locations(recorded["runtime"], recorded["home"], recorded.get("config_root"))
     elif options.runtime:
         locations = Locations(options.runtime, options.home)
@@ -1354,7 +1531,7 @@ def command_recover(options) -> dict:
         raise Refused("recover needs --plan, --receipt or --runtime")
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
-    locations.check()
+    locations.check("run recover again")
     nothing = {"result": "nothing to recover", "config_root": str(locations.config), "state_root": str(locations.state)}
     if not (options.plan or options.receipt):
         # --runtime resolves the config root from this invocation only; a transaction planned under
@@ -1397,10 +1574,9 @@ def command_recover(options) -> dict:
         try:
             operation.undo()
         except (Failure, OSError) as error:
-            operation.record["undo_error"] = str(error)
-            write_json(operation.path, operation.record)
-            raise Incomplete(f"Restoration incomplete: {error}. Recovery data kept in {operation.path.parent}; "
-                             "fix the cause and run `recover` again", getattr(error, "details", None))
+            raise Incomplete(f"Restoration incomplete: {error}{record_undo_error(operation, error)}. Recovery data kept "
+                             f"in {operation.path.parent}; fix the cause and run `recover` again",
+                             getattr(error, "details", None))
         result = {"result": "restored", "operation": record["operation"], "journal": str(journal), "target": record["target"]}
         for key in ("parked_drift", "moved_drift"):
             if key in operation.record:
