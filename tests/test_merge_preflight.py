@@ -1267,6 +1267,55 @@ TEXT_CASES = (
     Case("conservative main is frozen in a screenshot", 2, "Main is frozen in the screenshot below."),
 )
 
+# Issue #13: a list item nests only from its parent's content column (CommonMark), so an item indented less
+# than that column is a sibling. That reading only adds holds: the marker-column nesting still gives the
+# context, so a jittered item and everything after it keep the parent its author may have meant. The rows
+# pin both sides of each boundary: marker width, padding, tabs and quotes.
+LIST_COLUMN_CASES = (
+    Case("list column required 1", 2, ' - Never\n- merge PRs'),
+    Case("list column required 2", 2, " - Don't, unless I approve\n- merge"),
+    Case("list column required 3", 2, '  - Do not\n- merge'),
+    Case("list column root jitter 1", 2, '   - Never\n  - merge PRs'),
+    Case("list column root jitter 2", 2, '  - Never\n - merge PRs'),
+    Case("list column complete sibling 1", 0, ' - Do not add dependencies\n- Merge requests use squash'),
+    Case("list column jitter reads both ways 1", 2, '- Do not add dependencies\n - Merge requests use squash'),
+    Case("list column jitter reads both ways 2", 2, '- No agent may\n - merge PRs'),
+    Case("list column jitter reads both ways 3", 2, '1. No agent may\n  - merge PRs'),
+    Case("list column jitter later items 1", 2, '- No agent may\n - push to main\n - merge PRs'),
+    Case("list column jitter later items 2", 2, '1. No agent may\n  - push tags\n  - merge PRs'),
+    Case("list column jitter later items 3", 2, '- Never\n - push to main\n   - merge PRs'),
+    Case("list column jitter later items 4", 2, '- No agent may\n - push to main\n\n   merge PRs'),
+    Case("list column false nesting 1", 2, '- Notes\n - Never\n- merge PRs'),
+    Case("list column real nesting 1", 0, '- Notes\n  - Never\n- merge PRs'),
+    Case("list column root lead survives child 1", 2, '- Never\n  - notes\n- merge PRs'),
+    Case("list column child lead child sibling 1", 2, '- Notes\n  - Never\n  - merge PRs'),
+    Case("list column child lead expires 1", 0, '- Notes\n  - Never\n    - docs\n- merge PRs'),
+    Case("list column return to child scope 1", 2, '- Notes\n  - Never\n    - docs\n  - merge PRs'),
+    Case("list column ordered width 2 1", 2, '1. Notes\n  - Never\n2. merge PRs'),
+    Case("list column ordered width 2 2", 0, '1. Notes\n   - Never\n2. merge PRs'),
+    Case("list column ordered width 3 1", 2, '10) Notes\n   - Never\n11) merge PRs'),
+    Case("list column ordered width 3 2", 0, '10) Notes\n    - Never\n11) merge PRs'),
+    Case("list column ordered max width 1", 2, '123456789. Notes\n          - Never\n- merge PRs'),
+    Case("list column ordered max width 2", 0, '123456789. Notes\n           - Never\n- merge PRs'),
+    Case("list column four-space padding 1", 2, '-    Notes\n    - Never\n- merge PRs'),
+    Case("list column four-space padding 2", 0, '-    Notes\n     - Never\n- merge PRs'),
+    Case("list column excess padding 1", 0, '-     Notes\n  - Never\n- merge PRs'),
+    Case("list column empty marker 1", 0, '-\n  - Never\n- merge PRs'),
+    Case("list column empty marker 2", 0, '-   \n  - Never\n- merge PRs'),
+    Case("list column non-ASCII digits 1", 2, '\u0661. Notes\n  - Never\n- merge PRs'),
+    Case("list column leading tab 1", 0, '  - Notes\n\t- Never\n- merge PRs'),
+    Case("list column marker tab 1", 2, '1.\tNotes\n   - Never\n2. merge PRs'),
+    Case("list column marker tab 2", 0, '1.\tNotes\n    - Never\n2. merge PRs'),
+    Case("list column quote 1", 2, '>  - Never\n> - merge PRs'),
+    Case("list column quote 2", 0, '> - Notes\n>   - Never\n> - merge PRs'),
+    Case("list column mixed families 1", 2, ' - Never\n* merge PRs'),
+    Case("list column mixed families 2", 2, ' - Never\n1. merge PRs'),
+    # The content-column chain resets with the marker-column chain: at a heading, after a paragraph and at a
+    # shallower sibling item.
+    Case("list column reset heading", 0, '- Never\n# H\n - merge PRs'),
+    Case("list column reset paragraph", 0, '- Never\n\nDone.\n\n - merge PRs'),
+    Case("list column reset sibling", 0, '- Notes\n  - Never\n- Other\n  - merge PRs'),
+)
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
 # classify U+10D6E as Pd, so its conservative exit is 2 on that interpreter.
 DASH_CODEPOINTS = (
@@ -1301,9 +1350,9 @@ ROUTING_CASES = (
     Case("published-only veto", 1, setup="published_wait"),
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
-ALL_CASES = TEXT_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 995 or len({case.name for case in ALL_CASES}) != 995:
-    raise RuntimeError("Merge fixture inventory must contain 995 unique cases")
+ALL_CASES = TEXT_CASES + LIST_COLUMN_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
+if len(ALL_CASES) != 1036 or len({case.name for case in ALL_CASES}) != 1036:
+    raise RuntimeError("Merge fixture inventory must contain 1036 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
