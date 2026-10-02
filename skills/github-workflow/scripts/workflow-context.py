@@ -722,17 +722,22 @@ MERGE_LABEL = (r'(?:self[\s-]?)?(?:merges?|merging|fusions?)(?:\s+polic(?:y|ies)
 # first: 'never', 'Never under any circumstances', 'not yet', 'never by agents', 'never (ask me)'.
 # A refusal with its own object ('no direct pushes') or a status ('not applicable') is not one.
 REFUSAL = (r'(?:never|not|no|jamais|pas|do\s+not|don[’\x27]t)'
-           r'(?:[\s,]+(?:yet|under|in\s+any|ever|again|at\s+all|whatsoever|without)\b[^.!?;:()]{0,60}'
+           r'(?:[\s,]+(?:yet|under|in\s+any|ever|again|at\s+all|whatsoever)\b[^.!?;:()]{0,60}'
+           r'|\s+without\s+[^.!?;:()]{0,40}?' + APPROVAL_OR_FIRST + r'[^.!?;:()]{0,30}'
            r'|\s+by\s+(?:an?\s+|the\s+|any\s+)?(?:agents?|bots?|ai|assistants?|automation)\b'
            r'|\s*[(,;\-–—]\s*(?:ask|check\s+with)\s+(?:me|us|the\s+owners?)\b[^.!?;:()]{0,30}\)?)?\s*[.!]?')
-LABEL_REFUSAL = re.compile(MERGE_LABEL + r'\s*:\s*' + REFUSAL)
+# Waiting for someone who decides, as the whole answer to a merge label: '- Merging' above '- wait for
+# me', 'Merging: wait for the release manager'. It reads as 'Wait for a reviewer before merging' does;
+# 'do not wait for me' or 'no need to wait' does not start so. Only their decision may follow: '- wait
+# for a maintainer to publish the release' or '- then wait for the owner' names a step after the
+# merge, as 'After merging, wait for a maintainer to publish the release' does.
+WAIT_DECIDER = (r'(?:(?:always|first|please|just|(?:you\s+)?(?:must|should))\s+)?(?:wait\w*|attend\w*)\s+'
+                r'(?:for\s+|on\s+|upon\s+)?' + DECIDER_ROLE
+                + r'(?:[’\x27]s\s+(?:approv\w*|ok(?:ay)?|go|sign[ -]?off|decision|review)|\s+to\s+' + DECIDER_ACT + r')?'
+                r'(?:[\s,]+(?:first|before\s+(?:merging|any\s+merge|you\s+merge)))?\s*[.!]?')
+LABEL_REFUSAL = re.compile(MERGE_LABEL + r'\s*:\s*(?:' + REFUSAL + r'|' + WAIT_DECIDER + r')')
 LABEL_ITEM = re.compile(MERGE_LABEL + r'\s*:?')
 BARE_REFUSAL = re.compile(REFUSAL)
-# Waiting for the person who decides, as the whole answer to a merge label: '- Merging' above '- wait
-# for me'. Reviewers and other roles stay out of DECIDER, so '- wait for a reviewer' is a review gate,
-# as 'Merge once a reviewer approves' is; 'do not wait for me' or 'no need to wait' does not start so.
-WAIT_DECIDER = re.compile(r'(?:(?:always|first|please|then|just)\s+)?(?:wait\w*|attend\w*)\s+(?:for\s+|on\s+|upon\s+)?'
-                          + DECIDER + r'(?:[^.!?;]{0,60})?[.!]?')
 
 
 def merge_label_rule(text, label_text):
@@ -748,7 +753,7 @@ def merge_label_rule(text, label_text):
         return True
     if label_text is None or len(label_text) > LEAD_LIMIT or not LABEL_ITEM.fullmatch(strip_markers(label_text).strip()):
         return False
-    return bool(BARE_REFUSAL.fullmatch(own) or WAIT_DECIDER.fullmatch(own))
+    return bool(BARE_REFUSAL.fullmatch(own) or re.fullmatch(WAIT_DECIDER, own))
 
 
 LEAD_LIMIT = 120
@@ -778,10 +783,14 @@ FUNCTION_WORD = re.compile(LEAD_START + r'|of|it|them|to|a|an|do|if|as|so|long|o
                            r'faire|faites|fais|de|d|l|un|une|des|sur|vers|si')
 # A checklist status answers the item before it instead of introducing the items after it:
 # '- Not applicable', '- [ ] Not needed' or '- Tests: not applicable' above '- Merge PRs with squash
-# after CI' (#73). Only list items: a table row or an item ending in a colon ('- Not supported:' above
-# '- merging PRs') still introduces what follows.
-STATUS_ITEM = re.compile(r'(?:\[[\sx]\]\s*)?(?:[^\W\d_][^:]{0,40}:\s*)?(?:not|pas)\s+(?:applicable|needed|required'
-                         r'|necessary|relevant|available|supported|started|done|used|set|tested|planned|mandatory'
+# after CI' (#73). Only list items: a table row or an item ending in a colon ('- Not needed:' above
+# '- merging PRs') still introduces what follows. 'Not supported' and 'not available' are not
+# statuses: they say what an agent may not do.
+# A label that names who it applies to is a rule, not a status: '- Agents: not supported' above
+# '- merging PRs'.
+STATUS_ITEM = re.compile(r'(?:\[[\sx]\]\s*)?(?:(?![^:]{0,40}\b(?:agents?|bots?|ai|assistants?|automation|claude|codex|copilot|llms?)\b)'
+                         r'[^\W\d_][^:]{0,40}:\s*)?(?:not|pas)\s+(?:applicable|needed|required'
+                         r'|necessary|relevant|started|done|used|set|tested|planned|mandatory'
                          r'|nécessaires?|requise?s?|pertinente?s?|concernée?s?|applicables?)')
 # A negated subject left without its verb introduces the items that complete it: '- No agent may'
 # above '- push to main' (#73). 'Avoid rebasing when you can' is a complete rule instead.
@@ -823,7 +832,13 @@ def dangling_lead(text):
     subject without its verb ('- No agent may'). A rule with its own object ('- No secrets',
     '- Never commit:') governs at most its own children and its direct later siblings (#73)."""
     plain = text.strip(' \t*_`:')
-    return bool(BARE_LEAD.fullmatch(plain) or POINTER_LEAD.search(plain) or DANGLING_LEAD.fullmatch(plain))
+    return bool(BARE_LEAD.fullmatch(plain) or DANGLING_POINTER.search(plain) or DANGLING_LEAD.fullmatch(plain))
+
+
+# A pointer that ends the lead-in: '- Do not do the following', '- Never do these'. 'Do not edit these
+# files' names its own object.
+DANGLING_POINTER = re.compile(NEGATION + r'.*\b(?:following|below|these|those|this|suivante?s?|ci[\s-]dessous|ces'
+                              r'|ceci)\W*$')
 
 
 def terminated(block):
@@ -834,16 +849,25 @@ def terminated(block):
 # above '- merge PRs', '- Require human approval for' above '- merging PRs' (#73). The child is
 # read before its parent, as the one sentence 'Merge PRs until I approve' would be, so the same
 # HOLD_BRANCHES decide and '- Once a reviewer approves:' above '- merge PRs' stays a review gate.
-# The parent must name an approval, so '- Until I say otherwise:' grants instead, and a child that
-# says it comes next ('- then merge with squash') is read after its parent, as written.
+# The parent must name an approval or the speaker's decision, so '- Until I say otherwise:' grants
+# instead. A parent or child that waives the approval ('- Without waiting for approval:', '- merge PRs
+# without waiting for them') grants too. A child that says it comes next ('- then merge with squash')
+# drops that word when the parent names who decides ('- Until I approve:'); otherwise it is read after
+# its parent, as written, so '- Requires one approval' above it stays a review count.
 CONDITION_HOLD = re.compile(HOLD_FREE)
-SEQUENCE_START = re.compile(r'(?:and\s+)?(?:then|next|afterwards|puis|ensuite)\b')
+SEQUENCE_START = re.compile(r'(?:and\s+)?(?:then|next|afterwards|puis|ensuite)\b[\s,]*')
+CONDITION_WORD = re.compile(APPROVAL_WORD + r'|\b(?:i|we)\s+(?:\w+\s+)?(?:confirm|agree|decide)\w*'
+                            r'|\bhear\s+(?:back\s+)?from\s+(?:me|us)\b')
+NO_APPROVAL = re.compile(r'\b(?:without\s+(?:(?:waiting|asking)\b|(?:(?:my|our|any|an|the|their)\s+)?'
+                         r'(?:approv\w*|sign[ -]?off|consent|permission)|(?:them|it)\s*[.!;]?$)'
+                         r'|unnecessary|needless|optional|needs?\s+none|no\s+need|not\s+(?:needed|required|necessary))')
+CONDITION_SPEAKER = re.compile(FIRST_PERSON + r'|\b' + DECIDER)
 
 
 def condition_parent(text):
-    """A short unterminated item without a merge word that names an approval."""
+    """A short unterminated item without a merge word that names an approval it does not waive."""
     return (len(text) <= LEAD_LIMIT and not terminated(text) and not re.search(MERGE_WORD, text)
-            and bool(re.search(APPROVAL_WORD, text)))
+            and bool(CONDITION_WORD.search(text)) and not NO_APPROVAL.search(text))
 
 
 def conditioned(text, parent):
@@ -854,7 +878,13 @@ def conditioned(text, parent):
     """
     if len(text) > RUN_WINDOW or not re.search(MERGE_WORD, text):
         return False
-    child = strip_markers(text).strip()
+    # '- merge PRs.' ends a bullet, not the sentence its parent completes.
+    child = strip_markers(text).strip().rstrip('.;:!')
+    if NO_APPROVAL.search(child):
+        return False
+    sequence = SEQUENCE_START.match(child)
+    if sequence and CONDITION_SPEAKER.search(parent):
+        child = child[sequence.end():]
     joined = parent + ' ' + child if SEQUENCE_START.match(child) else child + ' ' + parent
     return bool(CONDITION_HOLD.search(strip_markers(joined)))
 
@@ -1030,8 +1060,9 @@ def units(lines, hold_found, heading_found=lambda level: None):
                 hold_found()
             elif conditions and under_condition(text, conditions[-1][1]):
                 hold_found()  # '- Until I approve:' above '- merge PRs'
-            elif answers_label(text, parents[-1] if parents else sibling[1] if labelled else None):
-                hold_found()  # '- Merges: never', '- Merging' above '- wait for me'
+            elif (answers_label(text, parents[-1] if parents else None)
+                  or labelled and answers_label(text, sibling[1])):
+                hold_found()  # '- Merges: never', '- Merging' above '- wait for me', nested or not
             pair = context(parents, near), text
             items.append((indent, text))
             columns.append(content_column(first))

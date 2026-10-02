@@ -1347,7 +1347,7 @@ LEAD_SCOPE_CASES = (
     Case("lead scope label never idiom", 2, '- **Merges:** Never under any circumstances'),
     Case("lead scope label never", 2, '- Merges: never'),
     Case("lead scope label child squash only", 0, '- **Merges:**\n  - squash only'),
-    Case("lead scope merging child reviewer", 0, '- Merging\n  - wait for a reviewer'),
+    Case("lead scope merging child reviewer", 2, '- Merging\n  - wait for a reviewer'),
     Case("lead scope merge commits label", 0, '- Merge commits: never'),
     Case("lead scope label not applicable", 0, '- Merging: not applicable'),
     Case("lead scope label own object", 0, '- Merges: no direct pushes'),
@@ -1429,13 +1429,51 @@ LEAD_SCOPE_CASES = (
     Case("lead scope once merged wait to verify", 0, 'Once merged, wait for the human to verify the preview deploy.'),
     Case("lead scope merge then wait to publish", 0, '- Merge the release PR\n- Wait for the maintainers to publish the release'),
     Case("lead scope release steps wait to publish", 0, '- Release\n  1. Merge the release PR\n  2. Wait for the owner to publish the GitHub release'),
-    Case("lead scope bold merges child wait for me", 2, '- **Merges:**\n  - wait for me'),
+    Case("lead scope bold merges child must wait for me", 2, '- **Merges:**\n  - must wait for me'),
     Case("lead scope until i say otherwise child", 0, '- Until I say otherwise:\n  - merge ready PRs'),
     Case("lead scope requires one approval then merge", 0, '- Requires one approval\n  - then merge with squash'),
     Case("lead scope flat requires one approving review", 0, '- Merge with squash; requires 1 approving review'),
     Case("lead scope after approval child", 2, '- After approval:\n  - merge with squash'),
     Case("lead scope unclosed fence under dangling sibling", 2, '- Never\n- x\n  ```\n  merge PRs'),
     Case("lead scope shallowest lead-in governs", 2, '  * Never\n       1. Never\n  * merge PRs'),
+    # Round-2 review of #78: dropped holds against main, waived approvals, ordering and punctuation.
+    Case("lead scope status not supported", 2, '- Not supported\n- merging PRs'),
+    Case("lead scope status not supported bold", 2, '- **Not supported**\n- merging PRs'),
+    Case("lead scope status not supported checkbox", 2, '- [ ] Not supported\n- [ ] merging PRs'),
+    Case("lead scope status not available", 2, '- Not available\n- merging PRs'),
+    Case("lead scope capabilities not supported", 2,
+         '## Agent capabilities\n\n- Supported\n  - opening PRs\n- Not supported\n- merging PRs'),
+    Case("lead scope actor label not supported", 2, '- Agents: not supported\n- merging PRs'),
+    Case("lead scope actor label for agents", 2, '- For agents: not supported\n- merging PRs\n- force pushes'),
+    Case("lead scope checkbox status not needed", 0, '- [ ] Not needed\n- Merge PRs with squash after CI'),
+    Case("lead scope pointer with object", 0, '- Do not edit these files\n- Workflow\n  - Merge PRs with squash after CI'),
+    Case("lead scope this repo rule", 0, '- No secrets in this repo\n- Process\n  - Merge PRs with squash after CI'),
+    Case("lead scope trailing pointer", 2, '- Never do these\n- Rules\n  - merge PRs'),
+    Case("lead scope merging child wait to publish", 0, '- Merging\n  - wait for a maintainer to publish the release'),
+    Case("lead scope merges child then wait to tag", 0, '- Merges\n  - then wait for the owner to tag a release'),
+    Case("lead scope merging sibling wait to update", 0, '- Merging\n- wait for me to update the changelog'),
+    Case("lead scope merging child wait to approve", 2, '- Merging\n  - wait for the owner to approve'),
+    Case("lead scope merging child release manager", 2, '- Merging\n  - wait for the release manager'),
+    Case("lead scope inline label wait for me", 2, '- Merging: wait for me'),
+    Case("lead scope inline label paragraph wait", 2, 'Merging: wait for the owner.'),
+    Case("lead scope inline bold label wait", 2, '- **Merging:** wait for the owner'),
+    Case("lead scope nested labelling sibling", 2, '- Rules\n  - **Merges:**\n  - never'),
+    Case("lead scope label never without green ci", 0, '- Merges: never without green CI'),
+    Case("lead scope label not without passing checks", 0, '- Merges: not without passing checks'),
+    Case("lead scope label never without approval", 2, '- Merges: never without my approval'),
+    Case("lead scope without waiting parent", 0, '- Without waiting for approval:\n  - merge PRs once CI is green'),
+    Case("lead scope waiting unnecessary parent", 0, '- Waiting for approval is unnecessary:\n  - merge PRs'),
+    Case("lead scope approvals child waived", 0, '- Approvals\n  - merge PRs without waiting for them'),
+    Case("lead scope approval child needs none", 0, '- Approval:\n  - merging PRs needs none'),
+    Case("lead scope condition then child", 2, '- Until I approve:\n  - then merge PRs'),
+    Case("lead scope my approval then merge", 2, '- Requires my approval\n  - then merge with squash'),
+    Case("lead scope reviewer then child", 0, '- Once a reviewer approves:\n  - then merge PRs'),
+    Case("lead scope until i confirm child", 2, '- Until I confirm:\n  - merge PRs'),
+    Case("lead scope until we agree child", 2, '- Until we agree:\n  - merge PRs'),
+    Case("lead scope until you hear from me child", 2, '- Until you hear from me:\n  - merge PRs'),
+    Case("lead scope condition child period", 2, '- Until I approve:\n  - Merge PRs.'),
+    Case("lead scope condition child semicolon", 2, '- Until I approve:\n  - merge PRs;'),
+    Case("lead scope requirement child period", 2, '- Require human approval for\n  - merging PRs.'),
 )
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
 # classify U+10D6E as Pd, so its conservative exit is 2 on that interpreter.
@@ -1472,8 +1510,8 @@ ROUTING_CASES = (
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
 ALL_CASES = TEXT_CASES + LIST_COLUMN_CASES + LEAD_SCOPE_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 1146 or len({case.name for case in ALL_CASES}) != 1146:
-    raise RuntimeError("Merge fixture inventory must contain 1146 unique cases")
+if len(ALL_CASES) != 1182 or len({case.name for case in ALL_CASES}) != 1182:
+    raise RuntimeError("Merge fixture inventory must contain 1182 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
