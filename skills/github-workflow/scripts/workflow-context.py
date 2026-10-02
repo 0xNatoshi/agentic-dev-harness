@@ -636,6 +636,19 @@ MAX_MERGE_WORDS = 50
 MAX_SCAN_CHARS = 128 * 1024  # characters, not bytes
 
 
+def content_column(line):
+    """The column where a list item's content starts; a later item nests in it only from that column (#13).
+
+    As in CommonMark, one to four spaces after the marker lead to the content; more, or none before the end
+    of the line, count as one, since the content is then indented code or starts on a later line."""
+    indent = LIST_ITEM.match(line).group(1)
+    rest = line[len(indent):]
+    marker = 1 if rest[0] in '-*+' else len(rest) - len(rest.lstrip('0123456789')) + 1
+    after = rest[marker:]
+    padding = len(after) - len(after.lstrip())
+    return len(indent) + marker + (padding if 1 <= padding <= 4 and after.strip() else 1)
+
+
 def unquote(line):
     """Drop blockquote prefixes and expand tabs so indentation compares in columns."""
     while QUOTE.match(line):
@@ -790,8 +803,8 @@ def units(lines, hold_found, heading_found=lambda level: None):
     """
     headings = []  # (level, text) of the current heading path
     lead = Lead()  # unterminated blocks that introduce what follows
-    items = []     # (indent, text) of the open list item chain
-    intros = set()  # indents whose list holds a negated lead-in item so far
+    items = []     # (marker column, content column, text) of the open list item chain, one per depth
+    intros = set()  # depths whose list holds a negated lead-in item so far
     header = None  # first row of the current table
     row_intro = False  # the current table holds a negated lead-in row so far
     block, kind, indent = [], None, 0
@@ -858,35 +871,39 @@ def units(lines, hold_found, heading_found=lambda level: None):
         if not block:
             return None
         text = ' '.join(part.strip() for part in block)
-        current, block, kind = kind, [], None
+        current, first, block, kind = kind, block[0], [], None
         if current == 'item':
+            content = content_column(first)
             text = LIST_ITEM.sub('', text, 1)
             sibling = None
-            while items and items[-1][0] >= indent:
+            # An item nests only from its parent's content column, so ' - Never' above '- merge PRs', or
+            # '- Notes' above ' - Never', are siblings whatever their marker columns (#13).
+            while items and items[-1][1] > indent:
                 sibling = items.pop()
-            intros.difference_update([i for i in intros if i > indent])
-            parents = [t for _, t in items]
+            depth = len(items)
+            intros.difference_update([i for i in intros if i > depth])
+            parents = [t for _, _, t in items]
             # Added after the cut, so a long parent item cannot push it out.
             near = []
-            if sibling and sibling[0] == indent and label(sibling[1]):
-                near.append(sibling[1][-CONTEXT_LIMIT:])  # '- **Merges:**' labels the next sibling
-            if indent in intros and re.search(MERGE_WORD, text):
+            if sibling and label(sibling[2]):
+                near.append(sibling[2][-CONTEXT_LIMIT:])  # '- **Merges:**' labels the next sibling
+            if depth in intros and re.search(MERGE_WORD, text):
                 # '- Do not do the following' may govern every later sibling, whatever
                 # comes between, so a merge item after it is ambiguous.
                 hold_found()
             pair = context(parents, near), text
-            items.append((indent, text))
+            items.append((indent, content, text))
             if negated_lead(text):
-                intros.add(indent)
+                intros.add(depth)
             extend_run(text)
             return pair
         if items and indent:
             # Indented content continues the list item above it.
             extend_run(text)
-            return context(t for i, t in items if i < indent), text
+            return context(t for i, _, t in items if i < indent), text
         if items:
             # Unterminated open items still introduce the block after the list.
-            lead.add(t for _, t in items if not terminated(t))
+            lead.add(t for _, _, t in items if not terminated(t))
             items = []
             intros.clear()
         if current == 'row':
@@ -948,7 +965,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
             if pair:
                 yield pair
             if opening:
-                fence = opening.group(1), context(t for _, t in items), [opening.group(2).strip()]
+                fence = opening.group(1), context(t for _, _, t in items), [opening.group(2).strip()]
             elif heading:
                 yield enter_heading(len(heading.group(1)), stripped)
             continue
