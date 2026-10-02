@@ -1256,14 +1256,12 @@ class InstallerTests(unittest.TestCase):
                                  str(plan), "--checksums", str(self.checksums), "--maintenance-confirmed"], cwd=self.base,
                                 env=self.environment(), capture_output=True, text=True, encoding="utf-8", timeout=120)
         self.assert_refused(result, 2)
-        mode = f"{stat.S_IMODE(os.stat(state).st_mode):04o}"
-        fix = (f"add owner write and search (execute) permission to {state}" if os.name == "nt" else
-               f"its owner already has write and search permission, so an access control list or system privacy setting "
-               f"denies access: allow this process to write to and search {state}")
         error = json.loads(result.stderr)
-        self.assertEqual(error["error"], f"{state} cannot be written or searched (mode {mode}), so the installer cannot "
-                                         f"create its transaction folder in it; {fix}, then run apply again")
-        self.assertEqual(error["details"], {"path": str(state), "mode": mode})
+        self.assertEqual(error["error"], f"{state} accepts new files but refuses new folders, so the installer cannot "
+                                         f"create its transaction folder in it; allow this account to create folders in "
+                                         f"{state} (an access control list or security policy denies it), then run apply "
+                                         "again")
+        self.assertEqual(error["details"], {"path": str(state)})
         self.assertEqual(sorted(os.listdir(state)), ["LOCK"])
         self.assertEqual(snapshot(self.target), before)
 
