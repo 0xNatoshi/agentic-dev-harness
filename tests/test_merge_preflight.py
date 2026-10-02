@@ -1316,6 +1316,52 @@ LIST_COLUMN_CASES = (
     Case("list column reset paragraph", 0, '- Never\n\nDone.\n\n - merge PRs'),
     Case("list column reset sibling", 0, '- Notes\n  - Never\n- Other\n  - merge PRs'),
 )
+# Issue #73: a negated lead-in item governs its later siblings and everything nested in them, including
+# continuations and fenced blocks, until the list ends or an item sits left of it ("list column reset
+# sibling" above). A merge label answered by a bare refusal or by waiting for the person who decides is a
+# hold, and so is a merge item under a parent that states its approval condition, read as the one sentence
+# 'Merge PRs until I approve'. A checklist status such as '- Not applicable' answers the item before it
+# and introduces nothing.
+LEAD_SCOPE_CASES = (
+    Case("lead scope later sibling child", 2, '- Never\n- Rules\n  - merge PRs'),
+    Case("lead scope pointer later sibling child", 2, '- Do not do the following\n- Notes\n  - merge PRs'),
+    Case("lead scope later sibling continuation", 2, '- No agent may\n- push to main\n\n  merge PRs'),
+    Case("lead scope later sibling fence", 2, '- Never\n- x\n  ```\n  merge PRs\n  ```'),
+    Case("lead scope nested lead fence", 2, '- Never\n  - x\n- Rules\n  ```\n  git merge main\n  ```'),
+    Case("lead scope dangling modal sibling", 2, '- No agent may\n- merge PRs'),
+    Case("lead scope parent child", 2, '- Never\n  - merge PRs'),
+    Case("lead scope sibling", 2, '- Never\n- merge PRs'),
+    Case("lead scope not yet", 2, '- Not yet\n- merge PRs'),
+    Case("lead scope not until", 2, '- Not until I approve\n- merge PRs'),
+    Case("lead scope ends with list", 0, '- Never\n- Rules\n\nMerge PRs with squash.'),
+    Case("lead scope ends at heading", 0, '- Never\n- Rules\n\n## Merging\n\n- merge PRs with squash'),
+    Case("lead scope fence without lead", 0, '- Notes\n- x\n  ```\n  git merge main\n  ```'),
+    Case("lead scope label child wait for me", 2, '- **Merges:**\n  - wait for me'),
+    Case("lead scope label child never", 2, '- **Merges:**\n  - never'),
+    Case("lead scope merging child wait for me", 2, '- Merging\n  - wait for me'),
+    Case("lead scope merging child wait for owner", 2, '- Merging\n  - wait for the owner'),
+    Case("lead scope merging child approval", 2, '- Merging\n  - only after my approval'),
+    Case("lead scope label never idiom", 2, '- **Merges:** Never under any circumstances'),
+    Case("lead scope label never", 2, '- Merges: never'),
+    Case("lead scope label child squash only", 0, '- **Merges:**\n  - squash only'),
+    Case("lead scope merging child reviewer", 0, '- Merging\n  - wait for a reviewer'),
+    Case("lead scope merge commits label", 0, '- Merge commits: never'),
+    Case("lead scope label not applicable", 0, '- Merging: not applicable'),
+    Case("lead scope label own object", 0, '- Merges: no direct pushes'),
+    Case("lead scope label target", 2, '- Merges to main: not without my approval'),
+    Case("lead scope label merge queue", 0, '- Merge queue: no'),
+    Case("lead scope heading other label", 0, '## Merging\n\n- Force push: no'),
+    Case("lead scope complete rule with modal", 0, '- Avoid long branches when you can\n- Merge PRs with squash'),
+    Case("lead scope condition child", 2, '- Until I approve:\n  - merge PRs'),
+    Case("lead scope condition negated child", 2, '- Until I approve:\n  - do not merge PRs'),
+    Case("lead scope condition continuation", 2, '- Until I approve:\n\n  merge PRs'),
+    Case("lead scope requirement child", 2, '- Require human approval for\n  - merging PRs'),
+    Case("lead scope reviewer condition", 0, '- Once a reviewer approves:\n  - merge PRs'),
+    Case("lead scope condition later sibling", 0, '- Until I approve:\n  - Notes\n- merge PRs'),
+    Case("lead scope status not applicable", 0, '- Checklist\n- Not applicable\n- Merge PRs with squash after CI'),
+    Case("lead scope status jitter", 0, '- Checklist\n - Not applicable\n- Merge PRs with squash after CI'),
+    Case("lead scope status not needed", 0, '- Not needed\n- Merge PRs with squash'),
+)
 # Frozen v6.3.1 fixture inputs. Python 3.11's Unicode database does not yet
 # classify U+10D6E as Pd, so its conservative exit is 2 on that interpreter.
 DASH_CODEPOINTS = (
@@ -1350,9 +1396,9 @@ ROUTING_CASES = (
     Case("published-only veto", 1, setup="published_wait"),
     Case("unreadable published ref", 2, setup="missing_published_ref"),
 )
-ALL_CASES = TEXT_CASES + LIST_COLUMN_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 1036 or len({case.name for case in ALL_CASES}) != 1036:
-    raise RuntimeError("Merge fixture inventory must contain 1036 unique cases")
+ALL_CASES = TEXT_CASES + LIST_COLUMN_CASES + LEAD_SCOPE_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
+if len(ALL_CASES) != 1074 or len({case.name for case in ALL_CASES}) != 1074:
+    raise RuntimeError("Merge fixture inventory must contain 1074 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):

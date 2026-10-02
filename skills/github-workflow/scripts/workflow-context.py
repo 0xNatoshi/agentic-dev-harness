@@ -368,6 +368,8 @@ HOLD_BRANCHES = (
     (APPROVAL_WORD + r'[^.!?]{0,90}\b(?:before|avant)\s+(?:de\s+|toute?\s+|any\s+)?(?:[^\s.!?;:]+\s+){0,3}?' + MERGE_WORD, 'mab'),
     (r'\bbefore\s+' + MERGE_WORD + r'[^.!?]{0,90}\b(?:obtain|get|seek|receive|wait\s+for)\b[^.!?]{0,90}' + APPROVAL_WORD, 'mboa'),
     (MERGE_WORD + r'[^.!?]{0,90}\b(?:wait\w*|attend\w*)\b[^.!?]{0,90}' + APPROVAL_WORD, 'mwa'),
+    # Waiting for the person who decides: 'Merging: wait for me', '- Merges' above '- wait for the owner' (#73).
+    (MERGE_WORD + r'[^.!?]{0,90}\b(?:wait\w*|attend\w*)\s+(?:for\s+|on\s+|upon\s+)?' + DECIDER, 'mwt'),
     (r'\b(?:stop|hold|wait|attend\w*)\b[^.!?]{0,90}' + MERGE_WORD, 'mh'),
     # 'without' is left to the negated forms: 'merged without another ritual go' grants autonomy.
     (MERGE_WORD + r'[^.!?;:]{0,90}\b(?:until|unless|jusqu\w*|tant\s+que)\b[^.!?;:]{0,90}' + APPROVAL_OR_FIRST, 'mux'),
@@ -492,10 +494,11 @@ RUN_WORDS = {
     'e': re.compile(r'\b(?:approved|authori[sz]ed|signed)\b')}
 # Word classes a branch can end on. Every branch can end on one of RUN_ENDS_ANY. An item with
 # none of them, only a decider or 'first', can end only the branches below, and only on the
-# listed classes: 'mkf' on 'first', 'kbm' and 'mtl' on who decides, 'mgc' on either. 'mtl' then
-# ends on 'to the owner', 'reserved for me' or 'm'est réservée', so the run must hold one.
+# listed classes: 'mkf' on 'first', 'kbm', 'mwt' and 'mtl' on who decides, 'mgc' on either. 'mtl'
+# then ends on 'to the owner', 'reserved for me' or 'm'est réservée', so the run must hold one.
 RUN_ENDS_ANY = frozenset('mpaxnz')
 RUN_ENDS_DECIDER = {'mkf': (frozenset('f'), None), 'kbm': (frozenset('t'), None), 'mgc': (frozenset('ft'), None),
+                    'mwt': (frozenset('t'), None),
                     'mtl': (frozenset('t'), re.compile(r'\b(?:to|for|à|aux?)\s+' + DECIDER_ROLE
                                                        + r'|\b(?:me\s+|nous\s+|m[’\x27])(?:est|sont)\s+réservée?s?\b'))}
 RUN_ENDS = RUN_ENDS_ANY | frozenset('ft')
@@ -519,7 +522,15 @@ FREE = re.compile(
     + r'|\bavoid\w*\s+(?:any\s+|all\s+)?(?:merging|merges?(?![\s-]+(?:conflicts?|commits?|markers?|bubbles?))|fusionner)\b'
     + r'|\b[ée]vit\w*\s+(?:de\s+fusionner|toute?\s+fusions?|les\s+fusions)\b'
     # One long rule sentence, read once per unit rather than per list window.
-    + r'|' + MERGE_WORD + r'[^.!?;:]{0,120}' + BAN_WORD)
+    + r'|' + MERGE_WORD + r'[^.!?;:]{0,120}' + BAN_WORD
+    # A merge label answered by a bare refusal: 'Merges: never', '**Merging PRs:** never under any
+    # circumstances', or '- Merges:' above '- never' (#73). The label names only merges and what they
+    # merge, so 'Merge commits: no' and a heading 'Merging' above 'Force push: no' stay free, and so
+    # does a refusal with its own object ('Merges: no direct pushes').
+    + r'|' + MERGE_WORD + r'(?:\s+(?:of|to|into|in)?\s*(?:the\s+|a\s+|any\s+|all\s+)?(?:prs?|pull\s+requests?|mrs?'
+    r'|merge\s+requests?|main|master|default\s+branch|branch(?:es)?|changes|code)\b){0,2}\s*:[\s*_`]*'
+    r'(?:never|not|no|jamais|pas|do\s+not|don[’\x27]t)\b'
+    r'(?:[\s,]+(?:under|in\s+any|ever|again|at\s+all|whatsoever|without)\b[^.!?;:]{0,60})?[\s*_`]*(?=[.!?;]|$)')
 # Every FREE branch needs a merge word, or an integration word in the 'nothing is landed' form.
 # Most units name neither, and this check costs far less than FREE's many branches.
 FREE_NEEDS = re.compile(MERGE_WORD + '|' + INTEGRATION_WORD.pattern)
@@ -736,6 +747,15 @@ POINTER_LEAD = re.compile(
 IDIOM_LEAD = re.compile(r'(?:under|at|in|by|on|for|en|à|sous|dans|pour|de|d[’\x27])\s*(?:no|aucune?)\b')
 FUNCTION_WORD = re.compile(LEAD_START + r'|of|it|them|to|a|an|do|if|as|so|long|other|than|possible|'
                            r'faire|faites|fais|de|d|l|un|une|des|sur|vers|si')
+# A checklist status answers the item before it instead of introducing the items after it:
+# '- Not applicable' above '- Merge PRs with squash after CI' (#73).
+STATUS_ITEM = re.compile(r'(?:not|pas)\s+(?:applicable|needed|required|necessary|relevant|available|supported'
+                         r'|started|done|used|set|tested|planned|mandatory|nécessaires?|requise?s?|pertinente?s?'
+                         r'|concernée?s?|applicables?)')
+# A negated subject left without its verb introduces the items that complete it: '- No agent may'
+# above '- push to main' (#73). 'Avoid rebasing when you can' is a complete rule instead.
+DANGLING_LEAD = re.compile(r'(?:no|aucune?)\s+(?:[^\W\d_]+[\s-]+){0,3}?(?:may|can|could|shall|should|must|will|might'
+                           r'|(?:allowed|permitted|supposed)\s+to|peut|peuvent|doit|doivent|pourra|pourront)')
 
 
 def negated_lead(text):
@@ -748,7 +768,7 @@ def negated_lead(text):
     """
     plain = text.strip(' \t*_`:')
     # Lead-ins are short; the bound also keeps the backtracking patterns cheap.
-    if len(plain) > LEAD_LIMIT or terminated(text) or re.search(LEAD_MERGE_WORD, plain):
+    if len(plain) > LEAD_LIMIT or terminated(text) or re.search(LEAD_MERGE_WORD, plain) or STATUS_ITEM.fullmatch(plain):
         return False
     negations = list(re.finditer(NEGATION, plain))
     if not negations:
@@ -759,12 +779,30 @@ def negated_lead(text):
     # whatsoever', '- Do not do such things').
     words = re.findall(r'[^\W_]+', plain[negations[-1].end():])
     content = [word for word in words if not FUNCTION_WORD.fullmatch(word)]
-    return bool(len(content) <= 1 or BARE_LEAD.fullmatch(plain)
+    return bool(len(content) <= 1 or BARE_LEAD.fullmatch(plain) or DANGLING_LEAD.fullmatch(plain)
                 or IDIOM_LEAD.match(plain) or POINTER_LEAD.search(plain) or HOLD_CONTEXT.search(plain))
 
 
 def terminated(block):
     return block.rstrip(' \t*_`"\'»”’)]').endswith(('.', '!', '?'))
+
+
+# A parent item that states the condition its child merge items are under: '- Until I approve:'
+# above '- merge PRs', '- Require human approval for' above '- merging PRs' (#73). The child is
+# read before its parent, as the one sentence 'Merge PRs until I approve' would be, so the same
+# HOLD_BRANCHES decide and '- Once a reviewer approves:' above '- merge PRs' stays a review gate.
+CONDITION_HOLD = re.compile(HOLD_FREE)
+
+
+def condition_parent(text):
+    """A short unterminated item without a merge word that names an approval or the person who decides."""
+    return (len(text) <= LEAD_LIMIT and not terminated(text) and not re.search(MERGE_WORD, text)
+            and bool(re.search(APPROVAL_OR_FIRST, text)))
+
+
+def conditioned(text, parent):
+    """Whether a merge item reads as a hold when its condition parent follows it."""
+    return bool(re.search(MERGE_WORD, text)) and bool(CONDITION_HOLD.search(strip_markers(text + ' ' + parent)))
 
 
 # Markdown emphasis and code-span markers at word edges: '**Merging**:', 'Only **I** may merge',
@@ -796,15 +834,20 @@ def units(lines, hold_found, heading_found=lambda level: None):
     each other context. A fenced block is one unit.
 
     hold_found is called when a pause or approval restriction spreads over
-    adjacent list items and table rows, or when a merge item follows a negated
-    lead-in item of the same list or a negated lead-in row of the same table.
+    adjacent list items and table rows, when a merge item, continuation or
+    fenced block follows a negated lead-in item of the same list or one of its
+    ancestors' lists, when a merge item sits under a condition parent item, or
+    when a merge row follows a negated lead-in row of the same table.
     """
     headings = []  # (level, text) of the current heading path
     lead = Lead()  # unterminated blocks that introduce what follows
     items = []     # (marker column, text) of the open list item chain
-    intros = set()  # marker columns whose list holds a negated lead-in item so far
+    # The smallest marker column, and the smallest depth of the content-column chain, whose list
+    # holds a negated lead-in item so far. It governs its later siblings and everything nested in
+    # them, so only the outermost one matters (#73).
+    lead_marker = lead_depth = None
     columns = []   # content columns of the open item chain as CommonMark nests it (#13)
-    depths = set()  # depths of that chain whose list holds a negated lead-in item so far
+    conditions = []  # (marker column, text) of the condition parents in the item chain (#73)
     header = None  # first row of the current table
     row_intro = False  # the current table holds a negated lead-in row so far
     block, kind, indent = [], None, 0
@@ -816,6 +859,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
     # Pure per-text work, so repeated items and run windows are read once.
     classify = functools.lru_cache(maxsize=128)(run_class)
     held = functools.lru_cache(maxsize=128)(run_match)
+    under_condition = functools.lru_cache(maxsize=128)(conditioned)
 
     def context(extra=(), near=()):
         """Heading path, then lead-ins and extra cut to CONTEXT_LIMIT, then near items uncut."""
@@ -866,8 +910,17 @@ def units(lines, hold_found, heading_found=lambda level: None):
         run_words.clear()
         run_size = 0
 
+    def governed(at):
+        """Whether content indented at column at lies inside a later sibling of a negated lead-in."""
+        return ((lead_marker is not None and lead_marker < at)
+                or (lead_depth is not None and lead_depth < len(columns) and columns[lead_depth] <= at))
+
+    def condition(at):
+        """The text of the innermost condition parent around content at column at, if any."""
+        return next((t for i, t in reversed(conditions) if i < at), None)
+
     def flush():
-        nonlocal block, kind, items, columns, header, row_intro
+        nonlocal block, kind, items, columns, header, row_intro, lead_marker, lead_depth
         if not block:
             return None
         text = ' '.join(part.strip() for part in block)
@@ -877,7 +930,10 @@ def units(lines, hold_found, heading_found=lambda level: None):
             sibling = None
             while items and items[-1][0] >= indent:
                 sibling = items.pop()
-            intros.difference_update([i for i in intros if i > indent])
+            if lead_marker is not None and lead_marker > indent:
+                lead_marker = None
+            while conditions and conditions[-1][0] >= indent:
+                conditions.pop()
             # CommonMark nests an item only from its parent's content column, so ' - Never' above '- merge PRs',
             # or '- Notes' above ' - Never', are siblings whatever their marker columns (#13). That reading only
             # adds holds: the marker-column chain above still gives the context, since it keeps every parent
@@ -885,34 +941,43 @@ def units(lines, hold_found, heading_found=lambda level: None):
             while columns and columns[-1] > indent:
                 columns.pop()
             depth = len(columns)
-            depths.difference_update([d for d in depths if d > depth])
+            if lead_depth is not None and lead_depth > depth:
+                lead_depth = None
             parents = [t for _, t in items]
             # Added after the cut, so a long parent item cannot push it out.
             near = []
             if sibling and sibling[0] == indent and label(sibling[1]):
                 near.append(sibling[1][-CONTEXT_LIMIT:])  # '- **Merges:**' labels the next sibling
-            if (indent in intros or depth in depths) and re.search(MERGE_WORD, text):
-                # '- Do not do the following' may govern every later sibling, whatever
-                # comes between, so a merge item after it is ambiguous.
+            if (lead_marker is not None or lead_depth is not None) and re.search(MERGE_WORD, text):
+                # '- Do not do the following' may govern every later sibling and what is
+                # nested in it, whatever comes between, so a merge item after it is ambiguous.
                 hold_found()
+            elif conditions and under_condition(text, conditions[-1][1]):
+                hold_found()  # '- Until I approve:' above '- merge PRs'
             pair = context(parents, near), text
             items.append((indent, text))
             columns.append(content_column(first))
             if negated_lead(text):
-                intros.add(indent)
-                depths.add(depth)
+                lead_marker = indent if lead_marker is None else min(lead_marker, indent)
+                lead_depth = depth if lead_depth is None else min(lead_depth, depth)
+            if condition_parent(text):
+                conditions.append((indent, text))
             extend_run(text)
             return pair
         if items and indent:
             # Indented content continues the list item above it.
+            if re.search(MERGE_WORD, text):
+                parent = condition(indent)
+                if governed(indent) or parent is not None and under_condition(text, parent):
+                    hold_found()  # '- Never' then '- push to main' above an indented 'merge PRs'
             extend_run(text)
             return context(t for i, t in items if i < indent), text
         if items:
             # Unterminated open items still introduce the block after the list.
             lead.add(t for _, t in items if not terminated(t))
             items, columns = [], []
-            intros.clear()
-            depths.clear()
+            lead_marker = lead_depth = None
+            conditions.clear()
         if current == 'row':
             if row_intro and re.search(MERGE_WORD, text):
                 hold_found()  # '| Do not do the following |' above '| merge PRs |'
@@ -934,15 +999,15 @@ def units(lines, hold_found, heading_found=lambda level: None):
         return pair
 
     def enter_heading(level, text):
-        nonlocal items, columns, header, row_intro
+        nonlocal items, columns, header, row_intro, lead_marker, lead_depth
         while headings and headings[-1][0] >= level:
             headings.pop()
         pair = context(), text
         headings.append((level, text[:CONTEXT_LIMIT]))
         lead.clear()
         items, columns, header, row_intro = [], [], None, False
-        intros.clear()
-        depths.clear()
+        lead_marker = lead_depth = None
+        conditions.clear()
         end_run()
         heading_found(level)
         return pair
@@ -950,8 +1015,10 @@ def units(lines, hold_found, heading_found=lambda level: None):
     for line in lines:
         stripped = line.strip()
         if fence:
-            marker, fenced_context, fenced = fence
+            marker, fenced_context, fenced, under_lead = fence
             if re.fullmatch(r' {0,3}' + re.escape(marker[0]) + '{%d,}\\s*' % len(marker), line):
+                if under_lead and re.search(MERGE_WORD, ' '.join(fenced)):
+                    hold_found()
                 yield fenced_context, ' '.join(fenced)
                 fence = None
             elif stripped:
@@ -973,7 +1040,10 @@ def units(lines, hold_found, heading_found=lambda level: None):
             if pair:
                 yield pair
             if opening:
-                fence = opening.group(1), context(t for _, t in items), [opening.group(2).strip()]
+                # A fence nested in a later sibling of a negated lead-in is read like that sibling (#73).
+                at = len(line) - len(line.lstrip())
+                fence = (opening.group(1), context(t for _, t in items), [opening.group(2).strip()],
+                         bool(items) and at > 0 and governed(at))
             elif heading:
                 yield enter_heading(len(heading.group(1)), stripped)
             continue
@@ -986,6 +1056,8 @@ def units(lines, hold_found, heading_found=lambda level: None):
             kind, indent = starts or 'para', len(line) - len(line.lstrip())
         block.append(line)
     if fence:
+        if fence[3] and re.search(MERGE_WORD, ' '.join(fence[2])):
+            hold_found()
         yield fence[1], ' '.join(fence[2])
     pair = flush()
     if pair:
