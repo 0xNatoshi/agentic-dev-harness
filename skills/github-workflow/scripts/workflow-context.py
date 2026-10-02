@@ -1329,7 +1329,8 @@ MERGE_PATH_KEYS = ('merge-queue-enabled', 'pr-in-merge-queue', 'auto-merge-enabl
 # or table variant blocks instead of being ignored; prose such as 'Merge author names follow...' has no
 # label colon and is not a setting.
 AUTHOR_NAME_LIKE = re.compile(r'merge[\W_]*author[\W_]*name[\W_]*:', re.IGNORECASE)
-AUTHOR_NAME = re.compile(r'(?:[-*+]\s+)?Merge author name: `([^`]+)`(?:\s+\([^()]*\))?\.?')
+# One space after a list marker: five or more spaces, or two tabs, would start a code block in the item.
+AUTHOR_NAME = re.compile(r'(?:[-*+] )?Merge author name: `([^`]+)`(?: +\([^()]*\))?\.?')
 AUTHOR_NAME_LIMIT = 100
 
 
@@ -1398,14 +1399,17 @@ def setting_lines(text):
     is never read here.
     """
     lines = text.split('\n')
+    # Markdown's blank line holds only spaces and tabs; str.strip() would also drop NBSP or a form feed.
+    blank = [line.strip(' \t') == '' for line in lines]
     clear = True
     managed = False
     for index, line in enumerate(lines):
         # A line's own markers matter only for later lines; the exact-form check rejects them on the line.
         hidden = (not clear or INDENTED.match(line) is not None
-                  or (index > 0 and lines[index - 1].strip() != '')
-                  or (index + 1 < len(lines) and lines[index + 1].strip() != ''))
-        clear = clear and not UNCLEAR.search(line) and not INDENTED.match(line) and line.count('`') % 2 == 0
+                  or (index > 0 and not blank[index - 1])
+                  or (index + 1 < len(lines) and not blank[index + 1]))
+        clear = clear and (blank[index] or (not UNCLEAR.search(line) and not INDENTED.match(line)
+                                            and line.count('`') % 2 == 0))
         if START.match(line):
             managed = True
         elif END.match(line):
