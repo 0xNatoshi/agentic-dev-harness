@@ -1184,6 +1184,77 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
                 self.assertEqual(snapshot(self.target), after)
 
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
+    def test_an_unwritable_state_directory_with_a_writable_lock_blocks_before_any_change(self):
+        # A writable LOCK opens in a directory without write permission, and each action then writes there (#68).
+        before = self.v52_layout()
+        state = self.state()
+        plan = self.plan()
+        state.mkdir()
+        (state / "LOCK").touch()
+
+        def blocked(result, command):
+            self.assert_refused(result, 2)
+            error = json.loads(result.stderr)
+            self.assertEqual(error["error"], f"{state} cannot be written or searched (mode 0500), so the installer cannot "
+                                             f"record its transaction in it; add owner write and search (execute) "
+                                             f"permission to {state}, then run {command} again")
+            self.assertEqual(error["details"], {"path": str(state), "mode": "0500"})
+
+        state.chmod(0o500)
+        try:
+            result = self.apply(plan)
+        finally:
+            state.chmod(0o755)
+        blocked(result, "apply")
+        self.assertEqual(sorted(os.listdir(state)), ["LOCK"])
+        self.assertEqual(snapshot(self.target), before)
+        receipt_path = self.installed()
+        after = snapshot(self.target)
+        transaction, listing = receipt_path.parent, sorted(os.listdir(state))
+        held = sorted(os.listdir(transaction))
+        state.chmod(0o500)
+        try:
+            rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+            idle = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+        finally:
+            state.chmod(0o755)
+        blocked(rollback, "rollback")
+        self.assertEqual(sorted(os.listdir(transaction)), held)
+        # Without an interrupted transaction recover writes nothing, so it still says so.
+        self.assertEqual(idle.returncode, 0, idle.stderr)
+        self.assertEqual(json.loads(idle.stdout)["result"], "nothing to recover")
+        # An interrupted transaction ends by removing CURRENT, so recover blocks before acting on it.
+        current = state / "CURRENT"
+        current.write_text("missing/journal.json\n", encoding="utf-8")
+        state.chmod(0o500)
+        try:
+            result = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+        finally:
+            state.chmod(0o755)
+        blocked(result, "recover")
+        self.assertEqual(sorted(os.listdir(state)), sorted(listing + ["CURRENT"]))
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+        self.assertEqual(snapshot(self.target), after)
+
+    def test_a_file_at_a_state_ancestor_blocks_apply_and_leaves_recover_nothing(self):
+        # The location checks find no link below a file, so the lock names the file in the way (#68).
+        plan = self.plan()
+        config = self.target.parent.parent
+        self.assertFalse(config.exists())
+        config.write_bytes(b"not a directory\n")
+        result = self.apply(plan)
+        self.assert_refused(result, 2)
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], f"{config} is not a directory, so the installer cannot keep its state there; "
+                                         "move it out of the way, then run apply again")
+        self.assertEqual(error["details"], {"path": str(config)})
+        # No state directory can exist below a file, so there is nothing to recover.
+        recover = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
+        self.assertEqual(recover.returncode, 0, recover.stderr)
+        self.assertEqual(json.loads(recover.stdout)["result"], "nothing to recover")
+        self.assertEqual(config.read_bytes(), b"not a directory\n")
+
     def test_a_held_lock_still_reports_the_other_installer(self):
         # The setup diagnostics of #68 leave the contention message unchanged.
         self.v52_layout()

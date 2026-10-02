@@ -229,8 +229,8 @@ def read_json(path: Path, retry: str | None = None) -> dict:
 def is_link(path: Path) -> bool:
     try:
         status = os.lstat(str(path))
-    except FileNotFoundError:
-        return False
+    except (FileNotFoundError, NotADirectoryError):
+        return False  # Nothing, link or not, is below a file (#68).
     if stat.S_ISLNK(status.st_mode):
         return True
     if getattr(status, "st_file_attributes", 0) & REPARSE_POINT:
@@ -921,6 +921,7 @@ class Lock:
     """Exclusive installer lock, released by the operating system if the process dies."""
 
     def __init__(self, state: Path, retry: str) -> None:
+        self.state, self.retry = state, retry
         lock = state / "LOCK"
         try:
             state.mkdir(parents=True, exist_ok=True)
@@ -966,6 +967,20 @@ class Lock:
         reason = ("so the installer cannot take its lock" if path == lock
                   else "so the installer cannot create its state directory or lock file in it")
         return unwritable(path, reason, retry)
+
+    def require_writable(self) -> None:
+        """Block, before anything changes, when the state directory refuses the transaction directory, journal and
+        CURRENT pointer an action writes there (#68).
+
+        An existing writable LOCK opens without write permission on its directory, so the OS is asked directly with
+        a file created and removed at once, which also covers ACLs. A read-only mount already refused the LOCK.
+        Any other failure stays an unexpected error, as in setup."""
+        try:
+            descriptor, probe = tempfile.mkstemp(prefix=".write-check-", dir=str(self.state))
+            os.close(descriptor)
+            os.unlink(probe)
+        except PermissionError:
+            raise unwritable(self.state, "so the installer cannot record its transaction in it", self.retry) from None
 
     def __enter__(self) -> "Lock":
         return self
@@ -1217,7 +1232,8 @@ def command_apply(options) -> dict:
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check()
-    with Lock(locations.state, "run apply again"):
+    with Lock(locations.state, "run apply again") as lock:
+        lock.require_writable()
         fresh, package = make_plan(plan["runtime"], plan["home"], plan.get("config_root"), Path(plan["package"]["source"]),
                                    Path(options.checksums))
         changed = drift(plan, fresh)
@@ -1435,7 +1451,8 @@ def command_rollback(options) -> dict:
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check("run rollback again")
-    with Lock(locations.state, "run rollback again"):
+    with Lock(locations.state, "run rollback again") as lock:
+        lock.require_writable()
         if exists(locations.state / "CURRENT"):
             raise Blocked(f"An interrupted transaction is recorded in {locations.state / 'CURRENT'}; run `recover` first")
         # A receipt field is untrusted input: only an integer mode is quoted back in guidance.
@@ -1599,10 +1616,12 @@ def command_recover(options) -> dict:
                            "`recover --plan <plan>` or `recover --receipt <receipt>`, which reuse the recorded directories.")
     if not exists(locations.state):
         return nothing
-    with Lock(locations.state, "run recover again"):
+    with Lock(locations.state, "run recover again") as lock:
         current = locations.state / "CURRENT"
         if not exists(current):
             return nothing
+        # Every outcome below ends by removing CURRENT, possibly after restoring the target.
+        lock.require_writable()
         journal = locations.state / current.read_text(encoding="utf-8").strip()
         if not exists(journal):
             # The journal is written durably before the first rename, so nothing was renamed.
