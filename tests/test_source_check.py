@@ -243,7 +243,8 @@ class SourceCheckTests(unittest.TestCase):
     def test_source_gate_rejects_retrying_tempfile_creators_in_the_installer(self):
         # Without the cpython gh-66305 fix they retry a Windows PermissionError for hours; the installer supports 3.8 (#71).
         cases = [("descriptor, probe = tempfile.mkstemp(dir='.')", "tempfile.mkstemp"),
-                 ("from tempfile import mkdtemp", "tempfile.mkdtemp")]
+                 ("from tempfile import mkdtemp", "tempfile.mkdtemp"),
+                 ("import tempfile as probe_files; probe_files.mkstemp()", "tempfile.mkstemp")]
         for line, name in cases:
             with self.subTest(line=line), tempfile.TemporaryDirectory(prefix="harness-runtime-tempfile-") as directory:
                 root = Path(directory)
