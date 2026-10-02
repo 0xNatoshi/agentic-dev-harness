@@ -1869,21 +1869,28 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(rollback.returncode, 0, rollback.stderr)
         self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
 
-    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX directory modes for an unprivileged user")
     def test_a_failed_recover_the_journal_cannot_record_still_reports_its_cause_and_retry(self):
         before, parked = self.crash_after_parking()
         transaction = parked.parent.parent
-        # The journal and the undo both write in the transaction directory, so both fail.
-        transaction.chmod(0o500)
-        try:
-            failed = self.run_installer("recover", "--runtime", "claude", "--home", self.home, "--maintenance-confirmed")
-            self.assert_refused(failed, 3)
-            error = json.loads(failed.stderr)["error"]
-            self.assertRegex(error, r"^Restoration incomplete: .*Permission denied.* \(the journal could not record it: "
-                                    r".*Permission denied.*\)\. Recovery data kept in ")
-            self.assertTrue(error.endswith(f"{transaction}; fix the cause and run `recover` again"), error)
-        finally:
-            transaction.chmod(0o755)
+        # A transaction directory that refuses writes from the start now blocks before the undo (#71), so the
+        # refusal is injected after that check: the journal and the undo both write there, so both fail.
+        script = ("import builtins, os, runpy, sys\n"
+                  "transaction, create = os.path.normcase(sys.argv[1]), builtins.open\n"
+                  "def refuse(path, mode='r', *arguments, **options):\n"
+                  "    if 'w' in mode and os.path.normcase(os.path.dirname(os.path.abspath(path))) == transaction:\n"
+                  "        raise PermissionError(13, 'Permission denied', str(path))\n"
+                  "    return create(path, mode, *arguments, **options)\n"
+                  "builtins.open = refuse\n"
+                  "sys.argv = sys.argv[2:]\n"
+                  "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+        failed = subprocess.run([sys.executable, "-B", "-c", script, str(transaction), str(self.installer), "recover",
+                                 "--runtime", "claude", "--home", str(self.home), "--maintenance-confirmed"], cwd=self.base,
+                                env=self.environment(), capture_output=True, text=True, encoding="utf-8", timeout=120)
+        self.assert_refused(failed, 3)
+        error = json.loads(failed.stderr)["error"]
+        self.assertRegex(error, r"^Restoration incomplete: .*Permission denied.* \(the journal could not record it: "
+                                r".*Permission denied.*\)\. Recovery data kept in ")
+        self.assertTrue(error.endswith(f"{transaction}; fix the cause and run `recover` again"), error)
         self.assertTrue((self.state() / "CURRENT").exists())
         self.recover()
         self.assertEqual(snapshot(self.target), before)
