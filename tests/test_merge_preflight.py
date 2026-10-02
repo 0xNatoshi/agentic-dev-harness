@@ -103,6 +103,7 @@ if args[1] == 'repos/fixture/repo/pulls/7':
         sys.exit(0)
     print(json.dumps({'user': {'login': 'octo-fixture', 'id': int(env('FIXTURE_PR_AUTHOR_ID', '1001'))},
                       'state': env('FIXTURE_PR_STATE', 'open'), 'merged': env('FIXTURE_PR_MERGED') == 'true',
+                      'base': {'ref': env('FIXTURE_PR_BASE', 'main')},
                       'merge_commit_sha': env('FIXTURE_MERGE_SHA', MERGE_SHA)}))
     sys.exit(0)
 if args[1] == 'repos/fixture/repo/commits/' + MERGE_SHA:
@@ -1520,6 +1521,19 @@ IDENTITY_CASES = (
     identity_case("identity invisible character in author name label", 2, api_calls=0,
                   text="Merge author\u200b name: `Fixture Alias`\n", setup="published_text",
                   stderr="Malformed merge author name"),
+    # Inside an HTML comment a fence line is comment text, so it cannot end the comment early (#21 review).
+    identity_case("identity fence line inside comment", 2, api_calls=0,
+                  text="<!--\n```\n-->\n```\n-->\n" + ALIAS + "```\n", setup="published_text",
+                  stderr="inside code or an HTML comment"),
+    # GitHub drops a leading BOM, so the first-line fence still hides the alias.
+    identity_case("identity author name in fence after BOM", 2, api_calls=0, text="\ufeff```\n" + ALIAS + "```\n",
+                  setup="published_text", stderr="inside code or an HTML comment"),
+    identity_case("identity second label in author name note", 2, api_calls=0,
+                  text="Merge author name: `Fixture Alias` (Merge author name: `Other Alias`)\n",
+                  setup="published_text", stderr="Malformed merge author name"),
+    # The alias is the default branch's policy; another base was never gated by it.
+    identity_case("identity non-default base", 2, ("FIXTURE_PR_BASE", "release"), api_calls=3,
+                  stderr="only pull requests into the default branch"),
     # A visible exact line cannot hide a second, look-alike one that would replace it.
     identity_case("identity look-alike beside exact author name", 2, api_calls=0,
                   text=ALIAS + "1. Merge author name: `Other Alias`\n", setup="published_text",
@@ -1632,6 +1646,8 @@ IDENTITY_CASES = (
                    text=MANAGED, setup="published_text", stderr="published: blocker=author-name-is-expected"),
     published_case("published merge parent not fetched", 2, ("FIXTURE_PARENT", "f" * 40),
                    stderr="Command failed: git rev-parse"),
+    published_case("published non-default base", 2, ("FIXTURE_PR_BASE", "release"), api_calls=1,
+                   stderr="only pull requests into the default branch"),
     published_case("published merge commit without parent", 2, ("FIXTURE_PARENT", "__none__"),
                    stderr="Unexpected commit response"),
     published_case("published conflicting author names", 2,

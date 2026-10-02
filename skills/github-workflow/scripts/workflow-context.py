@@ -1330,7 +1330,6 @@ MERGE_PATH_KEYS = ('merge-queue-enabled', 'pr-in-merge-queue', 'auto-merge-enabl
 # label colon and is not a setting.
 AUTHOR_NAME_LIKE = re.compile(r'merge[\W_]*author[\W_]*name[\W_]*:', re.IGNORECASE)
 AUTHOR_NAME = re.compile(r'(?:[-*+]\s+)?Merge author name: `([^`]+)`(?:\s+\([^()]*\))?\.?')
-FENCE = re.compile(r' {0,3}(`{3,}|~{3,})')
 AUTHOR_NAME_LIMIT = 100
 
 
@@ -1373,6 +1372,12 @@ def identity_origin(expected):
     return host, full, branch
 
 
+def default_base(pull, branch):
+    """Both modes judge the author under the default branch's policy, which a merge elsewhere never met."""
+    if field(pull.get('base'), 'ref', str, 'pull request') != branch:
+        raise EvidenceError('Server-author checks support only pull requests into the default branch')
+
+
 def setting_lines(text):
     """(line, hidden) for each line outside managed blocks; hidden means code or an HTML comment.
 
@@ -1386,9 +1391,9 @@ def setting_lines(text):
         hidden = fence is not None or comment or opened is not None or line.startswith(('    ', '\t'))
         if fence is not None:
             if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence) \
-                    and not line[opened.end():].strip():
+                    and not opened.group(2).strip():
                 fence = None
-        elif opened:
+        elif opened and not comment:
             fence = opened.group(1)
         else:
             position = 0
@@ -1415,6 +1420,8 @@ def configured_author_name(text):
     """
     if text is None:
         return None
+    # GitHub's renderer drops a leading BOM, so a fence on the first line still opens.
+    text = text[1:] if text.startswith('\ufeff') else text
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     names = set()
     for line, hidden in setting_lines(text):
@@ -1424,7 +1431,8 @@ def configured_author_name(text):
         if hidden:
             raise EvidenceError('Merge author name line inside code or an HTML comment in published AGENTS.md')
         line = line.strip()
-        found = AUTHOR_NAME.fullmatch(line)
+        # A second label, even inside the note, would show two names for one setting.
+        found = AUTHOR_NAME.fullmatch(line) if len(AUTHOR_NAME_LIKE.findall(folded)) == 1 else None
         name = found.group(1) if found else ''
         # A profile display name is printable text; '<name>' is a template placeholder, not a decision.
         if (not name or name != name.strip() or len(name) > AUTHOR_NAME_LIMIT or '<' in name or '>' in name
@@ -1507,6 +1515,7 @@ def identity_mode(args):
     viewer_id = field(viewer, 'id', int, 'viewer')
     account = handle_account(host, handle)
     pull = api_json(host, 'repos/' + full + '/pulls/' + number, 'pull request')
+    default_base(pull, branch)
     author_id = field(pull.get('user'), 'id', int, 'pull request')
     state = field(pull, 'state', str, 'pull request')
     merged = field(pull, 'merged', bool, 'pull request')
@@ -1573,8 +1582,9 @@ def identity_mode(args):
 def published_mode(args):
     """Post-merge proof: compare the PR's merge commit with the handle; report booleans and finding keys."""
     expected, number, handle = identity_arguments(args)
-    host, full, _ = identity_origin(expected)
+    host, full, branch = identity_origin(expected)
     pull = api_json(host, 'repos/' + full + '/pulls/' + number, 'pull request')
+    default_base(pull, branch)
     sha = pull.get('merge_commit_sha')
     if pull.get('merged') is not True or not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}', sha):
         raise EvidenceError('Pull request is not merged or has no merge commit')
