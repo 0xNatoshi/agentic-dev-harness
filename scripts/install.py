@@ -471,6 +471,9 @@ def preflight_archive_metadata(archive: bytes) -> int:
         "<4s4H2LH", archive, eocd)
     if eocd + 22 + comment_size != len(archive):
         raise Refused("Not a valid ZIP archive: invalid end record length")
+    # ZipFile honors this locator even when the classic record advertises zero members.
+    if eocd >= 20 and archive[eocd - 20:eocd - 16] == b"PK\x06\x07":
+        raise Refused("ZIP64 central directory is outside package limits")
     if disk or directory_disk or disk_entries != declared:
         raise Refused("Unsupported multi-disk ZIP archive")
     if declared == 0xffff or size == 0xffffffff or offset == 0xffffffff:
@@ -482,7 +485,7 @@ def preflight_archive_metadata(archive: bytes) -> int:
     if start < 0 or offset > start:
         raise Refused("Not a valid ZIP archive: invalid central directory offset")
     position = start
-    count = name_bytes = 0
+    count = 0
     while position < eocd:
         if position + 46 > eocd or archive[position:position + 4] != b"PK\x01\x02":
             raise Refused("Not a valid ZIP archive: invalid central directory entry")
@@ -491,8 +494,8 @@ def preflight_archive_metadata(archive: bytes) -> int:
         if position > eocd:
             raise Refused("Not a valid ZIP archive: truncated central directory entry")
         count += 1
-        name_bytes += filename_size
-        check_package_entries(count, name_bytes, "archive")
+        # All raw filename bytes are already inside the capped central-directory region.
+        check_package_entries(count, 0, "archive")
     if count != declared:
         raise Refused("archive central directory count differs from its end record")
     return count
@@ -500,9 +503,14 @@ def preflight_archive_metadata(archive: bytes) -> int:
 
 def load_archive(source: Path) -> Package:
     with source.open("rb") as stream:
-        archive = stream.read(ARCHIVE_LIMIT + 1)
-    if len(archive) > ARCHIVE_LIMIT:
-        raise Refused(f"The archive exceeds {ARCHIVE_LIMIT} bytes")
+        opened = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened.st_mode):
+            raise Refused(f"The archive is not a regular file: {source}")
+        if opened.st_size > ARCHIVE_LIMIT:
+            raise Refused(f"The archive exceeds {ARCHIVE_LIMIT} bytes")
+        archive = stream.read(opened.st_size + 1)
+        if len(archive) != opened.st_size or stream.read(1):
+            raise Refused("The archive changed while being read")
     expected_members = preflight_archive_metadata(archive)
     total = 0
     try:
@@ -510,7 +518,6 @@ def load_archive(source: Path) -> Package:
             members = bundle.infolist()
             if len(members) != expected_members:
                 raise Refused("archive central directory count differs after ZIP parsing")
-            check_package_entries(len(members), sum(len(member.filename.encode("utf-8")) for member in members), "archive")
             names = [member.filename for member in members]
             if len(set(names)) != len(names):
                 raise Refused("The archive repeats a member name")
@@ -519,6 +526,8 @@ def load_archive(source: Path) -> Package:
                 raise Refused("The archive must hold exactly one top-level package directory")
             prefix = prefixes.pop()
             files = {}
+            directories = set()
+            entry_count = name_bytes = 0
             for member in members:
                 if member.is_dir() or "/" not in member.filename:
                     raise Refused(f"Unexpected archive entry: {member.filename}")
@@ -527,9 +536,25 @@ def load_archive(source: Path) -> Package:
                     raise Refused(f"Archive entry is not a regular file: {member.filename}")
                 name = member.filename.split("/", 1)[1]
                 try:
-                    package_path(name)
+                    path = package_path(name)
                 except ValueError as error:
                     raise Refused(str(error))
+                if len(path.parts) > PACKAGE_ENTRY_LIMIT:
+                    raise Refused(f"archive entry count exceeds {PACKAGE_ENTRY_LIMIT}")
+                entry_count += 1
+                name_bytes += len(name.encode("utf-8"))
+                check_package_entries(entry_count, name_bytes, "archive")
+                for parent in path.parents:
+                    if parent == PurePosixPath("."):
+                        continue
+                    directory = parent.as_posix()
+                    if directory not in directories:
+                        directories.add(directory)
+                        entry_count += 1
+                        name_bytes += len(directory.encode("utf-8"))
+                        check_package_entries(entry_count, name_bytes, "archive")
+            for member in members:
+                name = member.filename.split("/", 1)[1]
                 if name == "MANIFEST.json" and member.file_size > MANIFEST_LIMIT:
                     raise Refused(f"MANIFEST.json exceeds {MANIFEST_LIMIT} bytes")
                 if member.file_size > MEMBER_LIMIT or total + member.file_size > ARCHIVE_LIMIT:

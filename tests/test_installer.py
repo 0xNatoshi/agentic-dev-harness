@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tracemalloc
 import unittest
 from unittest import mock
 import warnings
@@ -281,7 +283,7 @@ sys.exit(installer.main(sys.argv[3:]))
             for index in range(6):
                 bundle.writestr(prefix + f"/empty-{index:02d}.txt", b"")
         for limits, phrase in (({"PACKAGE_ENTRY_LIMIT": 6}, "archive entry count exceeds"),
-                               ({"PACKAGE_NAME_BYTES_LIMIT": 90}, "archive filename bytes exceed"),
+                               ({"PACKAGE_NAME_BYTES_LIMIT": 80}, "archive filename bytes exceed"),
                                ({"CENTRAL_DIRECTORY_LIMIT": 100}, "archive central directory exceeds")):
             with self.subTest(phrase):
                 result = self.run_limited_installer(limits, "verify-package", archive, "--checksums", self.checksums)
@@ -312,6 +314,87 @@ sys.exit(installer.main(sys.argv[3:]))
                 result = self.run_installer("verify-package", altered, "--checksums", self.checksums)
                 self.assert_refused(result, 1)
                 self.assertIn(phrase, json.loads(result.stderr)["error"])
+
+    def test_zip64_locator_is_refused_before_zipfile_constructs_members(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as bundle:
+            for index in range(1200):
+                bundle.writestr(self.package.name + f"/empty-{index:04d}.txt", b"")
+        normal = buffer.getvalue()
+        eocd = normal.rfind(b"PK\x05\x06")
+        self.assertGreaterEqual(eocd, 0)
+        size, offset = struct.unpack_from("<2L", normal, eocd + 12)
+        zip64_end = struct.pack("<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, 1200, 1200, size, offset)
+        locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, eocd, 1)
+        classic_end = struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 0, 0, 0, 0, 0)
+        source = self.base / "many-empty-zip64.zip"
+        source.write_bytes(normal[:eocd] + zip64_end + locator + classic_end)
+        with zipfile.ZipFile(source) as bundle:
+            self.assertEqual(len(bundle.infolist()), 1200)
+        spec = importlib.util.spec_from_file_location("harness_zip64_preflight", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        with mock.patch.object(zipfile, "ZipFile", side_effect=AssertionError("ZipFile constructed")):
+            with self.assertRaisesRegex(installer.Refused, "ZIP64 central directory"):
+                installer.load_archive(source)
+
+    def test_archive_and_directory_share_entry_and_name_budgets(self):
+        cases = (
+            ("entries", (f"extra-{index:04d}/item.txt" for index in range(600)), "entry count exceeds"),
+            ("names", (f"extra-{index:04d}-{'x' * 128}/item.txt" for index in range(470)),
+             "filename bytes exceed"),
+        )
+        for label, names, phrase in cases:
+            with self.subTest(label):
+                directory = self.base / label / self.package.name
+                shutil.copytree(self.package, directory)
+                manifest = json.loads((directory / "MANIFEST.json").read_text(encoding="utf-8"))
+                for name in names:
+                    path = directory / name
+                    path.parent.mkdir(parents=True)
+                    path.write_bytes(b"x")
+                    manifest["files"][name] = {"sha256": hashlib.sha256(b"x").hexdigest(), "bytes": 1}
+                manifest_bytes = (json.dumps(manifest, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+                (directory / "MANIFEST.json").write_bytes(manifest_bytes)
+                archive = self.base / f"parity-{label}.zip"
+                with zipfile.ZipFile(archive, "w") as bundle:
+                    for path in sorted(directory.rglob("*")):
+                        if path.is_file():
+                            bundle.writestr(self.package.name + "/" + path.relative_to(directory).as_posix(),
+                                            path.read_bytes())
+                checksums = self.base / f"parity-{label}-SHA256SUMS.txt"
+                checksums.write_text(
+                    f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {self.package.name}-codex-claude.zip\n"
+                    f"{hashlib.sha256(manifest_bytes).hexdigest()}  {self.package.name}-MANIFEST.json\n",
+                    encoding="utf-8")
+                for package in (archive, directory):
+                    result = self.run_installer("verify-package", package, "--checksums", checksums)
+                    self.assert_refused(result, 1)
+                    self.assertIn(phrase, json.loads(result.stderr)["error"])
+
+    def test_small_archive_and_deep_path_reject_without_large_allocations(self):
+        spec = importlib.util.spec_from_file_location("harness_allocation_limits", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        cases = (
+            ("small", "file.txt", 64 * 1024 * 1024, "No MANIFEST.json"),
+            ("deep", "a/" * 8000 + "file.txt", 1024 * 1024, "archive entry count exceeds"),
+        )
+        for label, name, limit, phrase in cases:
+            with self.subTest(label):
+                archive = self.base / f"{label}-allocation.zip"
+                with zipfile.ZipFile(archive, "w") as bundle:
+                    bundle.writestr(self.package.name + "/" + name, b"")
+                with mock.patch.object(installer, "ARCHIVE_LIMIT", limit):
+                    tracemalloc.start()
+                    try:
+                        with self.assertRaises(installer.Refused) as refusal:
+                            installer.load_archive(archive)
+                    finally:
+                        _, peak = tracemalloc.get_traced_memory()
+                        tracemalloc.stop()
+                self.assertIn(phrase, str(refusal.exception))
+                self.assertLess(peak, 16 * 1024 * 1024)
 
     def test_manifest_size_and_file_count_are_bounded(self):
         manifest = (self.package / "MANIFEST.json").read_bytes()
