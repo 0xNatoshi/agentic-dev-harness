@@ -52,7 +52,7 @@ def payloads(root=ROOT):
                 raise ValueError(f"Conflicting package destination: {name}")
             files.add(key)
             directories.update(parents)
-    for directory in ["profiles", "skills/github-workflow", "configurations/codex"]:
+    for directory in ["configurations", "skills/github-workflow"]:
         base = root / directory
         if base.is_symlink() or not base.is_dir():
             raise ValueError(f"Expected a real source directory: {directory}")

@@ -8,6 +8,10 @@
   "VERSION": [
     "VERSION"
   ],
+  "configurations/claude-desktop/CLAUDE.md": [
+    "CLAUDE.md",
+    "configurations/claude-desktop/CLAUDE.md"
+  ],
   "configurations/codex/agents-config.toml": [
     "configurations/codex/agents-config.toml"
   ],
@@ -26,6 +30,14 @@
   "configurations/codex/agents/worker.toml": [
     "configurations/codex/agents/worker.toml"
   ],
+  "configurations/common/AGENTS.md": [
+    "AGENTS.md",
+    "configurations/codex/AGENTS.md",
+    "configurations/claude-desktop/AGENTS.md"
+  ],
+  "configurations/hermes/development.md": [
+    "configurations/hermes/development.md"
+  ],
   "docs/INSTALL-CLAUDE.md": [
     "INSTALL-CLAUDE.md"
   ],
@@ -37,18 +49,6 @@
   ],
   "docs/package-README.md": [
     "README.md"
-  ],
-  "profiles/AGENTS.template.md": [
-    "AGENTS.md",
-    "configurations/codex/AGENTS.md",
-    "configurations/claude-desktop/AGENTS.md"
-  ],
-  "profiles/CLAUDE.template.md": [
-    "CLAUDE.md",
-    "configurations/claude-desktop/CLAUDE.md"
-  ],
-  "profiles/hermes-development.md": [
-    "adaptations/hermes-development.md"
   ],
   "scripts/install.py": [
     "install.py"

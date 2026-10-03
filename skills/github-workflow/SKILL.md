@@ -234,7 +234,7 @@ Use chore/agent-workflow-update and the same PR delivery. The policy applicable 
 4. Run the init placeholder check, covering README.md, LICENSE*, .yml/.yaml and absent CI, distinguishing exit 1 from errors.
 5. Show the diff and summarize added/modified rules.
 
-**Package v6.5.0; active repository template v6.4.** This package adds technical initiative, incidental issue capture, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement.
+**Package v6.5.0; active repository template v6.4.** This package adds technical initiative, incidental issue capture, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared configuration and skill files. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement.
 
 ## What's new
 

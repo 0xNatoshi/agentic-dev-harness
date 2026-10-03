@@ -10,7 +10,7 @@ Extract outside project repositories. Ask the agent in each targeted application
 |---|---|
 | Claude Desktop local Code tab / Claude Code | [INSTALL-CLAUDE.md](INSTALL-CLAUDE.md), [Claude profile](configurations/claude-desktop/CLAUDE.md) and adjacent AGENTS.md |
 | Codex Desktop/CLI | [INSTALL-CODEX.md](INSTALL-CODEX.md), [common profile](configurations/codex/AGENTS.md), [agent registration](configurations/codex/agents-config.toml) and five role files |
-| Hermes | [Development adaptation](adaptations/hermes-development.md); replace only the development section after backup and preserve private SOUL/settings |
+| Hermes | [Hermes adaptation](configurations/hermes/development.md); replace only the development section after backup and preserve private SOUL/settings |
 
 The [workflow skill](skills/github-workflow/SKILL.md) includes scripts, references, license templates and authentic project-template history. Runtime guards require Git, gh, Bash/Git Bash and Python 3.8+; no external jq is required. Conversation follows personal preferences; maintained files use English. Legacy suspension strings remain exact compatibility data.
 
@@ -28,7 +28,7 @@ When every checkpoint is `current` or `personalized`, no package update is neede
 
 ## Version and recovery
 
-The package is v6.5.0; the project template is v6.4. Package policy includes proactive technical judgment, incidental issue capture, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill. Authentic template snapshots are retained, including instructions to preserve destination-only v5.1/v5.2 history. The common policy is neutral; merge personal preferences during installation instead of overwriting them.
+The package is v6.5.0; the project template is v6.4. Package policy includes proactive technical judgment, incidental issue capture, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared configuration and skill files. Authentic template snapshots are retained, including instructions to preserve destination-only v5.1/v5.2 history. The common policy is neutral; merge personal preferences during installation instead of overwriting them.
 
 MANIFEST.json hashes every payload except itself. The ZIP is reproducibly generated from the versioned source. Read [STATUS.md](STATUS.md) for actual scope and outstanding destination checks. The package contains no private backup, provider credentials or full Hermes SOUL.
 

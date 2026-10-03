@@ -32,14 +32,14 @@ The build writes a deterministic ZIP, SHA-256 manifest and checksum file to `dis
 
 | Path | Responsibility |
 |---|---|
-| [profiles/](profiles/) | Common personal policy and runtime adaptations, without personal identifiers |
+| [configurations/](configurations/) | Shared policy source and per-target adaptations for Codex, Claude desktop and Hermes, without personal identifiers |
 | [skills/github-workflow/](skills/github-workflow/) | Workflow, read-only guards, reference material, license/project templates and authentic history |
 | [configurations/codex/](configurations/codex/) | Sanitized Codex role registration and all five role files |
 | [docs/INSTALL-CODEX.md](docs/INSTALL-CODEX.md), [docs/INSTALL-CLAUDE.md](docs/INSTALL-CLAUDE.md) | Destination installation and verified rollback procedures |
 | [scripts/](scripts/), [tests/](tests/) | Reproducible packaging, source checks and isolated behavioral fixtures |
 | [AGENTS.md](AGENTS.md) | This repository's development instructions; Claude imports them through root CLAUDE.md |
 
-The common profile has one source. Packaging generates the runtime-specific copies instead of maintaining duplicate files. [package-files.json](package-files.json) explicitly lists every exportable source and destination; undeclared files in profile/skill/role directories block the build. Profile/template instructions are installable data; they do not replace this repository's root instructions. No installer runs automatically, and no live profile, provider or permission is changed by building the package.
+The common profile has one source. Packaging generates the runtime-specific copies instead of maintaining duplicate files. [package-files.json](package-files.json) explicitly lists every exportable source and destination; undeclared files in configuration/skill/role directories block the build. Profile/template instructions are installable data; they do not replace this repository's root instructions. No installer runs automatically, and no live profile, provider or permission is changed by building the package.
 
 The build rejects file/directory collisions after Unicode normalization, uppercase mapping and case folding, exports that overlap the generated manifest, and reserved path components from the [Windows naming conventions](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file). These conservative source checks do not emulate every filesystem or replace installation and extraction checks on the destination computer.
 

@@ -2148,8 +2148,8 @@ DASH_CASES = tuple(
 SOURCE_CASES = tuple(
     Case("non-veto source " + source, 0, source=source)
     for source in (
-        "profiles/AGENTS.template.md",
-        "profiles/CLAUDE.template.md",
+        "configurations/common/AGENTS.md",
+        "configurations/claude-desktop/CLAUDE.md",
         "skills/github-workflow/templates/AGENTS.md",
     )
 )

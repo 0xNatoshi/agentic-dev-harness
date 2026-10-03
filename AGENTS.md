@@ -192,7 +192,7 @@ Lock new pitfalls in automatic checks when feasible; otherwise record them here.
 
 ## Source and delivery contracts
 
-- Edit canonical policy in profiles/ and skills/; build generates the runtime copies.
+- Edit canonical policy in configurations/ and skills/; build generates the runtime copies.
 - Root AGENTS.md/CLAUDE.md govern this repository; exported templates are payload data.
 - Local gate: python3 scripts/check.py, python3 -m unittest discover -s tests -v, python3 scripts/build.py. CI runs the same gate on Linux; it makes no Windows/interactive-app qualification claim.
 - Issues define acceptance criteria and agent/session ownership. Read latest comments and the linked PR before claiming; handoffs are explicit, never based on age.

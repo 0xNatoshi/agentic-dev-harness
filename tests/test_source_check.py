@@ -156,12 +156,12 @@ class SourceCheckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="harness-profile-hold-") as directory:
             root = Path(directory)
             source = self.copy_source(root)
-            profile = source / "profiles/AGENTS.template.md"
+            profile = source / "configurations/common/AGENTS.md"
             profile.write_text(profile.read_text(encoding="utf-8") + HOLD, encoding="utf-8")
             environment, _ = fixture_environment(root)
             result = run([sys.executable, "scripts/check.py"], source, environment)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Unexpected suspension in source profile: profiles/AGENTS.template.md", result.stderr)
+            self.assertIn("Unexpected suspension in source profile: configurations/common/AGENTS.md", result.stderr)
 
     def test_source_gate_rejects_personal_email_without_echoing_it(self):
         # Built at runtime so this file itself stays free of the pattern.
@@ -230,14 +230,14 @@ class SourceCheckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="harness-profile-email-") as directory:
             root = Path(directory)
             source = self.copy_source(root)
-            profile = source / "profiles/AGENTS.template.md"
+            profile = source / "configurations/common/AGENTS.md"
             text = profile.read_text(encoding="utf-8")
             profile.write_text(text + f"\nContact: {address}\n", encoding="utf-8")
             line = len((text + "\nContact:").split("\n"))
             environment, _ = fixture_environment(root)
             result = run([sys.executable, "scripts/check.py"], source, environment)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn(f"Email address outside the neutral allowlist: profiles/AGENTS.template.md:{line}", result.stderr)
+            self.assertIn(f"Email address outside the neutral allowlist: configurations/common/AGENTS.md:{line}", result.stderr)
             self.assertNotIn(address, result.stdout + result.stderr)
 
     def test_source_gate_accepts_neutral_email_forms(self):
@@ -299,7 +299,7 @@ class SourceCheckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="harness-neutral-email-") as directory:
             root = Path(directory)
             source = self.copy_source(root)
-            profile = source / "profiles/AGENTS.template.md"
+            profile = source / "configurations/common/AGENTS.md"
             profile.write_text(profile.read_text(encoding="utf-8") + "\n" + " ".join(addresses) + "\n" + "\n".join(lines) + "\n",
                                encoding="utf-8")
             (source / ".github/workflows/fixture-uses.yml").write_text("jobs:\n  steps:\n" + "\n".join(uses) + "\n", encoding="utf-8")
