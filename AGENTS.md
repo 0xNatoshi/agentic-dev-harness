@@ -2,6 +2,8 @@
 
 Shared templates have one active owner across issues, PRs, branches and runtimes. Coordinate claims, comment proposals and explicit handoffs/releases in [#15](https://github.com/0xNatoshi/agentic-dev-harness/issues/15). Read its claim before edits; inactivity releases nothing. CONTRIBUTING.md defines the family and procedure.
 
+- Merge author name: `Natoshi` (owner decision on #21, 2026-10-02)
+
 <!-- github-workflow:start v6.4 — managed block from the github-workflow skill; preserve local safeguards and explicit approval requirements on update -->
 
 Working instructions for AI agents (Claude Code, Codex, Copilot, Cursor…) and humans on this repository.
