@@ -968,21 +968,25 @@ NOBODY_PENDING = re.compile(r'^\W*(?:until|till|pending|jusqu\w*|tant\s+que|en\s
 # project's code owner'). The speaker or a decider joined after a count, an organisation or a code owner
 # decides as well ('- Requires one review and my approval:', '... and owner approval:', '- Requires
 # approval from a code owner and a maintainer:'); after a count or an organisation, only a decider
-# introduced as indefinite is part of it ('- Requires two approvals, one from a maintainer:').
+# introduced as indefinite ('a', 'any', 'one', 'some', not 'each' or 'every') is part of it ('- Requires
+# two approvals, one from a maintainer:').
 REVIEW_SCOPE = re.compile(r'\b(?:one|two|three|four|five|\d+|at\s+least|second|another|more)\s+(?:\w+\s+)?'
                           r'(?:approv\w*|reviews?|sign[ -]?offs?)')
 TEAM_RULE = re.compile(r'\borg\w*\b')
 CODE_OWNER = re.compile(r'\bcode[ -]?owners\b|\bcodeowners\b|\b(?:an?|any|one|each|every)\s+code[ -]?owner\b')
 JOINED = re.compile(r'\b(?:and|plus|et)\b|[,&+]')
-INDEFINITE = re.compile(r'(?:an?|any|one|each|every|some|un|une)\s')
-INDEFINITE_BEFORE = re.compile(r'\b(?:an?|any|one|each|every|some|un|une)\s+$')
+INDEFINITE = re.compile(r'(?:an?|any|one|some|un|une)\s')
+INDEFINITE_BEFORE = re.compile(r'\b(?:an?|any|one|some|un|une)\s+$')
 # A parent whose approval has come already ('- After my approval:') names who decides, except a speaker
-# who only owns a listed thing the approval is about ('- After approval of my PRs:', '- After approval
-# in our tracker:', '- After approval, see my notes:').
+# who only owns a listed thing the approval is about, named last ('- After approval of my PRs:', '- After
+# approval in our tracker:', '- After approval, see my notes:'); 'in my code review' names a review.
 GIVEN_PARENT = re.compile(r'\W*(?:after|once|when|whenever|as\s+soon\s+as|après|une\s+fois|quand|lorsqu\w*|dès)\b')
-NOT_GIVER = re.compile(r'(?:(?<=\bof\s)|(?<=\bin\s)|(?<=\bon\s)|(?<=\bfor\s)|(?<=\bper\s)|(?<=\bsee\s)|(?<=\bwith\s))'
-                       r'(?:my|our)(?=\s+(?:\w+\s+)?(?:prs?|pull\s+requests?|branch(?:es)?|tracker|repos?|repositor(?:y|ies)'
-                       r'|changes?|code|work|commits?|issues?|projects?|modules?|notes?|experience|settings?|setup)\b)')
+NOT_GIVER_THING = (r'(?:(?<=\bof\s)|(?<=\bin\s)|(?<=\bon\s)|(?<=\bfor\s)|(?<=\bper\s)|(?<=\bsee\s)|(?<=\bwith\s))'
+                   r'(?:my|our)(?=\s+(?:\w+\s+)?(?:prs?|pull\s+requests?|branch(?:es)?|tracker|repos?|repositor(?:y|ies)'
+                   r'|changes?|code|work|commits?|issues?|projects?|modules?|notes?|experience|settings?|setup)\b')
+NOT_GIVER = re.compile(NOT_GIVER_THING + r'(?![ \t]*\w))')
+# The underscore reading also needs the thing to end the phrase: 'in my code-review:' names a review.
+NOT_GIVER_ENDED = re.compile(NOT_GIVER_THING + r'(?=[\s*_`]*(?:[:.!?,;)](?!\w)|$)))')
 # 'never without approval' or 'but never without asking me' refuses instead of waiving, and 'check with
 # me and merge PRs without asking me' contradicts itself, so the hold stays.
 WAIVER_REFUSED = re.compile(r'\b(?:never|not|no|nor|jamais|pas)\W*$')
@@ -995,7 +999,7 @@ def waived(pattern, text):
 # Who decides, for a child that says it comes next: the speaker or a named decider. 'We' and 'our'
 # decide ('- Until we approve:') unless they name a team process ('Requires one approval from our team',
 # 'we use CODEOWNERS').
-CONDITION_SPEAKER = re.compile(r'\bi\b(?!\.e\b)|\bj(?=[’\x27])|\b(?:me|my|mine|us|je|moi|mon|ma|mes|mien(?:ne)?s?)\b|\b' + DECIDER
+CONDITION_SPEAKER = re.compile(r'\bi\b(?!\.e\b)|\bj(?=[’\x27])|\b(?:me|my|mine|myself|us|ourselves|je|moi|mon|ma|mes|mien(?:ne)?s?)\b|\b' + DECIDER
                                + r'|\b(?:we|our|nous|notre|nos)\b(?!\s+(?:use[sd]?|teams?|org\w*|process\w*|ci'
                                r'|codeowners|polic\w*|rules?|équipes?|utilisons)\b(?!\s+(?:leads?|managers?|owners?)\b))')
 
@@ -1019,22 +1023,35 @@ def conditioned(text, parent):
     pending = PENDING_PARENT.match(strip_markers(parent))
     if waived(NO_APPROVAL_CHILD, child):
         return False
-    if (BARE_WAIT.search(child) and not CONDITION_SPEAKER.search(parent)
+    # A reading with underscores as spaces (same offsets) finds '_me_' and lets only a listed thing that
+    # ends the phrase stay neutral; it can only add a hold to the raw reading, never clear one.
+    return any(condition_read(child, parent, spoken, not_giver, pending)
+               for spoken, not_giver in ((parent, NOT_GIVER), (parent.replace('_', ' '), NOT_GIVER_ENDED)))
+
+
+def condition_read(child, parent, spoken, not_giver, pending):
+    """One reading of conditioned(): speakers come from spoken, rules from the raw parent."""
+    if (BARE_WAIT.search(child) and not CONDITION_SPEAKER.search(spoken)
             and not (pending and not NOBODY_PENDING.search(strip_markers(parent)))):
         return False
     sequence = SEQUENCE_START.match(child)
     owners = list(CODE_OWNER.finditer(parent))
-    speakers = [match for match in CONDITION_SPEAKER.finditer(parent)
+    speakers = [match for match in CONDITION_SPEAKER.finditer(spoken)
                 if not any(owner.start() <= match.start() < owner.end() for owner in owners)]
     if GIVEN_PARENT.match(strip_markers(parent)):
-        speakers = [match for match in speakers if not NOT_GIVER.match(parent, match.start())]
+        speakers = [match for match in speakers if not not_giver.match(spoken, match.start())]
     # A count or a code owner after the decider only adds to its decision.
     scopes = [match for match in (REVIEW_SCOPE.search(parent), *owners[:1])
               if match and not (speakers and match.start() > speakers[0].start())]
     rules = sorted((match.end(), match.re is CODE_OWNER) for match in (TEAM_RULE.search(parent), *scopes) if match)
+    # After a code owner, any later speaker decides ('- Requires approval from a code owner (me):') unless
+    # it only owns what the owner reviews ('... from a code owner for my modules:').
     decided = rules and any(
-        match.start() >= rules[-1][0] and JOINED.search(parent, rules[-1][0], match.start())
-        and (rules[-1][1] or not (INDEFINITE.match(match.group()) or INDEFINITE_BEFORE.search(parent, 0, match.start())))
+        match.start() >= rules[-1][0]
+        and (JOINED.search(parent, rules[-1][0], match.start())
+             or rules[-1][1] and not not_giver.match(spoken, match.start()))
+        and (rules[-1][1] or not (INDEFINITE.match(parent, match.start(), match.end())
+                                  or INDEFINITE_BEFORE.search(parent, 0, match.start())))
         for match in speakers)
     if sequence and speakers and (pending or not rules or decided):
         child = child[sequence.end():]
@@ -1104,6 +1121,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
     held = functools.lru_cache(maxsize=128)(run_match)
     under_condition = functools.lru_cache(maxsize=128)(conditioned)
     answers_label = functools.lru_cache(maxsize=128)(merge_label_rule)
+    follows_step = functools.lru_cache(maxsize=128)(next_step)
 
     def context(extra=(), near=()):
         """Heading path, then lead-ins and extra cut to CONTEXT_LIMIT, then near items uncut."""
@@ -1214,7 +1232,7 @@ def units(lines, hold_found, heading_found=lambda level: None):
             elif conditions and under_condition(text, conditions[-1][1]):
                 hold_found()  # '- Until I approve:' above '- merge PRs'
             elif (answers_label(text, parents[-1] if parents else None)
-                  or labelled and not (STEP_ITEM.match(sibling[1]) and next_step(text))
+                  or labelled and not (STEP_ITEM.match(sibling[1]) and follows_step(text))
                   and answers_label(text, sibling[1])):
                 hold_found()  # '- Merges: never', '- Merging' above '- wait for me', nested or not
             pair = context(parents, near), text
