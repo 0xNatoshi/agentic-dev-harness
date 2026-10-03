@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -129,6 +130,20 @@ class InstallerTests(unittest.TestCase):
     def run_installer(self, *arguments, env=None, processes=True, installer=None):
         return subprocess.run([sys.executable, "-B", str(installer or self.installer), *map(str, arguments)], cwd=self.base,
                               env=self.environment(env, processes), capture_output=True, text=True, encoding="utf-8", timeout=120)
+
+    def run_limited_installer(self, limits, *arguments):
+        # Exercise the same CLI with smaller budgets, so resource-limit cases stay small and deterministic.
+        runner = """import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('harness_limited_install', sys.argv[1])
+installer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(installer)
+for name, value in json.loads(sys.argv[2]).items():
+    setattr(installer, name, value)
+sys.exit(installer.main(sys.argv[3:]))
+"""
+        return subprocess.run([sys.executable, "-B", "-c", runner, str(self.installer), json.dumps(limits),
+                               *map(str, arguments)], cwd=self.base, env=self.environment(), capture_output=True,
+                              text=True, encoding="utf-8", timeout=120)
 
     def run_recorded(self, command, *extra):
         """Run a recorded argument list as the operator would, without the test's -B or installer path."""
@@ -257,6 +272,85 @@ class InstallerTests(unittest.TestCase):
                 result = self.run_installer("verify-package", archive, "--checksums", self.checksums)
                 self.assert_refused(result, 1)
                 self.assertIn(problem, json.loads(result.stderr)["error"])
+
+    def test_archive_metadata_limits_reject_empty_members_and_long_names(self):
+        archive = self.base / "many-empty.zip"
+        prefix = self.package.name
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr(prefix + "/MANIFEST.json", (self.package / "MANIFEST.json").read_bytes())
+            for index in range(6):
+                bundle.writestr(prefix + f"/empty-{index:02d}.txt", b"")
+        for limits, phrase in (({"PACKAGE_ENTRY_LIMIT": 6}, "archive entry count exceeds"),
+                               ({"PACKAGE_NAME_BYTES_LIMIT": 90}, "archive filename bytes exceed"),
+                               ({"CENTRAL_DIRECTORY_LIMIT": 100}, "archive central directory exceeds")):
+            with self.subTest(phrase):
+                result = self.run_limited_installer(limits, "verify-package", archive, "--checksums", self.checksums)
+                self.assert_refused(result, 1)
+                self.assertIn(phrase, json.loads(result.stderr)["error"])
+
+    def test_archive_preflight_rejects_lying_directory_metadata(self):
+        archive = self.base / "metadata.zip"
+        prefix = self.package.name
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr(prefix + "/MANIFEST.json", (self.package / "MANIFEST.json").read_bytes())
+            bundle.writestr(prefix + "/extra.txt", b"")
+        original = bytearray(archive.read_bytes())
+        eocd = original.rfind(b"PK\x05\x06")
+        self.assertGreaterEqual(eocd, 0)
+        cases = (
+            ("count", 10, "<H", 1, "archive central directory count differs"),
+            ("size", 12, "<L", 1024 * 1024, "archive central directory exceeds"),
+        )
+        for label, offset, format_code, value, phrase in cases:
+            with self.subTest(label):
+                changed = bytearray(original)
+                struct.pack_into(format_code, changed, eocd + offset, value)
+                if label == "count":
+                    struct.pack_into("<H", changed, eocd + 8, value)
+                altered = self.base / f"metadata-{label}.zip"
+                altered.write_bytes(changed)
+                result = self.run_installer("verify-package", altered, "--checksums", self.checksums)
+                self.assert_refused(result, 1)
+                self.assertIn(phrase, json.loads(result.stderr)["error"])
+
+    def test_manifest_size_and_file_count_are_bounded(self):
+        manifest = (self.package / "MANIFEST.json").read_bytes()
+        count = len(json.loads(manifest)["files"])
+        for limits, phrase in (({"MANIFEST_LIMIT": len(manifest) - 1}, "MANIFEST.json exceeds"),
+                               ({"MANIFEST_ENTRY_LIMIT": count - 1}, "MANIFEST.json file count exceeds")):
+            with self.subTest(phrase):
+                for package in (self.package, self.archive):
+                    result = self.run_limited_installer(limits, "verify-package", package,
+                                                        "--checksums", self.checksums)
+                    self.assert_refused(result, 1)
+                    self.assertIn(phrase, json.loads(result.stderr)["error"])
+
+    def test_directory_limits_reject_empty_entries_names_and_aggregate_bytes_before_plan(self):
+        copy = self.base / "many-empty-directory"
+        shutil.copytree(self.package, copy)
+        count = sum(1 for _ in copy.rglob("*"))
+        for index in range(6):
+            (copy / f"empty-{index:02d}.txt").write_bytes(b"")
+        name_bytes = sum(len(path.relative_to(copy).as_posix().encode("utf-8")) for path in copy.rglob("*"))
+        payloads = [path.stat().st_size for path in copy.rglob("*") if path.is_file()]
+        aggregate = sum(payloads)
+        self.assertGreater(aggregate, max(payloads))
+        cases = (
+            ({"PACKAGE_ENTRY_LIMIT": count + 2}, "package directory entry count exceeds"),
+            ({"PACKAGE_NAME_BYTES_LIMIT": name_bytes - 1}, "package directory filename bytes exceed"),
+            ({"ARCHIVE_LIMIT": aggregate - 1}, "package directory expands beyond"),
+            ({"MEMBER_LIMIT": max(payloads) - 1}, "package directory member exceeds"),
+        )
+        for limits, phrase in cases:
+            with self.subTest(phrase):
+                plan = self.base / "rejected-plan.json"
+                result = self.run_limited_installer(limits, "plan", "--runtime", "claude", "--home", self.home,
+                                                    "--package", copy, "--checksums", self.checksums,
+                                                    "--output", plan)
+                self.assert_refused(result, 1)
+                self.assertIn(phrase, json.loads(result.stderr)["error"])
+                self.assertFalse(plan.exists())
+                self.assertFalse(self.target.exists())
 
     # Planning.
     def test_plan_is_read_only_and_classifies_v52(self):

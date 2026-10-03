@@ -16,6 +16,7 @@ import re
 import shlex
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,11 @@ REPARSE_POINT = 0x400
 LINK_REPARSE_TAGS = {0xA000000C, 0xA0000003}
 MEMBER_LIMIT = 64 * 1024 * 1024
 ARCHIVE_LIMIT = 256 * 1024 * 1024
+PACKAGE_ENTRY_LIMIT = 1024
+PACKAGE_NAME_BYTES_LIMIT = 128 * 1024
+CENTRAL_DIRECTORY_LIMIT = 512 * 1024
+MANIFEST_LIMIT = 1024 * 1024
+MANIFEST_ENTRY_LIMIT = 1024
 
 
 class Failure(Exception):
@@ -351,16 +357,20 @@ def is_cache(name: str) -> bool:
 # Package loading and verification.
 class Package:
     def __init__(self, source: Path, files: dict, manifest_bytes: bytes, archive: bytes | None) -> None:
+        if len(manifest_bytes) > MANIFEST_LIMIT:
+            raise Refused(f"MANIFEST.json exceeds {MANIFEST_LIMIT} bytes")
         self.source = source
         self.files = files
         self.manifest_bytes = manifest_bytes
         self.archive_sha256 = digest(archive) if archive is not None else None
         try:
             self.manifest = json.loads(manifest_bytes.decode("utf-8"))
-        except ValueError as error:
+        except (ValueError, RecursionError) as error:
             raise Refused(f"MANIFEST.json is not valid JSON: {error}")
         if not isinstance(self.manifest, dict) or self.manifest.get("format_version") != 2 or not isinstance(self.manifest.get("files"), dict):
             raise Refused("MANIFEST.json is not a format 2 dev-harness manifest")
+        if len(self.manifest["files"]) > MANIFEST_ENTRY_LIMIT:
+            raise Refused(f"MANIFEST.json file count exceeds {MANIFEST_ENTRY_LIMIT}")
         name = self.manifest.get("package")
         if not isinstance(name, str) or not re.fullmatch(r"dev-harness-v\d+\.\d+\.\d+", name) or name != "dev-harness-v" + str(self.manifest.get("version")):
             raise Refused("MANIFEST.json names no valid package version")
@@ -388,33 +398,119 @@ def load_package(source: Path) -> Package:
         return load_archive(source)
     if not source.is_dir():
         raise Refused(f"Package not found: {source}")
-    files = {}
-    for name, entry in (inventory_unchecked(source)).items():
-        if entry is not None:
-            files[name] = (source / Path(*PurePosixPath(name).parts)).read_bytes()
+    files = load_directory_files(source)
     if "MANIFEST.json" not in files:
         raise Refused(f"No MANIFEST.json in {source}")
     manifest = files.pop("MANIFEST.json")
     return Package(source, files, manifest, None)
 
 
-def inventory_unchecked(source: Path) -> dict:
-    """Package directory listing: regular files only; links and special files refuse."""
-    try:
-        entries = inventory(source)
-    except Blocked as error:
-        raise Refused(f"Package directory: {error}")
-    return {name: entry for name, entry in entries.items() if entry["type"] == "file"}
+def check_package_entries(count: int, name_bytes: int, context: str) -> None:
+    if count > PACKAGE_ENTRY_LIMIT:
+        raise Refused(f"{context} entry count exceeds {PACKAGE_ENTRY_LIMIT}")
+    if name_bytes > PACKAGE_NAME_BYTES_LIMIT:
+        raise Refused(f"{context} filename bytes exceed {PACKAGE_NAME_BYTES_LIMIT}")
+
+
+def load_directory_files(source: Path) -> dict:
+    """Read a package directory once, checking each entry before retaining its bytes."""
+    files = {}
+    pending = [(source, "")]
+    count = name_bytes = total = 0
+    while pending:
+        directory, prefix = pending.pop()
+        with os.scandir(str(directory)) as listing:
+            for item in listing:
+                name = prefix + item.name
+                path = directory / item.name
+                count += 1
+                try:
+                    name_bytes += len(name.encode("utf-8"))
+                except UnicodeEncodeError:
+                    raise Refused("Package directory path is not UTF-8") from None
+                check_package_entries(count, name_bytes, "package directory")
+                if is_link(path):
+                    raise Refused(f"Package directory: Link or junction inside the tree: {path}")
+                status = os.lstat(str(path))
+                if stat.S_ISDIR(status.st_mode):
+                    pending.append((path, name + "/"))
+                    continue
+                if not stat.S_ISREG(status.st_mode):
+                    raise Refused(f"Package directory: Special file inside the tree: {path}")
+                try:
+                    package_path(name)
+                except ValueError as error:
+                    raise Refused(str(error))
+                if name == "MANIFEST.json" and status.st_size > MANIFEST_LIMIT:
+                    raise Refused(f"MANIFEST.json exceeds {MANIFEST_LIMIT} bytes")
+                if status.st_size > MEMBER_LIMIT:
+                    raise Refused(f"package directory member exceeds {MEMBER_LIMIT} bytes: {name}")
+                if total + status.st_size > ARCHIVE_LIMIT:
+                    raise Refused(f"package directory expands beyond {ARCHIVE_LIMIT} bytes")
+                remaining = ARCHIVE_LIMIT - total
+                bound = min(MEMBER_LIMIT, remaining, MANIFEST_LIMIT if name == "MANIFEST.json" else MEMBER_LIMIT)
+                with path.open("rb") as stream:
+                    data = stream.read(bound + 1)
+                if name == "MANIFEST.json" and len(data) > MANIFEST_LIMIT:
+                    raise Refused(f"MANIFEST.json exceeds {MANIFEST_LIMIT} bytes")
+                if len(data) > MEMBER_LIMIT:
+                    raise Refused(f"package directory member exceeds {MEMBER_LIMIT} bytes: {name}")
+                total += len(data)
+                if total > ARCHIVE_LIMIT:
+                    raise Refused(f"package directory expands beyond {ARCHIVE_LIMIT} bytes")
+                files[name] = data
+    return files
+
+
+def preflight_archive_metadata(archive: bytes) -> int:
+    """Bound the raw central directory before ZipFile allocates ZipInfo objects."""
+    eocd = archive.rfind(b"PK\x05\x06", max(0, len(archive) - 65557))
+    if eocd < 0 or eocd + 22 > len(archive):
+        raise Refused("Not a valid ZIP archive: missing end record")
+    _, disk, directory_disk, disk_entries, declared, size, offset, comment_size = struct.unpack_from(
+        "<4s4H2LH", archive, eocd)
+    if eocd + 22 + comment_size != len(archive):
+        raise Refused("Not a valid ZIP archive: invalid end record length")
+    if disk or directory_disk or disk_entries != declared:
+        raise Refused("Unsupported multi-disk ZIP archive")
+    if declared == 0xffff or size == 0xffffffff or offset == 0xffffffff:
+        raise Refused("ZIP64 central directory is outside package limits")
+    check_package_entries(declared, 0, "archive")
+    if size > CENTRAL_DIRECTORY_LIMIT:
+        raise Refused(f"archive central directory exceeds {CENTRAL_DIRECTORY_LIMIT} bytes")
+    start = eocd - size
+    if start < 0 or offset > start:
+        raise Refused("Not a valid ZIP archive: invalid central directory offset")
+    position = start
+    count = name_bytes = 0
+    while position < eocd:
+        if position + 46 > eocd or archive[position:position + 4] != b"PK\x01\x02":
+            raise Refused("Not a valid ZIP archive: invalid central directory entry")
+        filename_size, extra_size, entry_comment_size = struct.unpack_from("<3H", archive, position + 28)
+        position += 46 + filename_size + extra_size + entry_comment_size
+        if position > eocd:
+            raise Refused("Not a valid ZIP archive: truncated central directory entry")
+        count += 1
+        name_bytes += filename_size
+        check_package_entries(count, name_bytes, "archive")
+    if count != declared:
+        raise Refused("archive central directory count differs from its end record")
+    return count
 
 
 def load_archive(source: Path) -> Package:
-    if source.stat().st_size > ARCHIVE_LIMIT:
+    with source.open("rb") as stream:
+        archive = stream.read(ARCHIVE_LIMIT + 1)
+    if len(archive) > ARCHIVE_LIMIT:
         raise Refused(f"The archive exceeds {ARCHIVE_LIMIT} bytes")
-    archive = source.read_bytes()
+    expected_members = preflight_archive_metadata(archive)
     total = 0
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
             members = bundle.infolist()
+            if len(members) != expected_members:
+                raise Refused("archive central directory count differs after ZIP parsing")
+            check_package_entries(len(members), sum(len(member.filename.encode("utf-8")) for member in members), "archive")
             names = [member.filename for member in members]
             if len(set(names)) != len(names):
                 raise Refused("The archive repeats a member name")
@@ -434,9 +530,17 @@ def load_archive(source: Path) -> Package:
                     package_path(name)
                 except ValueError as error:
                     raise Refused(str(error))
+                if name == "MANIFEST.json" and member.file_size > MANIFEST_LIMIT:
+                    raise Refused(f"MANIFEST.json exceeds {MANIFEST_LIMIT} bytes")
+                if member.file_size > MEMBER_LIMIT or total + member.file_size > ARCHIVE_LIMIT:
+                    raise Refused(f"The archive expands beyond the size limits at {member.filename}")
                 # Bounded reads: the declared size of a member is not trusted.
+                remaining = ARCHIVE_LIMIT - total
+                bound = min(MEMBER_LIMIT, remaining, MANIFEST_LIMIT if name == "MANIFEST.json" else MEMBER_LIMIT)
                 with bundle.open(member) as stream:
-                    data = stream.read(MEMBER_LIMIT + 1)
+                    data = stream.read(bound + 1)
+                if name == "MANIFEST.json" and len(data) > MANIFEST_LIMIT:
+                    raise Refused(f"MANIFEST.json exceeds {MANIFEST_LIMIT} bytes")
                 total += len(data)
                 if len(data) > MEMBER_LIMIT or total > ARCHIVE_LIMIT:
                     raise Refused(f"The archive expands beyond the size limits at {member.filename}")
