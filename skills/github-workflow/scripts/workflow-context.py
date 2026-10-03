@@ -914,7 +914,9 @@ def terminated(block):
 # drops that word when the parent names who decides ('- Until I approve:', '- Requires approval from the
 # owner'); otherwise it is read after its parent, as written, so '- Requires one approval' above it stays a
 # review count.
-CONDITION_HOLD = re.compile(HOLD_FREE)
+# HOLD_FREE again, without FREE's other branches. Compiled on first use: every scan runs in a new
+# process, and most documents have no condition parent.
+condition_hold = functools.lru_cache(maxsize=None)(lambda: re.compile(HOLD_FREE))
 SEQUENCE_START = re.compile(r'(?:and\s+)?(?:then|next|afterwards|puis|ensuite)\b[\s,]*')
 # A decision verb names the condition ('- Until we agree:', 'Until I confirm in writing') unless what
 # follows names something else ('Until I decide otherwise'; for 'we', also a team process such as 'Until
@@ -1056,7 +1058,7 @@ def condition_read(child, parent, spoken, not_giver, pending):
     if sequence and speakers and (pending or not rules or decided):
         child = child[sequence.end():]
     joined = parent + ' ' + child if SEQUENCE_START.match(child) else child + ' ' + parent
-    return bool(CONDITION_HOLD.search(strip_markers(joined)))
+    return bool(condition_hold().search(strip_markers(joined)))
 
 
 # Markdown emphasis and code-span markers at word edges: '**Merging**:', 'Only **I** may merge',
