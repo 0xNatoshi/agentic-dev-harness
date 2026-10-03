@@ -77,7 +77,7 @@ try {
     $checksums = Join-Path $bootstrapRoot $checksumName
     [IO.File]::WriteAllBytes($packageZip, $archiveBytes)
     [IO.File]::WriteAllBytes($checksums, $checksumBytes)
-    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem -ErrorAction Stop
     $archiveStream.Position = 0
     $bundle = [IO.Compression.ZipArchive]::new($archiveStream, [IO.Compression.ZipArchiveMode]::Read, $true)
     $installerEntries = @($bundle.Entries | Where-Object { $_.FullName -ceq ($packageName + '/install.py') })
