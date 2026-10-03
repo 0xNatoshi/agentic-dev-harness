@@ -914,8 +914,8 @@ def terminated(block):
 # drops that word when the parent names who decides ('- Until I approve:', '- Requires approval from the
 # owner'); otherwise it is read after its parent, as written, so '- Requires one approval' above it stays a
 # review count.
-# HOLD_FREE again, without FREE's other branches. Compiled on first use: every scan runs in a new
-# process, and most documents have no condition parent.
+# HOLD_FREE again, without FREE's other branches. Compiled on first use: each run scans few documents,
+# most have no condition parent, and every merge-preflight run imports this module again.
 condition_hold = functools.lru_cache(maxsize=None)(lambda: re.compile(HOLD_FREE))
 SEQUENCE_START = re.compile(r'(?:and\s+)?(?:then|next|afterwards|puis|ensuite)\b[\s,]*')
 # A decision verb names the condition ('- Until we agree:', 'Until I confirm in writing') unless what
