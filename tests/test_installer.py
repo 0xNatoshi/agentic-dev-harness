@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
 import hashlib
 import importlib.util
 import json
@@ -1240,7 +1242,8 @@ class InstallerTests(unittest.TestCase):
         # The emptied folder is replaced by a link to a directory outside every skill root.
         elsewhere = self.base / "elsewhere"
         elsewhere.mkdir()
-        vendor.rmdir()
+        original_vendor = self.base / "original-vendor"
+        vendor.rename(original_vendor)
         link_directory(vendor, elsewhere)
         try:
             for older in (False, True):
@@ -1265,7 +1268,7 @@ class InstallerTests(unittest.TestCase):
                     self.assertEqual(snapshot(target), after)
         finally:
             unlink_directory(vendor)
-        vendor.mkdir()
+        original_vendor.rename(vendor)
         rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
         self.assertEqual(rollback.returncode, 0, rollback.stderr)
         self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
@@ -1624,18 +1627,22 @@ class InstallerTests(unittest.TestCase):
         target = self.home / ".agents" / "skills" / "github-workflow"
         legacy = self.home / ".codex" / "skills" / "github-workflow"
         before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        pristine = self.base / "pristine"
+        shutil.copytree(self.home, pristine, symlinks=True)
         result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
         self.assertEqual(result.returncode, 0, result.stderr)
         receipt_path = Path(json.loads(result.stdout)["receipt"])
         after = snapshot(target)
-        pristine = self.base / "pristine"
-        shutil.copytree(self.home, pristine, symlinks=True)
         names = self.checkpoints("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
         self.assertLess(names.index("rollback:activated"), names.index("rollback:moved-0"))
         for name in names:
             with self.subTest(checkpoint=name):
                 shutil.rmtree(self.home)
                 shutil.copytree(pristine, self.home, symlinks=True)
+                # A fresh receipt belongs to these physical directories, unlike a copied transaction.
+                result = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                receipt_path = Path(json.loads(result.stdout)["receipt"])
                 crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
                                              env={"DEV_HARNESS_INSTALL_TEST_CRASH": name})
                 self.assertEqual(crashed.returncode, 70, crashed.stderr)
@@ -1664,6 +1671,7 @@ class InstallerTests(unittest.TestCase):
             with self.subTest(checkpoint=name):
                 shutil.rmtree(self.home)
                 shutil.copytree(pristine, self.home, symlinks=True)
+                plan = self.plan("codex")
                 crashed = self.apply(plan, "--retire-duplicate", legacy, env={"DEV_HARNESS_INSTALL_TEST_CRASH": name})
                 self.assertEqual(crashed.returncode, 70, crashed.stderr)
                 self.assertLessEqual(len(visible_copies(*self.roots)), 2)
@@ -1847,6 +1855,266 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(result.returncode, code, result.stderr)
 
     # Codex and duplicates.
+    def invoke_at_checkpoint(self, arguments, point, action, before=False, env=None):
+        """Run the extracted installer with one deterministic filesystem change at an existing checkpoint."""
+        spec = importlib.util.spec_from_file_location("physical_parent_installer", self.installer)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        observed = []
+        original = module.checkpoint
+
+        def checkpoint(name):
+            selected = name == point and not observed
+            if selected:
+                observed.append(name)
+                if before:
+                    action()
+            original(name)
+            if selected and not before:
+                action()
+
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, self.environment(env), clear=True), mock.patch.object(module, "checkpoint", checkpoint):
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                code = module.main(list(map(str, arguments)))
+        self.assertEqual(observed, [point])
+        return subprocess.CompletedProcess(arguments, code, output.getvalue(), errors.getvalue())
+
+    def linked_duplicate_fixture(self, config_link=False):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        before = self.v52_layout(target)
+        first, second = self.base / "first", self.base / "second"
+        if config_link:
+            first, second = first / "skills", second / "skills"
+            alias = self.home / ".codex"
+            source, replacement = first.parent, second.parent
+        else:
+            alias = self.home / ".codex" / "skills"
+            source, replacement = first, second
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        duplicate = first / "github-workflow"
+        original = self.v52_layout(duplicate)
+        alias.parent.mkdir(parents=True, exist_ok=True)
+        link_directory(alias, source)
+        self.addCleanup(lambda: unlink_directory(alias) if os.path.lexists(alias) else None)
+
+        def select(path):
+            unlink_directory(alias)
+            link_directory(alias, path)
+
+        return target, before, duplicate, original, second, source, replacement, select
+
+    def test_apply_keeps_duplicate_moves_on_the_bound_parent_when_an_alias_changes(self):
+        for config_link in (False, True):
+            with self.subTest(config_link=config_link):
+                if config_link:
+                    # Each case is a fresh transaction and home, not copied persisted identities.
+                    shutil.rmtree(self.home)
+                    self.home.mkdir()
+                    for name in ("first", "second"):
+                        shutil.rmtree(self.base / name)
+                target, before, duplicate, original, second, source, replacement, select = self.linked_duplicate_fixture(config_link)
+                self.v52_layout(second / "github-workflow")
+                alternate = snapshot(second)
+                lexical = self.home / ".codex" / "skills" / "github-workflow"
+                plan = self.plan("codex")
+                result = self.invoke_at_checkpoint(
+                    ["apply", "--plan", plan, "--checksums", self.checksums, "--maintenance-confirmed",
+                     "--retire-duplicate", lexical], "apply:moving-0", lambda: select(replacement))
+                self.assertEqual(snapshot(second), alternate)
+                self.assertIn(result.returncode, (1, 3), result.stdout + result.stderr)
+                select(source)
+                recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertEqual((snapshot(target), snapshot(duplicate)), (before, original))
+                # Remove this case's alias before replacing its home in the next case.
+                unlink_directory(self.home / ".codex" if config_link else self.home / ".codex" / "skills")
+
+    def test_rollback_restores_into_the_bound_parent_when_a_secondary_alias_changes(self):
+        target, before, duplicate, original, second, source, replacement, select = self.linked_duplicate_fixture(True)
+        lexical = self.home / ".codex" / "skills" / "github-workflow"
+        applied = self.apply(self.plan("codex"), "--retire-duplicate", lexical)
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        receipt = Path(json.loads(applied.stdout)["receipt"])
+        alternate = snapshot(second)
+        result = self.invoke_at_checkpoint(
+            ["rollback", "--receipt", receipt, "--maintenance-confirmed"],
+            "rollback:moving-0", lambda: select(replacement))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(snapshot(second), alternate)
+        self.assertEqual((snapshot(target), snapshot(duplicate)), (before, original))
+
+    def test_recovery_refuses_a_retargeted_duplicate_alias_and_succeeds_when_restored(self):
+        target, before, duplicate, original, second, source, replacement, select = self.linked_duplicate_fixture(True)
+        lexical = self.home / ".codex" / "skills" / "github-workflow"
+        plan = self.plan("codex")
+        crashed = self.apply(plan, "--retire-duplicate", lexical, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:moved-0"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        self.v52_layout(second / "github-workflow")
+        alternate = snapshot(second)
+        current = self.home / ".agents" / "dev-harness-install" / "CURRENT"
+        pointer = current.read_bytes()
+        select(replacement)
+        recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assert_refused(recovered, 3)
+        self.assertEqual(current.read_bytes(), pointer)
+        self.assertEqual(snapshot(second), alternate)
+        self.assertFalse(duplicate.exists())
+        select(source)
+        recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual((snapshot(target), snapshot(duplicate)), (before, original))
+        self.assertFalse(current.exists())
+
+    def test_rollback_recovery_keeps_a_retargeted_alias_untouched(self):
+        target, before, duplicate, original, second, source, replacement, select = self.linked_duplicate_fixture()
+        lexical = self.home / ".codex" / "skills" / "github-workflow"
+        applied = self.apply(self.plan("codex"), "--retire-duplicate", lexical)
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        receipt = Path(json.loads(applied.stdout)["receipt"])
+        installed = snapshot(target)
+        crashed = self.run_installer("rollback", "--receipt", receipt, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:moved-0"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        self.v52_layout(second / "github-workflow")
+        alternate = snapshot(second)
+        select(replacement)
+        recovered = self.run_installer("recover", "--receipt", receipt, "--maintenance-confirmed")
+        self.assert_refused(recovered, 3)
+        self.assertEqual(snapshot(second), alternate)
+        self.assertEqual(snapshot(duplicate), original)
+        select(source)
+        recovered = self.run_installer("recover", "--receipt", receipt, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(snapshot(target), installed)
+        self.assertFalse(duplicate.exists())
+
+    def test_duplicate_parent_handles_survive_or_block_physical_parent_replacement(self):
+        target, before, duplicate, original, second, source, replacement, select = self.linked_duplicate_fixture()
+        lexical = self.home / ".codex" / "skills" / "github-workflow"
+        plan = self.plan("codex")
+        moved = self.base / "moved-parent"
+        attempted = []
+
+        def replace_parent():
+            try:
+                duplicate.parent.rename(moved)
+            except PermissionError:
+                self.assertEqual(os.name, "nt")
+                attempted.append("blocked by live handle")
+                return
+            attempted.append("renamed")
+            shutil.copytree(moved, duplicate.parent)
+
+        result = self.invoke_at_checkpoint(
+            ["apply", "--plan", plan, "--checksums", self.checksums, "--maintenance-confirmed",
+             "--retire-duplicate", lexical], "apply:moving-0", replace_parent)
+        self.assertEqual(len(attempted), 1)
+        if os.name == "nt":
+            self.assertEqual(attempted, ["blocked by live handle"])
+            self.assertEqual(result.returncode, 0, result.stderr)
+        else:
+            self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+            self.assertEqual(snapshot(duplicate), original, "the replacement directory was changed")
+            self.assertFalse((moved / "github-workflow").exists(), "the move did not use its original directory descriptor")
+            replacement_tree = self.base / "preserved-replacement"
+            duplicate.parent.rename(replacement_tree)
+            moved.rename(duplicate.parent)
+            recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertEqual((snapshot(target), snapshot(duplicate)), (before, original))
+
+    def test_trace_parent_retarget_after_validation_keeps_the_other_file_unchanged(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        self.v52_layout()
+        plan = self.plan()
+        approved, alternate = self.base / "trace-approved", self.base / "trace-alternate"
+        approved.mkdir()
+        alternate.mkdir()
+        sentinel = alternate / "trace.txt"
+        sentinel.write_bytes(b"unchanged sentinel\n")
+        (approved / "trace.txt").write_bytes(b"initial trace\n")
+        alias = self.base / "trace-alias"
+        link_directory(alias, approved)
+        self.addCleanup(lambda: unlink_directory(alias))
+
+        def retarget():
+            unlink_directory(alias)
+            link_directory(alias, alternate)
+
+        result = self.invoke_at_checkpoint(
+            ["apply", "--plan", plan, "--checksums", self.checksums, "--maintenance-confirmed"],
+            "apply:staged", retarget, before=True, env={"DEV_HARNESS_INSTALL_TEST_TRACE": str(alias / "trace.txt")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sentinel.read_bytes(), b"unchanged sentinel\n")
+        self.assertIn("apply:committed", (approved / "trace.txt").read_text(encoding="utf-8"))
+
+    def test_trace_leaf_replacement_between_checkpoints_keeps_the_other_file_unchanged(self):
+        self.v52_layout()
+        plan = self.plan()
+        trace, saved, sentinel = self.base / "trace.txt", self.base / "saved-trace.txt", self.base / "sentinel.txt"
+        trace.write_bytes(b"initial trace\n")
+        sentinel.write_bytes(b"unchanged sentinel\n")
+        replacement = []
+
+        def replace_leaf():
+            try:
+                trace.rename(saved)
+            except PermissionError:
+                self.assertEqual(os.name, "nt")
+                replacement.append("blocked")
+                return
+            os.link(sentinel, trace)
+            replacement.append("replaced")
+
+        result = self.invoke_at_checkpoint(
+            ["apply", "--plan", plan, "--checksums", self.checksums, "--maintenance-confirmed"],
+            "apply:staged", replace_leaf, env={"DEV_HARNESS_INSTALL_TEST_TRACE": str(trace)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sentinel.read_bytes(), b"unchanged sentinel\n")
+        self.assertEqual(replacement, ["blocked" if os.name == "nt" else "replaced"])
+        original = trace if os.name == "nt" else saved
+        self.assertIn("apply:committed", original.read_text(encoding="utf-8"))
+
+    def test_trace_leaf_replacement_before_first_checkpoint_is_refused_without_writing(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        trace, sentinel = self.base / "trace.txt", self.base / "sentinel.txt"
+        trace.write_bytes(b"initial trace\n")
+        sentinel.write_bytes(b"unchanged sentinel\n")
+
+        def replace_leaf():
+            trace.unlink()
+            os.link(sentinel, trace)
+
+        result = self.invoke_at_checkpoint(
+            ["apply", "--plan", plan, "--checksums", self.checksums, "--maintenance-confirmed"],
+            "apply:staged", replace_leaf, before=True, env={"DEV_HARNESS_INSTALL_TEST_TRACE": str(trace)})
+        self.assert_refused(result, 2)
+        self.assertEqual(sentinel.read_bytes(), b"unchanged sentinel\n")
+        self.assertEqual(snapshot(self.target), before)
+        self.assertFalse((self.state() / "CURRENT").exists())
+
+    def test_trace_hard_links_and_file_links_are_refused_during_validation(self):
+        self.v52_layout()
+        plan = self.plan()
+        trace, sentinel = self.base / "trace.txt", self.base / "sentinel.txt"
+        sentinel.write_bytes(b"unchanged sentinel\n")
+        os.link(sentinel, trace)
+        result = self.apply(plan, env={"DEV_HARNESS_INSTALL_TEST_TRACE": str(trace)})
+        self.assert_refused(result, 2)
+        self.assertEqual(sentinel.read_bytes(), b"unchanged sentinel\n")
+        trace.unlink()
+        if symlinks_supported():
+            trace.symlink_to(sentinel)
+            result = self.apply(plan, env={"DEV_HARNESS_INSTALL_TEST_TRACE": str(trace)})
+            self.assert_refused(result, 2)
+            self.assertEqual(sentinel.read_bytes(), b"unchanged sentinel\n")
+
     def test_codex_legacy_duplicate_blocks_until_retired_under_receipt(self):
         target = self.home / ".agents" / "skills" / "github-workflow"
         legacy = self.home / ".codex" / "skills" / "github-workflow"

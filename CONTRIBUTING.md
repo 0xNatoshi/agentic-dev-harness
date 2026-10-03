@@ -53,6 +53,8 @@ Record these facts in the issue or PR so another computer can resume without cha
 
 Progress notes include the next action. Record an explicit project-wide hold in root AGENTS.md outside its managed block as well as the issue/PR; a comment alone may be missed by other sessions.
 
+Installer physical-path tests also run under native Windows Python in CI, using directory junctions without symlink privileges. Duplicate plans and receipts bind actual parent directory identities: crash-loop fixtures must create a fresh plan or receipt after rebuilding a temporary home, rather than reuse metadata from a copied tree. Test traces bind a validated temporary parent and one append handle; existing trace files must have one hard link and cannot be symlinks. POSIX FIFOs remain supported and open lazily at the first checkpoint so staging-pause fixtures keep their ordering.
+
 ## Versions, packages and recovery
 
 1. Change canonical source files and tests; preserve authentic historical templates and notices. New exported files require an explicit entry in package-files.json; private configuration never belongs in that list.

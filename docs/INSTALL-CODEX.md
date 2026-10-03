@@ -152,6 +152,8 @@ The installer verifies a full backup and staged inventory, records durable recov
 
 ## Receipt, recovery and skill rollback
 
+Secondary Codex skill roots may use existing symlinks or junctions. Duplicate retirement now records their physical parent directory and filesystem identity in the plan, journal and receipt. Keep those original directories: replacing one with an identical-content directory still changes its identity. If an alias changes during maintenance, the installer either uses the already bound original parent or refuses and retains recovery data. Before retrying recovery, restore the original alias and directory; do not edit identity fields or copy a different directory over the recorded parent to bypass the check. Older journals without enough information to identify the original duplicate location are refused safely.
+
 The private receipt records versions, package and instruction-file hashes, before/after inventories, modes, preserved/dropped/retired paths, duplicates, transaction state and maintenance evidence. It contains no file contents. The instruction hashes do not mean AGENTS.md, CLAUDE.md, config.toml or role files were merged or backed up by this skill installer; those edits use the separate private backups and diffs above.
 
 The receipt also records the verified installer copy retained under the transaction and an argument-array `rollback_command`, so rollback does not depend on the original extracted directory remaining available. The command intentionally omits `--maintenance-confirmed`; add it only after reestablishing the maintenance boundary. Do not interpret the array as a shell string. For a current receipt, an equivalent PowerShell invocation checks the retained script's hash before running it:
