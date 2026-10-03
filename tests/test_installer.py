@@ -396,6 +396,39 @@ sys.exit(installer.main(sys.argv[3:]))
                 self.assertIn(phrase, str(refusal.exception))
                 self.assertLess(peak, 16 * 1024 * 1024)
 
+    def test_manifest_only_deep_paths_refuse_before_collision_expansion(self):
+        spec = importlib.util.spec_from_file_location("harness_manifest_limits", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        package_name_bytes = sum(len(path.relative_to(self.package).as_posix().encode("utf-8"))
+                                 for path in self.package.rglob("*"))
+        cases = (
+            ("valid", "a/" * 4000 + "missing.txt", "MANIFEST.json entry count exceeds", None),
+            ("invalid", "a/" * 4000 + "bad?.txt", "Package paths must be portable relative POSIX paths", None),
+            ("name-bytes", "missing-" + "n" * 80 + ".txt", "MANIFEST.json filename bytes exceed", package_name_bytes),
+        )
+        for label, name, phrase, name_budget in cases:
+            with self.subTest(label):
+                directory = self.base / f"manifest-{label}" / self.package.name
+                shutil.copytree(self.package, directory)
+                manifest = json.loads((directory / "MANIFEST.json").read_text(encoding="utf-8"))
+                manifest["files"][name] = {"sha256": "0" * 64, "bytes": 0}
+                (directory / "MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
+                archive = self.base / f"manifest-{label}.zip"
+                with zipfile.ZipFile(archive, "w") as bundle:
+                    for path in sorted(directory.rglob("*")):
+                        if path.is_file():
+                            bundle.writestr(self.package.name + "/" + path.relative_to(directory).as_posix(),
+                                            path.read_bytes())
+                for package in (directory, archive):
+                    with self.subTest(package="archive" if package == archive else "directory"):
+                        with mock.patch.object(installer, "PACKAGE_NAME_BYTES_LIMIT",
+                                               name_budget or installer.PACKAGE_NAME_BYTES_LIMIT):
+                            with mock.patch.object(installer, "colliding", side_effect=AssertionError("collision expanded")):
+                                with self.assertRaises(installer.Refused) as refusal:
+                                    installer.verify_package(installer.load_package(package), self.checksums)
+                        self.assertIn(phrase, str(refusal.exception) + str(refusal.exception.details))
+
     def test_manifest_size_and_file_count_are_bounded(self):
         manifest = (self.package / "MANIFEST.json").read_bytes()
         count = len(json.loads(manifest)["files"])

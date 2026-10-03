@@ -371,6 +371,11 @@ class Package:
             raise Refused("MANIFEST.json is not a format 2 dev-harness manifest")
         if len(self.manifest["files"]) > MANIFEST_ENTRY_LIMIT:
             raise Refused(f"MANIFEST.json file count exceeds {MANIFEST_ENTRY_LIMIT}")
+        # Manifest-only paths also need a budget before collision checks expand their parents.
+        try:
+            check_package_paths(("MANIFEST.json", *self.manifest["files"]), "MANIFEST.json")
+        except ValueError as error:
+            raise Refused("Package verification failed", [str(error)]) from None
         name = self.manifest.get("package")
         if not isinstance(name, str) or not re.fullmatch(r"dev-harness-v\d+\.\d+\.\d+", name) or name != "dev-harness-v" + str(self.manifest.get("version")):
             raise Refused("MANIFEST.json names no valid package version")
@@ -410,6 +415,31 @@ def check_package_entries(count: int, name_bytes: int, context: str) -> None:
         raise Refused(f"{context} entry count exceeds {PACKAGE_ENTRY_LIMIT}")
     if name_bytes > PACKAGE_NAME_BYTES_LIMIT:
         raise Refused(f"{context} filename bytes exceed {PACKAGE_NAME_BYTES_LIMIT}")
+
+
+def check_package_paths(names, context: str) -> None:
+    """Apply entry and pathname budgets to files and their implied folders."""
+    directories = set()
+    count = name_bytes = 0
+    for name in names:
+        path = package_path(name)
+        if len(path.parts) > PACKAGE_ENTRY_LIMIT:
+            raise Refused(f"{context} entry count exceeds {PACKAGE_ENTRY_LIMIT}")
+        count += 1
+        try:
+            name_bytes += len(name.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise ValueError("Package paths must be UTF-8") from None
+        check_package_entries(count, name_bytes, context)
+        for parent in path.parents:
+            if parent == PurePosixPath("."):
+                continue
+            directory = parent.as_posix()
+            if directory not in directories:
+                directories.add(directory)
+                count += 1
+                name_bytes += len(directory.encode("utf-8"))
+                check_package_entries(count, name_bytes, context)
 
 
 def load_directory_files(source: Path) -> dict:
@@ -526,33 +556,16 @@ def load_archive(source: Path) -> Package:
                 raise Refused("The archive must hold exactly one top-level package directory")
             prefix = prefixes.pop()
             files = {}
-            directories = set()
-            entry_count = name_bytes = 0
             for member in members:
                 if member.is_dir() or "/" not in member.filename:
                     raise Refused(f"Unexpected archive entry: {member.filename}")
                 kind = (member.external_attr >> 16) & 0o170000
                 if kind not in (0, stat.S_IFREG):
                     raise Refused(f"Archive entry is not a regular file: {member.filename}")
-                name = member.filename.split("/", 1)[1]
-                try:
-                    path = package_path(name)
-                except ValueError as error:
-                    raise Refused(str(error))
-                if len(path.parts) > PACKAGE_ENTRY_LIMIT:
-                    raise Refused(f"archive entry count exceeds {PACKAGE_ENTRY_LIMIT}")
-                entry_count += 1
-                name_bytes += len(name.encode("utf-8"))
-                check_package_entries(entry_count, name_bytes, "archive")
-                for parent in path.parents:
-                    if parent == PurePosixPath("."):
-                        continue
-                    directory = parent.as_posix()
-                    if directory not in directories:
-                        directories.add(directory)
-                        entry_count += 1
-                        name_bytes += len(directory.encode("utf-8"))
-                        check_package_entries(entry_count, name_bytes, "archive")
+            try:
+                check_package_paths((member.filename.split("/", 1)[1] for member in members), "archive")
+            except ValueError as error:
+                raise Refused(str(error)) from None
             for member in members:
                 name = member.filename.split("/", 1)[1]
                 if name == "MANIFEST.json" and member.file_size > MANIFEST_LIMIT:
