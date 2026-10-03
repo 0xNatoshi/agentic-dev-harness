@@ -2223,8 +2223,55 @@ class MergePreflightTests(unittest.TestCase):
         )
 
 
+def text_only(case: Case) -> bool:
+    """A Case decided by the scan of its instruction text alone."""
+    return (case.text is not None and case.mode == "suspension" and case.setup is None
+            and not case.environment and not case.api_calls)
+
+
+def end_to_end_text(families: tuple[tuple[Case, ...], ...]) -> frozenset[str]:
+    """Text Cases that also run through merge-preflight.sh: the first two of each verdict in each family,
+    and every text whose reading differs from its bytes (BOM, CR)."""
+    chosen = set()
+    for family in families:
+        per_verdict = collections.Counter()
+        for case in filter(text_only, family):
+            per_verdict[case.expected] += 1
+            if per_verdict[case.expected] <= 2 or "\ufeff" in case.text or "\r" in case.text:
+                chosen.add(case.name)
+    return frozenset(chosen)
+
+
+# Every text Case runs in process (ScanVerdictTests); a full fixture and a merge-preflight.sh run per Case
+# cost about a dozen processes each and left CI near its job limit (#80). The shell path runs for every
+# other Case and for a sample of text Cases covering each verdict and each reading of the file bytes.
+END_TO_END_TEXT = end_to_end_text((TEXT_CASES, LIST_COLUMN_CASES, LEAD_SCOPE_CASES, DASH_CASES))
+
+
+class ScanVerdictTests(unittest.TestCase):
+    """Text Cases read and scanned as the suspension mode reads and scans a file.
+
+    merge-preflight.sh also scans the fixture's published AGENTS.md, which is clear, so its exit code
+    is the verdict of the local file.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        spec = importlib.util.spec_from_file_location("workflow_context", PREFLIGHT.with_name("workflow-context.py"))
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+        directory = TemporaryDirectory(prefix="merge-preflight-scan-")
+        cls.addClassCleanup(directory.cleanup)
+        cls.instructions = Path(directory.name) / "AGENTS.md"
+
+    def check_case(self, case: Case) -> None:
+        write_fixture(self.instructions, case.text)
+        verdict = self.module.scan_text(self.module.read_instructions(self.instructions))
+        self.assertEqual(verdict, case.expected, case.name)
+
+
 def make_test(case: Case):
-    def test(self: MergePreflightTests) -> None:
+    def test(self: MergePreflightTests | ScanVerdictTests) -> None:
         self.check_case(case)
 
     return test
@@ -2232,7 +2279,10 @@ def make_test(case: Case):
 
 for number, fixture in enumerate(ALL_CASES, 1):
     slug = re.sub(r"[^a-z0-9]+", "_", fixture.name.lower()).strip("_")
-    setattr(MergePreflightTests, f"test_{number:02d}_{slug}", make_test(fixture))
+    if text_only(fixture):
+        setattr(ScanVerdictTests, f"test_{number:02d}_{slug}", make_test(fixture))
+    if not text_only(fixture) or fixture.name in END_TO_END_TEXT:
+        setattr(MergePreflightTests, f"test_{number:02d}_{slug}", make_test(fixture))
 
 
 class ScanTimeTests(unittest.TestCase):

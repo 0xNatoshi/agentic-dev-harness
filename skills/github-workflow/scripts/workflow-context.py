@@ -1685,6 +1685,11 @@ def published_instructions(branch):
     return command('git', 'show', ref + ':AGENTS.md')
 
 
+def read_instructions(name):
+    """An instruction file as the suspension scan reads it: UTF-8 with an optional BOM, universal newlines."""
+    return Path(name).read_text(encoding='utf-8-sig')
+
+
 def main():
     mode, *args = sys.argv[1:]
     if mode == 'origin':
@@ -1697,7 +1702,7 @@ def main():
     _, _, branch = origin_context()
     inputs = []
     for name in args:
-        inputs.append((name, Path(name).read_text(encoding='utf-8-sig')))
+        inputs.append((name, read_instructions(name)))
     published = published_instructions(branch)
     if published is not None:
         inputs.append(('origin/' + branch + ':AGENTS.md', published))
