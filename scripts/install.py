@@ -1189,6 +1189,7 @@ class TraceBinding:
     """
     def __init__(self, path: Path) -> None:
         self.stream = None
+        self.validation_descriptor = None
         self.parent = PhysicalDirectory(path.parent, writable=False)
         self.name = path.name
         try:
@@ -1200,11 +1201,10 @@ class TraceBinding:
             if self.parent.fd is None:
                 self.parent._protect_windows()
                 if self.parent.exists(self.name):
-                    descriptor, self.before_identity = self._windows_file(0x80, 1, 7, os.O_RDONLY)
-                    try:
-                        self.before = os.fstat(descriptor)
-                    finally:
-                        os.close(descriptor)
+                    self.validation_descriptor, self.before_identity = self._windows_file(0x80, 1, 7, os.O_RDONLY)
+                    self.before = os.fstat(self.validation_descriptor)
+                    # Keep the validation handle until append opens: a deleted file's
+                    # ID cannot be recycled while its original handle remains live.
             else:
                 self.before = os.stat(self.name, dir_fd=self.parent.fd, follow_symlinks=False) if self.parent.exists(self.name) else None
                 if self.before is not None:
@@ -1249,6 +1249,9 @@ class TraceBinding:
             if not self._allowed(status) or (self.before is not None and identity != self.before_identity):
                 raise Blocked("The trace file changed after temporary-path validation")
             self.stream = os.fdopen(descriptor, "a", encoding="utf-8")
+            if self.validation_descriptor is not None:
+                os.close(self.validation_descriptor)
+                self.validation_descriptor = None
         except BaseException:
             os.close(descriptor)
             raise
@@ -1265,6 +1268,9 @@ class TraceBinding:
         if self.stream is not None:
             self.stream.close()
             self.stream = None
+        if self.validation_descriptor is not None:
+            os.close(self.validation_descriptor)
+            self.validation_descriptor = None
         self.parent.close()
 
 
