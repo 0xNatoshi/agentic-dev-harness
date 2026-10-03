@@ -2194,8 +2194,8 @@ class InstallerTests(unittest.TestCase):
                 kernel.DeviceIoControl.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
                                                   wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID)
                 kernel.DeviceIoControl.restype = wintypes.BOOL
-                def convert(candidate):
-                    handle = kernel.CreateFileW(str(candidate), 0x40000000, 7, None, 3, 0x02000000 | 0x00200000, None)
+                def convert(candidate, access=0x40000000):
+                    handle = kernel.CreateFileW(str(candidate), access, 7, None, 3, 0x02000000 | 0x00200000, None)
                     if handle == wintypes.HANDLE(-1).value:
                         return False, ctypes.get_last_error()
                     try:
@@ -2221,13 +2221,59 @@ class InstallerTests(unittest.TestCase):
                 finally:
                     if allowed:
                         unlink_directory(control)
-                changed, failure = convert(parent)
+                for access in (0x40000000, 0x100):
+                    changed, failure = convert(parent, access)
+                    self.assertFalse(changed, "a bound directory was converted to a junction")
+                    self.assertIn(failure, (5, 32, 145))
+                guards = list(parent.iterdir())
+                self.assertEqual(len(guards), 1)
+                with self.assertRaises(OSError):
+                    guards[0].unlink()
+                with self.assertRaises(OSError):
+                    guards[0].rename(parent / "moved-guard")
         finally:
             if changed:
                 unlink_directory(parent)
         self.assertFalse(changed, "a bound directory was converted to a junction")
-        self.assertIn(failure, (5, 32), "the denial must be an access/sharing barrier, not an invalid fixture")
+        self.assertIn(failure, (5, 32, 145), "the denial must be access, sharing or nonempty-directory protection")
+        self.assertEqual(list(parent.iterdir()), [], "the temporary directory guard must close cleanly")
         self.assertEqual(list(other.iterdir()), [])
+
+        # Conversion between capture and guard creation must fail closed before any
+        # child is created in the other directory. The mutation uses only this fixture.
+        protect = module.PhysicalDirectory._protect_windows
+        converted = False
+        def convert_before_guard(directory):
+            nonlocal converted
+            converted, error = convert(parent, 0x100)
+            self.assertTrue(converted, f"the empty capture fixture must accept conversion: {error}")
+            return protect(directory)
+        try:
+            with mock.patch.object(module.PhysicalDirectory, "_protect_windows", convert_before_guard):
+                with self.assertRaises((OSError, module.Blocked)):
+                    module.PhysicalDirectory(parent)
+        finally:
+            if converted:
+                unlink_directory(parent)
+        self.assertEqual(list(other.iterdir()), [], "capture failure must not create a guard through the new junction")
+
+    @unittest.skipUnless(os.name == "nt", "native Windows automatic handle cleanup")
+    def test_windows_directory_guard_closes_after_abrupt_exit(self):
+        parent = self.base / "guard-crash-parent"
+        parent.mkdir()
+        program = """
+import importlib.util, os, pathlib, sys
+spec = importlib.util.spec_from_file_location("installer", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+bound = module.PhysicalDirectory(pathlib.Path(sys.argv[2]))
+assert len(list(pathlib.Path(sys.argv[2]).iterdir())) == 1
+os._exit(70)
+"""
+        result = subprocess.run([sys.executable, "-c", program, str(self.installer), str(parent)],
+                                capture_output=True, text=True, env=self.environment(), timeout=30)
+        self.assertEqual(result.returncode, 70, result.stderr)
+        self.assertEqual(list(parent.iterdir()), [], "a crashed command must not leave its guard behind")
 
     def test_codex_legacy_duplicate_blocks_until_retired_under_receipt(self):
         target = self.home / ".agents" / "skills" / "github-workflow"

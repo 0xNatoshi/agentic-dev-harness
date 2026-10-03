@@ -805,7 +805,7 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
         (Path(path), "so this duplicate cannot be moved to another directory"))])
     duplicate_inventories, duplicate_physical = {}, {}
     for path in duplicates:
-        with PhysicalDirectory(Path(path).parent) as parent:
+        with PhysicalDirectory(Path(path).parent, writable=False) as parent:
             duplicate_inventories[path] = parent.inventory(Path(path).name)
             duplicate_physical[path] = parent.describe()
     plan = {
@@ -956,11 +956,12 @@ class Lock:
 class PhysicalDirectory:
     """An opened physical parent for duplicate moves, never a reusable alias pathname.
 
-    POSIX renames use dir_fd. On Windows, every canonical ancestor is opened without
-    delete sharing, so neither it nor this parent can be renamed while the handles live.
+    POSIX renames use dir_fd. Windows captures no-reparse relative handles and holds
+    no-delete-shared directories plus an auto-deleted guard child during mutations.
+    This blocks replacement and in-place junction conversion while the handles live.
     Persisted identities prevent a later recovery from accepting a replacement directory.
     """
-    def __init__(self, path: Path, expected=_UNBOUND_DIRECTORY) -> None:
+    def __init__(self, path: Path, expected=_UNBOUND_DIRECTORY, writable: bool = True) -> None:
         self.fd = None
         self.handles = []
         resolved = os.path.realpath(str(path))
@@ -978,7 +979,7 @@ class PhysicalDirectory:
         try:
             if os.name == "nt":
                 self._open_windows()
-                status = os.stat(str(self.path))
+                identity = self._windows_identity()
             else:
                 flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
                 self.fd = os.open(self.path.anchor, flags)
@@ -987,11 +988,14 @@ class PhysicalDirectory:
                     os.close(self.fd)
                     self.fd = next_fd
                 status = os.fstat(self.fd)
-            self.identity = [status.st_dev, status.st_ino]
-            if not status.st_ino:
+                identity = [status.st_dev, status.st_ino]
+            self.identity = identity
+            if not identity[1]:
                 raise Blocked(f"The filesystem does not expose a stable identity for {self.path}")
             if expected is not _UNBOUND_DIRECTORY and self.identity != expected["identity"]:
                 raise Blocked(f"The duplicate parent {path} was replaced; restore its recorded folder and retry")
+            if os.name == "nt" and writable:
+                self._protect_windows()
         except BaseException:
             self.close()
             raise
@@ -1008,24 +1012,102 @@ class PhysicalDirectory:
         kernel.CloseHandle.restype = wintypes.BOOL
         kernel.GetFileInformationByHandleEx.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
         kernel.GetFileInformationByHandleEx.restype = wintypes.BOOL
+        kernel.GetFileInformationByHandle.argtypes = (wintypes.HANDLE, wintypes.LPVOID)
+        kernel.GetFileInformationByHandle.restype = wintypes.BOOL
         self.kernel = kernel
+
+        # RootDirectory-relative opens with OBJ_DONT_REPARSE avoid resolving any replaced
+        # pathname during capture and guard creation. Ordinary Win32 opens have no equivalent.
+        class UnicodeString(ctypes.Structure):
+            _fields_ = [("length", wintypes.USHORT), ("maximum", wintypes.USHORT), ("buffer", wintypes.LPWSTR)]
+
+        class ObjectAttributes(ctypes.Structure):
+            _fields_ = [("length", wintypes.ULONG), ("root", wintypes.HANDLE),
+                        ("name", ctypes.POINTER(UnicodeString)), ("attributes", wintypes.ULONG),
+                        ("security", wintypes.LPVOID), ("quality", wintypes.LPVOID)]
+
+        class StatusBlock(ctypes.Structure):
+            _fields_ = [("status", wintypes.LPVOID), ("information", ctypes.c_size_t)]
+
+        native = ctypes.WinDLL("ntdll")
+        native.NtCreateFile.argtypes = (ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG,
+                                       ctypes.POINTER(ObjectAttributes), ctypes.POINTER(StatusBlock),
+                                       wintypes.LPVOID, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG,
+                                       wintypes.ULONG, wintypes.LPVOID, wintypes.ULONG)
+        native.NtCreateFile.restype = wintypes.LONG
+        native.RtlNtStatusToDosError.argtypes = (wintypes.LONG,)
+        native.RtlNtStatusToDosError.restype = wintypes.ULONG
+
+        def open_relative(parent, name, access, disposition=1, options=1, sharing=3):
+            if not name or name in (".", "..") or any(part in name for part in ("/", "\\", ":")):
+                raise Blocked("A physical directory operation requires one ordinary filename")
+            buffer = ctypes.create_unicode_buffer(name)
+            size = len(name.encode("utf-16-le"))
+            counted = UnicodeString(size, size + 2, ctypes.cast(buffer, wintypes.LPWSTR))
+            attributes = ObjectAttributes(ctypes.sizeof(ObjectAttributes), parent, ctypes.pointer(counted),
+                                          0x40 | 0x1000, None, None)  # CASE_INSENSITIVE | DONT_REPARSE
+            status, handle = StatusBlock(), wintypes.HANDLE()
+            result = native.NtCreateFile(ctypes.byref(handle), access | 0x100000, ctypes.byref(attributes),
+                                         ctypes.byref(status), None, 0, sharing, disposition,
+                                         options | 0x20 | 0x200000, None, 0)
+            if result < 0:
+                raise ctypes.WinError(native.RtlNtStatusToDosError(result))
+            return handle.value
+
+        self.open_relative = open_relative
+        # Read/list access makes the no-delete sharing barrier effective. Allowing writes
+        # is necessary for ordinary child renames and transaction-journal replacement.
+        root = kernel.CreateFileW(self.path.anchor, 0x81, 3, None, 3, 0x02000000 | 0x00200000, None)
+        if root == wintypes.HANDLE(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.handles.append(root)
+        self._windows_directory(root)
+        for component in self.path.parts[1:]:
+            handle = open_relative(self.handles[-1], component, 0x81)
+            self.handles.append(handle)
+            self._windows_directory(handle)
+        self.directory_handle = self.handles[-1]
+
+    def _protect_windows(self) -> None:
+        # Windows permits converting an open *empty* directory into a junction. A
+        # no-delete-shared child makes the final parent nonempty until handles close;
+        # each ancestor likewise retains its opened direct child. NTFS rejects reparse
+        # conversion of nonempty directories. DELETE_ON_CLOSE also covers abrupt exit.
+        guard = self.open_relative(self.directory_handle, ".harness-guard-" + uuid.uuid4().hex,
+                                   0x10082, disposition=2, options=0x40 | 0x1000, sharing=1)
+        self.handles.append(guard)
+        self._windows_directory(self.directory_handle)
+
+    def _windows_directory(self, handle) -> None:
+        import ctypes
+        from ctypes import wintypes
 
         class Attributes(ctypes.Structure):
             _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
 
-        for directory in reversed([self.path, *self.path.parents]):
-            # Request directory-read access: metadata-only (access 0) handles do not enforce this sharing barrier.
-            # Deny delete sharing while allowing normal child writes and journal replacement.
-            # BACKUP_SEMANTICS opens directories; OPEN_REPARSE_POINT does not follow a newly introduced link.
-            handle = kernel.CreateFileW(str(directory), 0x81, 3, None, 3, 0x02000000 | 0x00200000, None)
-            if handle == wintypes.HANDLE(-1).value:
-                raise ctypes.WinError(ctypes.get_last_error())
-            self.handles.append(handle)
-            attributes = Attributes()
-            if not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)):
-                raise ctypes.WinError(ctypes.get_last_error())
-            if attributes.attributes & REPARSE_POINT and attributes.tag in LINK_REPARSE_TAGS:
-                raise Blocked(f"A canonical duplicate parent became a reparse point: {directory}")
+        attributes = Attributes()
+        if not self.kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        # Every name-surrogate tag redirects a namespace lookup, including tags other
+        # than the ordinary symlink/junction tags that discovery already recognizes.
+        if not attributes.attributes & 0x10 or attributes.tag & 0x20000000:
+            raise Blocked("A canonical duplicate parent is not an ordinary physical directory")
+
+    def _windows_identity(self) -> list:
+        import ctypes
+        from ctypes import wintypes
+
+        class Information(ctypes.Structure):
+            _fields_ = [("attributes", wintypes.DWORD), ("created", wintypes.FILETIME),
+                        ("accessed", wintypes.FILETIME), ("written", wintypes.FILETIME),
+                        ("volume", wintypes.DWORD), ("size_high", wintypes.DWORD),
+                        ("size_low", wintypes.DWORD), ("links", wintypes.DWORD),
+                        ("index_high", wintypes.DWORD), ("index_low", wintypes.DWORD)]
+
+        information = Information()
+        if not self.kernel.GetFileInformationByHandle(self.directory_handle, ctypes.byref(information)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return [information.volume, (information.index_high << 32) | information.index_low]
 
     def describe(self) -> dict:
         return {"path": str(self.path), "identity": self.identity}
@@ -1055,7 +1137,17 @@ class PhysicalDirectory:
 
     def inventory(self, name: str) -> dict | None:
         if self.fd is None:
-            return inventory(self.path / name)
+            try:
+                child = self.open_relative(self.directory_handle, name, 0x81)
+            except FileNotFoundError:
+                return None
+            try:
+                self._windows_directory(child)
+                # Pin the direct child while inspecting the duplicate. This stabilizes
+                # its parent namespace; inventories still reject links within the tree.
+                return inventory(self.path / name)
+            finally:
+                self.kernel.CloseHandle(child)
         if not self.exists(name):
             return None
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -1121,12 +1213,8 @@ class TraceBinding:
         if os.name == "nt":
             import ctypes
             import msvcrt
-            from ctypes import wintypes
-
-            handle = self.parent.kernel.CreateFileW(str(self.parent.path / self.name), 0x84, 3, None,
-                                                    3 if self.before else 1, 0x00200000, None)
-            if handle == wintypes.HANDLE(-1).value:
-                raise ctypes.WinError(ctypes.get_last_error())
+            handle = self.parent.open_relative(self.parent.directory_handle, self.name, 0x84,
+                                               disposition=1 if self.before else 2, options=0x40)
             try:
                 descriptor = msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_APPEND)
             except BaseException:
@@ -1512,7 +1600,7 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         for index, duplicate in enumerate(plan["duplicates"]):
             path = Path(duplicate)
             duplicate_backup = transaction / "backup" / f"duplicate-{index}" / path.name
-            with PhysicalDirectory(path.parent, plan["duplicate_physical"][duplicate]) as parent:
+            with PhysicalDirectory(path.parent, plan["duplicate_physical"][duplicate], writable=False) as parent:
                 duplicate_inventory = parent.inventory(path.name)
                 if differences(plan["duplicate_inventories"][duplicate], duplicate_inventory):
                     raise Refused(f"The duplicate {path} changed after it was planned")
@@ -1726,7 +1814,7 @@ def command_rollback(options) -> dict:
                               "it was retired from: a link or junction on the way was added or retargeted after apply; "
                               "restore that folder, then run rollback again",
                               {"path": str(original), "resolves_to": resolved, "retired_from": retired_from})
-            with PhysicalDirectory(original.parent, duplicate.get("physical", _UNBOUND_DIRECTORY)) as parent:
+            with PhysicalDirectory(original.parent, duplicate.get("physical", _UNBOUND_DIRECTORY), writable=False) as parent:
                 physical_duplicates[str(original)] = parent.describe()
         locations.require_movable(recorded, "run rollback again", restoring)
         active = inventory(locations.target, "run rollback again")
@@ -1781,7 +1869,7 @@ def command_rollback(options) -> dict:
                     fsync_tree(source)
                     if differences(expected, inventory(source)):
                         raise Refused(f"Neither the retired copy nor the backup of {original} matches its inventory")
-                with PhysicalDirectory(original.parent, physical_duplicates[str(original)]) as parent:
+                with PhysicalDirectory(original.parent, physical_duplicates[str(original)], writable=False) as parent:
                     physical = parent.describe()
                 moves.append({"from": str(source), "to": str(original), "inventory": expected,
                               "physical": {"to": physical}})
