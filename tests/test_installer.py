@@ -2114,6 +2114,121 @@ class InstallerTests(unittest.TestCase):
             self.assert_refused(result, 2)
             self.assertEqual(sentinel.read_bytes(), b"unchanged sentinel\n")
 
+    def test_legacy_duplicate_receipt_without_physical_metadata_still_rolls_back(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        duplicate = self.home / ".codex" / "skills" / "github-workflow"
+        before, original = self.v52_layout(target), self.v52_layout(duplicate)
+        applied = self.apply(self.plan("codex"), "--retire-duplicate", duplicate)
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        receipt_path = Path(json.loads(applied.stdout)["receipt"])
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        del receipt["duplicates"][0]["physical"]
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        rolled_back = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
+        self.assertEqual((snapshot(target), snapshot(duplicate)), (before, original))
+
+    def test_legacy_duplicate_journal_needs_a_recorded_original_location(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        duplicate = self.home / ".codex" / "skills" / "github-workflow"
+        before, original = self.v52_layout(target), self.v52_layout(duplicate)
+        plan = self.plan("codex")
+        crashed = self.apply(plan, "--retire-duplicate", duplicate,
+                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:moved-0"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        journal = state / current.read_text(encoding="utf-8").strip()
+        record = json.loads(journal.read_text(encoding="utf-8"))
+        del record["moves"][0]["physical"]
+        location = record["moves"][0].pop("resolved")
+        journal.write_text(json.dumps(record), encoding="utf-8")
+        recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assert_refused(recovered, 3)
+        self.assertTrue(current.exists())
+        self.assertFalse(duplicate.exists())
+        record["moves"][0]["resolved"] = location
+        journal.write_text(json.dumps(record), encoding="utf-8")
+        recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual((snapshot(target), snapshot(duplicate)), (before, original))
+
+    def test_a_malformed_physical_binding_is_not_treated_as_legacy_metadata(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        duplicate = self.home / ".codex" / "skills" / "github-workflow"
+        self.v52_layout(target)
+        self.v52_layout(duplicate)
+        applied = self.apply(self.plan("codex"), "--retire-duplicate", duplicate)
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        receipt_path = Path(json.loads(applied.stdout)["receipt"])
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        installed = snapshot(target)
+        for malformed in (None, [], {"path": str(duplicate.parent), "identity": [True, 1]}):
+            with self.subTest(binding=malformed):
+                receipt["duplicates"][0]["physical"] = malformed
+                receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+                result = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(result, 1)
+                self.assertIn("Invalid physical", json.loads(result.stderr)["error"])
+                self.assertEqual(snapshot(target), installed)
+                self.assertFalse(duplicate.exists())
+                self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows directory sharing and reparse controls")
+    def test_windows_directory_binding_blocks_in_place_junction_conversion(self):
+        import ctypes
+        from ctypes import wintypes
+        import struct
+
+        spec = importlib.util.spec_from_file_location("physical_parent_installer", self.installer)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        parent, other = self.base / "bound-empty-parent", self.base / "other-empty-parent"
+        parent.mkdir()
+        other.mkdir()
+        changed = False
+        failure = None
+        try:
+            with module.PhysicalDirectory(parent) as bound:
+                kernel = bound.kernel
+                kernel.DeviceIoControl.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                                  wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID)
+                kernel.DeviceIoControl.restype = wintypes.BOOL
+                def convert(candidate):
+                    handle = kernel.CreateFileW(str(candidate), 0x40000000, 7, None, 3, 0x02000000 | 0x00200000, None)
+                    if handle == wintypes.HANDLE(-1).value:
+                        return False, ctypes.get_last_error()
+                    try:
+                        # A mount-point record for two empty, disposable directories. No existing profile is used.
+                        substitute = ("\\??\\" + str(other)).encode("utf-16-le")
+                        display = str(other).encode("utf-16-le")
+                        paths = substitute + b"\0\0" + display + b"\0\0"
+                        data = struct.pack("<LHHHHHH", 0xA0000003, 8 + len(paths), 0, 0, len(substitute),
+                                           len(substitute) + 2, len(display)) + paths
+                        buffer = ctypes.create_string_buffer(data)
+                        returned = wintypes.DWORD()
+                        success = bool(kernel.DeviceIoControl(handle, 0x000900A4, buffer, len(data), None, 0,
+                                                              ctypes.byref(returned), None))
+                        return success, None if success else ctypes.get_last_error()
+                    finally:
+                        kernel.CloseHandle(handle)
+
+                control = self.base / "unbound-control"
+                control.mkdir()
+                allowed, control_error = convert(control)
+                try:
+                    self.assertTrue(allowed, f"the unbound control could not become a junction: {control_error}")
+                finally:
+                    if allowed:
+                        unlink_directory(control)
+                changed, failure = convert(parent)
+        finally:
+            if changed:
+                unlink_directory(parent)
+        self.assertFalse(changed, "a bound directory was converted to a junction")
+        self.assertIn(failure, (5, 32), "the denial must be an access/sharing barrier, not an invalid fixture")
+        self.assertEqual(list(other.iterdir()), [])
+
     def test_codex_legacy_duplicate_blocks_until_retired_under_receipt(self):
         target = self.home / ".agents" / "skills" / "github-workflow"
         legacy = self.home / ".codex" / "skills" / "github-workflow"

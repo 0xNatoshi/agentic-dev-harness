@@ -58,6 +58,7 @@ TEST_CRASH = "DEV_HARNESS_INSTALL_TEST_CRASH"
 TEST_TRACE = "DEV_HARNESS_INSTALL_TEST_TRACE"
 TEST_PROCESSES = "DEV_HARNESS_INSTALL_TEST_PROCESSES"
 _TRACE = None
+_UNBOUND_DIRECTORY = object()
 REPARSE_POINT = 0x400
 # IO_REPARSE_TAG_SYMLINK and IO_REPARSE_TAG_MOUNT_POINT (junctions). Other reparse points, such as
 # cloud placeholders, hold their own content.
@@ -956,14 +957,14 @@ class PhysicalDirectory:
     """An opened physical parent for duplicate moves, never a reusable alias pathname.
 
     POSIX renames use dir_fd. On Windows, every canonical ancestor is opened without
-    write or delete sharing, so neither it nor this parent can be replaced while the handles live.
+    delete sharing, so neither it nor this parent can be renamed while the handles live.
     Persisted identities prevent a later recovery from accepting a replacement directory.
     """
-    def __init__(self, path: Path, expected: dict | None = None) -> None:
+    def __init__(self, path: Path, expected=_UNBOUND_DIRECTORY) -> None:
         self.fd = None
         self.handles = []
         resolved = os.path.realpath(str(path))
-        if expected is not None:
+        if expected is not _UNBOUND_DIRECTORY:
             identity = expected.get("identity") if isinstance(expected, dict) else None
             recorded = expected.get("path") if isinstance(expected, dict) else None
             if (not isinstance(recorded, str) or not os.path.isabs(recorded)
@@ -989,7 +990,7 @@ class PhysicalDirectory:
             self.identity = [status.st_dev, status.st_ino]
             if not status.st_ino:
                 raise Blocked(f"The filesystem does not expose a stable identity for {self.path}")
-            if expected is not None and self.identity != expected["identity"]:
+            if expected is not _UNBOUND_DIRECTORY and self.identity != expected["identity"]:
                 raise Blocked(f"The duplicate parent {path} was replaced; restore its recorded folder and retry")
         except BaseException:
             self.close()
@@ -1014,9 +1015,9 @@ class PhysicalDirectory:
 
         for directory in reversed([self.path, *self.path.parents]):
             # Request directory-read access: metadata-only (access 0) handles do not enforce this sharing barrier.
-            # Deny write/delete sharing: an ancestor cannot be renamed or changed into a reparse point.
+            # Deny delete sharing while allowing normal child writes and journal replacement.
             # BACKUP_SEMANTICS opens directories; OPEN_REPARSE_POINT does not follow a newly introduced link.
-            handle = kernel.CreateFileW(str(directory), 0x81, 1, None, 3, 0x02000000 | 0x00200000, None)
+            handle = kernel.CreateFileW(str(directory), 0x81, 3, None, 3, 0x02000000 | 0x00200000, None)
             if handle == wintypes.HANDLE(-1).value:
                 raise ctypes.WinError(ctypes.get_last_error())
             self.handles.append(handle)
@@ -1201,7 +1202,7 @@ class Operation:
                         if side not in physical and side != external:
                             # Internal staging parents are created before the first move and journal save.
                             path.parent.mkdir(parents=True, exist_ok=True)
-                        parent = opened.enter_context(PhysicalDirectory(path.parent, physical.get(side)))
+                        parent = opened.enter_context(PhysicalDirectory(path.parent, physical.get(side, _UNBOUND_DIRECTORY)))
                         physical[side] = parent.describe()
                         parents[index, side] = parent
                     move["physical"] = physical
@@ -1690,7 +1691,7 @@ def command_rollback(options) -> dict:
         # The retired copy itself is not checked: its inventory records its mode, so one that lost owner
         # write no longer matches and the verified backup is restored instead.
         # The parent the duplicate returns through must be searchable as well as writable.
-        restoring = []
+        restoring, physical_duplicates = [], {}
         for duplicate in receipt["duplicates"]:
             original = Path(duplicate["path"])
             parent = searchable_part(original, "run rollback again")
@@ -1725,6 +1726,8 @@ def command_rollback(options) -> dict:
                               "it was retired from: a link or junction on the way was added or retargeted after apply; "
                               "restore that folder, then run rollback again",
                               {"path": str(original), "resolves_to": resolved, "retired_from": retired_from})
+            with PhysicalDirectory(original.parent, duplicate.get("physical", _UNBOUND_DIRECTORY)) as parent:
+                physical_duplicates[str(original)] = parent.describe()
         locations.require_movable(recorded, "run rollback again", restoring)
         active = inventory(locations.target, "run rollback again")
         origin = receipt["after"]
@@ -1778,7 +1781,7 @@ def command_rollback(options) -> dict:
                     fsync_tree(source)
                     if differences(expected, inventory(source)):
                         raise Refused(f"Neither the retired copy nor the backup of {original} matches its inventory")
-                with PhysicalDirectory(original.parent, duplicate.get("physical")) as parent:
+                with PhysicalDirectory(original.parent, physical_duplicates[str(original)]) as parent:
                     physical = parent.describe()
                 moves.append({"from": str(source), "to": str(original), "inventory": expected,
                               "physical": {"to": physical}})
