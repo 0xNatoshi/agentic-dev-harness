@@ -230,10 +230,8 @@ function Get-FileHash {
                 self.assertTrue(hook.exists(), result.stdout + result.stderr)
                 self.assertEqual(self.archive.read_bytes(), replacement.read_bytes())
                 self.assertFalse(self.poison_marker.exists(), "Replacement install.py executed")
-                if result.returncode == 0:
-                    root = self.verified_root()
-                    self.assertEqual((root / self.archive_name).read_bytes(), self.archive_bytes)
-                    shutil.rmtree(root)
+                root = self.assert_bootstrap_succeeded(result)
+                shutil.rmtree(root)
 
     def test_python_startup_ignores_cwd_and_pythonpath(self):
         startup = self.download / "sitecustomize.py"
