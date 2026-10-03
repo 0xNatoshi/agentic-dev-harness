@@ -1953,7 +1953,6 @@ class InstallerTests(unittest.TestCase):
         plan = self.plan("codex")
         crashed = self.apply(plan, "--retire-duplicate", lexical, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:moved-0"})
         self.assertEqual(crashed.returncode, 70, crashed.stderr)
-        self.v52_layout(second / "github-workflow")
         alternate = snapshot(second)
         current = self.home / ".agents" / "dev-harness-install" / "CURRENT"
         pointer = current.read_bytes()

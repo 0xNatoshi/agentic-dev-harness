@@ -1013,9 +1013,10 @@ class PhysicalDirectory:
             _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
 
         for directory in reversed([self.path, *self.path.parents]):
+            # Request directory-read access: metadata-only (access 0) handles do not enforce this sharing barrier.
             # Deny write/delete sharing: an ancestor cannot be renamed or changed into a reparse point.
             # BACKUP_SEMANTICS opens directories; OPEN_REPARSE_POINT does not follow a newly introduced link.
-            handle = kernel.CreateFileW(str(directory), 0, 1, None, 3, 0x02000000 | 0x00200000, None)
+            handle = kernel.CreateFileW(str(directory), 0x81, 1, None, 3, 0x02000000 | 0x00200000, None)
             if handle == wintypes.HANDLE(-1).value:
                 raise ctypes.WinError(ctypes.get_last_error())
             self.handles.append(handle)
