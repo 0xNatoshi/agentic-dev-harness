@@ -1012,8 +1012,6 @@ class PhysicalDirectory:
         kernel.CloseHandle.restype = wintypes.BOOL
         kernel.GetFileInformationByHandleEx.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
         kernel.GetFileInformationByHandleEx.restype = wintypes.BOOL
-        kernel.GetFileInformationByHandle.argtypes = (wintypes.HANDLE, wintypes.LPVOID)
-        kernel.GetFileInformationByHandle.restype = wintypes.BOOL
         self.kernel = kernel
 
         # RootDirectory-relative opens with OBJ_DONT_REPARSE avoid resolving any replaced
@@ -1078,7 +1076,7 @@ class PhysicalDirectory:
         self.handles.append(guard)
         self._windows_directory(self.directory_handle)
 
-    def _windows_directory(self, handle) -> None:
+    def _windows_attributes(self, handle) -> tuple:
         import ctypes
         from ctypes import wintypes
 
@@ -1088,26 +1086,29 @@ class PhysicalDirectory:
         attributes = Attributes()
         if not self.kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)):
             raise ctypes.WinError(ctypes.get_last_error())
+        return attributes.attributes, attributes.tag
+
+    def _windows_directory(self, handle) -> None:
+        attributes, tag = self._windows_attributes(handle)
         # Every name-surrogate tag redirects a namespace lookup, including tags other
         # than the ordinary symlink/junction tags that discovery already recognizes.
-        if not attributes.attributes & 0x10 or attributes.tag & 0x20000000:
+        if not attributes & 0x10 or tag & 0x20000000:
             raise Blocked("A canonical duplicate parent is not an ordinary physical directory")
 
-    def _windows_identity(self) -> list:
+    def _windows_identity(self, handle=None) -> list:
         import ctypes
-        from ctypes import wintypes
 
-        class Information(ctypes.Structure):
-            _fields_ = [("attributes", wintypes.DWORD), ("created", wintypes.FILETIME),
-                        ("accessed", wintypes.FILETIME), ("written", wintypes.FILETIME),
-                        ("volume", wintypes.DWORD), ("size_high", wintypes.DWORD),
-                        ("size_low", wintypes.DWORD), ("links", wintypes.DWORD),
-                        ("index_high", wintypes.DWORD), ("index_low", wintypes.DWORD)]
+        class FileIdentity(ctypes.Structure):
+            _fields_ = [("volume", ctypes.c_ulonglong), ("identifier", ctypes.c_ubyte * 16)]
 
-        information = Information()
-        if not self.kernel.GetFileInformationByHandle(self.directory_handle, ctypes.byref(information)):
+        information = FileIdentity()
+        # FileIdInfo retains the full 128-bit identifier, including on ReFS where
+        # the older 64-bit BY_HANDLE_FILE_INFORMATION file index is not unique.
+        if not self.kernel.GetFileInformationByHandleEx(self.directory_handle if handle is None else handle,
+                                                       18, ctypes.byref(information),
+                                                       ctypes.sizeof(information)):
             raise ctypes.WinError(ctypes.get_last_error())
-        return [information.volume, (information.index_high << 32) | information.index_low]
+        return [information.volume, int.from_bytes(bytes(information.identifier), "little")]
 
     def describe(self) -> dict:
         return {"path": str(self.path), "identity": self.identity}
@@ -1188,17 +1189,26 @@ class TraceBinding:
     """
     def __init__(self, path: Path) -> None:
         self.stream = None
-        self.parent = PhysicalDirectory(path.parent)
+        self.parent = PhysicalDirectory(path.parent, writable=False)
         self.name = path.name
         try:
             temporary = os.path.normcase(os.path.realpath(tempfile.gettempdir()))
             physical = os.path.normcase(str(self.parent.path))
             if os.path.commonpath([temporary, physical]) != temporary:
                 raise Blocked("The trace parent is outside the validated temporary directory")
+            self.before, self.before_identity = None, None
             if self.parent.fd is None:
-                self.before = os.lstat(str(self.parent.path / self.name)) if self.parent.exists(self.name) else None
+                self.parent._protect_windows()
+                if self.parent.exists(self.name):
+                    descriptor, self.before_identity = self._windows_file(0x80, 1, 7, os.O_RDONLY)
+                    try:
+                        self.before = os.fstat(descriptor)
+                    finally:
+                        os.close(descriptor)
             else:
                 self.before = os.stat(self.name, dir_fd=self.parent.fd, follow_symlinks=False) if self.parent.exists(self.name) else None
+                if self.before is not None:
+                    self.before_identity = [self.before.st_dev, self.before.st_ino]
             if self.before is not None and not self._allowed(self.before):
                 raise Blocked("The trace must be a single-link regular file or a POSIX FIFO, never a link or shared file")
         except BaseException:
@@ -1209,17 +1219,24 @@ class TraceBinding:
     def _allowed(status) -> bool:
         return status.st_nlink == 1 and (stat.S_ISREG(status.st_mode) or (os.name != "nt" and stat.S_ISFIFO(status.st_mode)))
 
+    def _windows_file(self, access, disposition, sharing, flags):
+        import msvcrt
+
+        handle = self.parent.open_relative(self.parent.directory_handle, self.name, access,
+                                           disposition=disposition, options=0x40, sharing=sharing)
+        try:
+            _, tag = self.parent._windows_attributes(handle)
+            if tag & 0x20000000:
+                raise Blocked("The trace file is a name-surrogate reparse point")
+            identity = self.parent._windows_identity(handle)
+            return msvcrt.open_osfhandle(handle, flags), identity
+        except BaseException:
+            self.parent.kernel.CloseHandle(handle)
+            raise
+
     def _open(self) -> None:
         if os.name == "nt":
-            import ctypes
-            import msvcrt
-            handle = self.parent.open_relative(self.parent.directory_handle, self.name, 0x84,
-                                               disposition=1 if self.before else 2, options=0x40)
-            try:
-                descriptor = msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_APPEND)
-            except BaseException:
-                self.parent.kernel.CloseHandle(handle)
-                raise
+            descriptor, identity = self._windows_file(0x84, 1 if self.before else 2, 3, os.O_WRONLY | os.O_APPEND)
         else:
             flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW
             if self.before is None:
@@ -1227,8 +1244,9 @@ class TraceBinding:
             descriptor = os.open(self.name, flags, 0o600, dir_fd=self.parent.fd)
         try:
             status = os.fstat(descriptor)
-            if not self._allowed(status) or (self.before is not None and
-                    (status.st_dev, status.st_ino) != (self.before.st_dev, self.before.st_ino)):
+            if os.name != "nt":
+                identity = [status.st_dev, status.st_ino]
+            if not self._allowed(status) or (self.before is not None and identity != self.before_identity):
                 raise Blocked("The trace file changed after temporary-path validation")
             self.stream = os.fdopen(descriptor, "a", encoding="utf-8")
         except BaseException:
@@ -1272,19 +1290,12 @@ class Operation:
                     if not isinstance(physical, dict) or set(physical) - {"from", "to"}:
                         raise Refused("Invalid physical duplicate-move bindings")
                     external = "to" if self.record.get("moves_last") else "from"
-                    # A legacy apply journal has the retired location. Legacy rollback journals
-                    # use their receipt; never infer an unknown historical alias from its current target.
+                    # A pathname from an older journal cannot prove which physical
+                    # directory occupied it before the crash. Never bind history to
+                    # the current directory merely because its spelling is unchanged.
                     if external not in physical:
-                        previous = move.get("resolved")
-                        if external == "to":
-                            receipt = read_json(Path(self.record["receipt"]))
-                            duplicate = next((item for item in receipt.get("duplicates", [])
-                                              if item.get("path") == move["to"]), {})
-                            previous = duplicate.get("resolved")
-                        current = os.path.realpath(move[external])
-                        if not isinstance(previous, str) or os.path.normcase(current) != os.path.normcase(previous):
-                            raise Blocked("This journal cannot bind the retired duplicate to its original folder; "
-                                          "restore the recorded alias or use the installer kept with the transaction")
+                        raise Blocked("The journal lacks the original duplicate-parent identity; automatic recovery "
+                                      "is refused. Keep its backups and use manual restoration after verifying the original folder")
                     for side in ("from", "to"):
                         path = Path(move[side])
                         if side not in physical and side != external:
@@ -1814,7 +1825,10 @@ def command_rollback(options) -> dict:
                               "it was retired from: a link or junction on the way was added or retargeted after apply; "
                               "restore that folder, then run rollback again",
                               {"path": str(original), "resolves_to": resolved, "retired_from": retired_from})
-            with PhysicalDirectory(original.parent, duplicate.get("physical", _UNBOUND_DIRECTORY), writable=False) as parent:
+            if "physical" not in duplicate:
+                raise Blocked("The receipt lacks the original duplicate-parent identity; automatic duplicate restoration "
+                              "is refused. Keep its backups and use manual restoration after verifying the original folder")
+            with PhysicalDirectory(original.parent, duplicate["physical"], writable=False) as parent:
                 physical_duplicates[str(original)] = parent.describe()
         locations.require_movable(recorded, "run rollback again", restoring)
         active = inventory(locations.target, "run rollback again")

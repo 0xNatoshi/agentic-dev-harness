@@ -1162,7 +1162,8 @@ class InstallerTests(unittest.TestCase):
     def test_the_fix_for_an_inaccessible_directory_follows_its_owner_and_mode(self):
         spec = importlib.util.spec_from_file_location("harness_installer_hints", self.installer)
         installer = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(installer)
+        with mock.patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(installer)
         folder = self.base / "denied"
         folder.mkdir(mode=0o700)
         folder.chmod(0o700)
@@ -1404,7 +1405,8 @@ class InstallerTests(unittest.TestCase):
     def test_a_failed_undo_the_journal_cannot_record_still_reports_its_cause_and_recover(self):
         spec = importlib.util.spec_from_file_location("harness_installer_undo", self.installer)
         installer = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(installer)
+        with mock.patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(installer)
         journal = self.base / "transaction" / "journal.json"
         operation = mock.Mock(path=journal, record={})
         operation.undo.side_effect = OSError("disk full while undoing")
@@ -1859,7 +1861,8 @@ class InstallerTests(unittest.TestCase):
         """Run the extracted installer with one deterministic filesystem change at an existing checkpoint."""
         spec = importlib.util.spec_from_file_location("physical_parent_installer", self.installer)
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        with mock.patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(module)
         observed = []
         original = module.checkpoint
 
@@ -2114,40 +2117,57 @@ class InstallerTests(unittest.TestCase):
             self.assert_refused(result, 2)
             self.assertEqual(sentinel.read_bytes(), b"unchanged sentinel\n")
 
-    def test_legacy_duplicate_receipt_without_physical_metadata_still_rolls_back(self):
-        target = self.home / ".agents" / "skills" / "github-workflow"
-        duplicate = self.home / ".codex" / "skills" / "github-workflow"
-        before, original = self.v52_layout(target), self.v52_layout(duplicate)
-        applied = self.apply(self.plan("codex"), "--retire-duplicate", duplicate)
+    def test_legacy_duplicate_receipt_without_physical_identity_refuses_a_replacement_parent(self):
+        target, before, duplicate, original, second, source, replacement, select = self.linked_duplicate_fixture()
+        lexical = self.home / ".codex" / "skills" / "github-workflow"
+        applied = self.apply(self.plan("codex"), "--retire-duplicate", lexical)
         self.assertEqual(applied.returncode, 0, applied.stderr)
         receipt_path = Path(json.loads(applied.stdout)["receipt"])
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         del receipt["duplicates"][0]["physical"]
         receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        stored = receipt_path.read_bytes()
+        installed = snapshot(target)
+        moved = source.with_name("original-parent")
+        source.rename(moved)
+        source.mkdir()
         rolled_back = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
-        self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
-        self.assertEqual((snapshot(target), snapshot(duplicate)), (before, original))
+        self.assert_refused(rolled_back, 2)
+        self.assertIn("original duplicate-parent identity", json.loads(rolled_back.stderr)["error"])
+        self.assertEqual(list(source.iterdir()), [])
+        self.assertEqual(list(moved.iterdir()), [])
+        self.assertEqual(snapshot(target), installed)
+        self.assertEqual(receipt_path.read_bytes(), stored)
+        self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
 
-    def test_legacy_duplicate_journal_needs_a_recorded_original_location(self):
-        target = self.home / ".agents" / "skills" / "github-workflow"
-        duplicate = self.home / ".codex" / "skills" / "github-workflow"
-        before, original = self.v52_layout(target), self.v52_layout(duplicate)
+    def test_legacy_duplicate_journal_requires_the_original_parent_identity(self):
+        target, before, duplicate, original, second, source, replacement, select = self.linked_duplicate_fixture()
+        lexical = self.home / ".codex" / "skills" / "github-workflow"
         plan = self.plan("codex")
-        crashed = self.apply(plan, "--retire-duplicate", duplicate,
+        crashed = self.apply(plan, "--retire-duplicate", lexical,
                              env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:moved-0"})
         self.assertEqual(crashed.returncode, 70, crashed.stderr)
         state = self.home / ".agents" / "dev-harness-install"
         current = state / "CURRENT"
         journal = state / current.read_text(encoding="utf-8").strip()
         record = json.loads(journal.read_text(encoding="utf-8"))
-        del record["moves"][0]["physical"]
-        location = record["moves"][0].pop("resolved")
+        bindings = record["moves"][0].pop("physical")
+        moved = source.with_name("original-parent")
+        source.rename(moved)
+        source.mkdir()
         journal.write_text(json.dumps(record), encoding="utf-8")
         recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
         self.assert_refused(recovered, 3)
+        self.assertIn("original duplicate-parent identity", json.loads(recovered.stderr)["error"])
         self.assertTrue(current.exists())
-        self.assertFalse(duplicate.exists())
-        record["moves"][0]["resolved"] = location
+        self.assertEqual(list(source.iterdir()), [])
+        self.assertEqual(list(moved.iterdir()), [])
+        self.assertEqual(snapshot(target), before)
+        # Restoring the actual recorded metadata and directory permits recovery; no
+        # new identity is inferred from an unchanged historical pathname.
+        source.rmdir()
+        moved.rename(source)
+        record["moves"][0]["physical"] = bindings
         journal.write_text(json.dumps(record), encoding="utf-8")
         recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
@@ -2182,7 +2202,8 @@ class InstallerTests(unittest.TestCase):
 
         spec = importlib.util.spec_from_file_location("physical_parent_installer", self.installer)
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        with mock.patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(module)
         parent, other = self.base / "bound-empty-parent", self.base / "other-empty-parent"
         parent.mkdir()
         other.mkdir()
@@ -2257,6 +2278,24 @@ class InstallerTests(unittest.TestCase):
                 unlink_directory(parent)
         self.assertEqual(list(other.iterdir()), [], "capture failure must not create a guard through the new junction")
 
+    @unittest.skipUnless(os.name == "nt", "native Windows temporary guard ordering")
+    def test_trace_validates_captured_parent_before_creating_any_guard(self):
+        spec = importlib.util.spec_from_file_location("trace_guard_installer", self.installer)
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(module)
+        permitted, outside = self.base / "permitted", self.base / "outside"
+        permitted.mkdir()
+        outside.mkdir()
+        # Both directories are disposable; a narrower temporary boundary lets the
+        # test observe rejection before the first native write is attempted.
+        with mock.patch.object(module.tempfile, "gettempdir", return_value=str(permitted)):
+            with mock.patch.object(module.PhysicalDirectory, "_protect_windows",
+                                   side_effect=AssertionError("a guard write was attempted before containment")):
+                with self.assertRaisesRegex(module.Blocked, "outside the validated temporary directory"):
+                    module.TraceBinding(outside / "trace.txt")
+        self.assertEqual(list(outside.iterdir()), [])
+
     @unittest.skipUnless(os.name == "nt", "native Windows automatic handle cleanup")
     def test_windows_directory_guard_closes_after_abrupt_exit(self):
         parent = self.base / "guard-crash-parent"
@@ -2265,6 +2304,7 @@ class InstallerTests(unittest.TestCase):
 import importlib.util, os, pathlib, sys
 spec = importlib.util.spec_from_file_location("installer", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
+sys.dont_write_bytecode = True
 spec.loader.exec_module(module)
 bound = module.PhysicalDirectory(pathlib.Path(sys.argv[2]))
 assert len(list(pathlib.Path(sys.argv[2]).iterdir())) == 1
