@@ -253,6 +253,30 @@ def main():
             # The managed policy documents this exact check as an instruction.
             text = text.replace("grep -nF 'TO FILL' <pr-body-file>", "the PR placeholder check")
         require(not re.search(r"\{\{[A-Z_]+\}\}|TO FILL|\[year\]|\[fullname\]", text), f"Unresolved project field: {name}")
+    bootstrap_blocks = []
+    for name in ["docs/INSTALL-CODEX.md", "docs/INSTALL-CLAUDE.md"]:
+        text = (ROOT / name).read_text(encoding="utf-8")
+        blocks = re.findall(
+            r"<!-- package-bootstrap:start -->\n```powershell\n(.*?)```\n<!-- package-bootstrap:end -->",
+            text, re.DOTALL,
+        )
+        require(len(blocks) == 1, f"Exactly one authenticated package bootstrap required: {name}")
+        bootstrap = blocks[0]
+        require(".\\install.py" not in text, f"Unbound extracted installer command: {name}")
+        require("$packageName = 'dev-harness-v" + release + "'" in bootstrap,
+                f"Bootstrap package version mismatch: {name}")
+        authentication = bootstrap.find("if ($actualHash -cne $archiveHashes[0]) { throw")
+        execution = bootstrap.find("& $candidateCommand.Source")
+        require(authentication >= 0 and execution > authentication,
+                f"Archive authentication must precede Python discovery: {name}")
+        require("Get-FileHash -InputStream $archiveStream" in bootstrap
+                and "ZipArchive]::new($archiveStream" in bootstrap,
+                f"Hash and extraction must use the captured archive: {name}")
+        require("'dev-harness-verified-' + [guid]::NewGuid()" in bootstrap
+                and "'-I'" in bootstrap,
+                f"Fresh extraction and isolated Python required: {name}")
+        bootstrap_blocks.append(bootstrap)
+    require(bootstrap_blocks[0] == bootstrap_blocks[1], "Installation bootstrap differs between guides")
     for name in ["profiles/hermes-development.md", "docs/INSTALL-CODEX.md", "docs/INSTALL-CLAUDE.md", "docs/package-README.md"]:
         require("v" + release in (ROOT / name).read_text(encoding="utf-8"), f"Release version missing: {name}")
     module = ROOT / "skills/github-workflow/scripts/workflow-context.py"

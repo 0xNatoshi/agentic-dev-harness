@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Authenticate captured package ZIP bytes before any bundled code or Python discovery in both Windows installation guides. Create a fresh verified workspace, retain archive-member checks before full extraction, isolate Python startup, and exercise substituted packages and Windows PowerShell in the guide regression gate (#81).
+
 Development version: 6.5.0. No release tag has been published for this version.
 
 - Also read list nesting in the suspension scan as CommonMark does, as an extra source of holds: an item is a child only from its parent's content column (marker width plus one to four spaces), so a list whose items shift by a space or two keeps its negated lead-in (` - Never` above `- merge PRs` now blocks with exit 2), and an item indented less than that column is a sibling. That reading only adds holds: context still comes from the marker-column nesting, so no hold read before is lost (`- No agent may` above ` - push to main` and ` - merge PRs` still exits 2).
