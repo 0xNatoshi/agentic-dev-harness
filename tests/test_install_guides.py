@@ -203,6 +203,9 @@ class InstallGuideBootstrapTests(unittest.TestCase):
         ))
         hook = self.base / "hash-hook-ran.txt"
         prelude = """
+# Windows PowerShell exports Get-FileHash as a function. Load the module before
+# defining the hook so later utility command autoloading cannot replace it.
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 function Get-FileHash {
     [CmdletBinding()]
     param([System.IO.Stream] $InputStream, [string] $Algorithm)
