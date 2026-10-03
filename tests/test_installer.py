@@ -2101,6 +2101,17 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(snapshot(self.target), before)
         self.assertFalse((self.state() / "CURRENT").exists())
 
+    def test_plan_keeps_an_unused_trace_location_read_only(self):
+        self.v52_layout()
+        before = snapshot(self.home)
+        trace = self.base / "absent-trace-parent" / "trace.txt"
+        result = self.run_installer("plan", "--runtime", "claude", "--home", self.home,
+                                    "--checksums", self.checksums,
+                                    env={"DEV_HARNESS_INSTALL_TEST_TRACE": str(trace)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(trace.parent.exists())
+        self.assertEqual(snapshot(self.home), before)
+
     def test_trace_hard_links_and_file_links_are_refused_during_validation(self):
         self.v52_layout()
         plan = self.plan()

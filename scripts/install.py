@@ -143,7 +143,7 @@ def contains(parent: str, child: str) -> bool:
         return False
 
 
-def require_test_home(locations: "Locations") -> None:
+def require_test_home(locations: "Locations", checkpoints: bool = True) -> None:
     """Honour test hooks only when every location the command can touch is under the temporary directory."""
     global _TRACE
     hooks = active_test_hooks()
@@ -157,7 +157,7 @@ def require_test_home(locations: "Locations") -> None:
     if outside:
         raise Blocked("Installer test hooks are set outside a temporary test home; unset them",
                       {"hooks": sorted(hooks), "outside": outside})
-    if hooks.get(TEST_TRACE):
+    if hooks.get(TEST_TRACE) and checkpoints:
         if _TRACE is not None:
             _TRACE.close()
         _TRACE = TraceBinding(Path(os.path.abspath(hooks[TEST_TRACE])))
@@ -1547,7 +1547,8 @@ def command_verify(options) -> dict:
 
 
 def command_plan(options) -> dict:
-    require_test_home(Locations(options.runtime, options.home))
+    # A read-only plan emits no checkpoints, so it only validates the hook paths.
+    require_test_home(Locations(options.runtime, options.home), checkpoints=False)
     plan, _ = make_plan(options.runtime, options.home, None, Path(options.package), Path(options.checksums))
     if options.output:
         write_json(Path(options.output), plan)
