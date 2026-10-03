@@ -53,6 +53,10 @@ Record these facts in the issue or PR so another computer can resume without cha
 
 Progress notes include the next action. Record an explicit project-wide hold in root AGENTS.md outside its managed block as well as the issue/PR; a comment alone may be missed by other sessions.
 
+Installer physical-path tests also run under native Windows Python in CI, using directory junctions without symlink privileges. Duplicate plans and receipts bind actual parent directory identities (128-bit file IDs on Windows): crash-loop fixtures must create a fresh plan or receipt after rebuilding a temporary home, rather than reuse metadata from a copied tree. Test traces bind a validated temporary parent and one append handle; existing trace files must have one hard link and cannot be symlinks. POSIX FIFOs remain supported and open lazily at the first checkpoint so staging-pause fixtures keep their ordering.
+
+On Windows, physical parents are captured by relative native opens that refuse reparse traversal. Mutation contexts retain a nonempty parent chain with no-delete-shared directory handles and a temporary guard child; Windows deletes the guard when its handle closes, including process interruption. This prevents both pathname replacement and conversion of an empty parent into a junction while allowing ordinary journal and child renames. Plans create no guards. Legacy duplicate records without original physical identities are refused; a recorded pathname alone cannot safely acquire a new identity at recovery time. The binding covers duplicate move parents and test traces; it does not promise isolation of all installer I/O against arbitrary replacement of the home/state hierarchy or every descendant during a recursive inventory. Native CI qualifies local Windows filesystems; cloud filters and remote filesystems are not qualified and cannot fall back to permissive path resolution.
+
 ## Versions, packages and recovery
 
 1. Change canonical source files and tests; preserve authentic historical templates and notices. New exported files require an explicit entry in package-files.json; private configuration never belongs in that list.
