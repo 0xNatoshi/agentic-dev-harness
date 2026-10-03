@@ -925,11 +925,339 @@ class Lock:
         self.stream.close()
 
 
+# Journal and receipt paths are data until they match the locations this installer generates.
+TRANSACTION_NAME = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\Z")
+ROLLBACK_NAME = re.compile(r"rollback-[0-9a-f]{8}\Z")
+RESTORE_STALE_NAME = re.compile(r"restore-stale-[0-9a-f]{8}\Z")
+
+
+def plain_transaction_path(state: Path, candidate: Path) -> None:
+    """Reject links or junctions in generated transaction components below the selected state."""
+    try:
+        relative = candidate.relative_to(state)
+    except ValueError:
+        raise Refused("A recorded transaction path leaves the selected state") from None
+    if not relative.parts:
+        raise Refused("A recorded transaction path names the state root")
+    path = state
+    for part in relative.parts:
+        path /= part
+        if is_link(path):
+            raise Refused(f"A recorded transaction path crosses a link or junction at {path}")
+
+
+def recorded_path(value: object, expected: Path, field: str, state: Path | None = None) -> None:
+    if not isinstance(value, str) or value != str(expected):
+        raise Refused(f"The recorded {field} does not match the selected transaction")
+    if state is not None:
+        plain_transaction_path(state, expected)
+
+
+def normalized_absolute(value: object, field: str) -> Path:
+    if (not isinstance(value, str) or not value or any(ord(char) < 32 or 0xD800 <= ord(char) <= 0xDFFF for char in value)
+            or not os.path.isabs(value) or os.path.normpath(value) != value):
+        raise Refused(f"The recorded {field} is not an absolute normalized path")
+    return Path(value)
+
+
+def selected_locations(record: dict, locations: Locations) -> None:
+    for key, expected in (("runtime", locations.runtime), ("home", str(locations.home)),
+                          ("target", str(locations.target)), ("state_root", str(locations.state))):
+        if record.get(key) != expected:
+            raise Refused(f"The recorded {key} does not match the selected runtime")
+    if "config_root" in record and record["config_root"] != str(locations.config):
+        raise Refused("The recorded config_root does not match the selected runtime")
+    if "skill_roots" in record and record["skill_roots"] != [str(root) for root in locations.roots]:
+        raise Refused("The recorded skill_roots do not match the selected runtime")
+
+
+def locations_from_record(record: dict) -> Locations:
+    if record.get("runtime") not in ("claude", "codex"):
+        raise Refused("The selected record has no valid runtime")
+    normalized_absolute(record.get("home"), "home")
+    config = record.get("config_root")
+    if config is not None:
+        normalized_absolute(config, "config_root")
+    locations = Locations(record["runtime"], record["home"], config)
+    selected_locations(record, locations)
+    return locations
+
+
+def transaction_path(locations: Locations, value: object) -> Path:
+    candidate = normalized_absolute(value, "transaction")
+    if (candidate.parent != locations.state or not TRANSACTION_NAME.fullmatch(candidate.name)
+            or is_link(candidate)):
+        raise Refused("The recorded transaction is not a generated directory in the selected state")
+    return candidate
+
+
+def journal_kind(locations: Locations, journal: Path) -> tuple:
+    if journal.name != "journal.json" or is_link(journal):
+        raise Refused("The selected journal is not a regular generated journal path")
+    if journal.parent.parent == locations.state:
+        transaction = transaction_path(locations, str(journal.parent))
+        plain_transaction_path(locations.state, journal)
+        return transaction, "apply"
+    work = journal.parent
+    transaction = transaction_path(locations, str(work.parent))
+    if not ROLLBACK_NAME.fullmatch(work.name) or is_link(work):
+        raise Refused("The selected rollback journal is not in a generated work directory")
+    plain_transaction_path(locations.state, journal)
+    return transaction, "rollback"
+
+
+def duplicate_path(locations: Locations, value: object) -> Path:
+    candidate = normalized_absolute(value, "duplicate path")
+    if candidate == locations.target:
+        raise Refused("The recorded duplicate names the selected target")
+    for root in locations.roots:
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            continue
+        if relative.parts and candidate not in locations.target.parents and locations.target not in candidate.parents:
+            return candidate
+    raise Refused("The recorded duplicate is not a leaf below a selected skill root")
+
+
+def recorded_inventory(value: object, field: str, absent: bool = True) -> None:
+    if value is None and absent:
+        return
+    if not isinstance(value, dict) or "." not in value:
+        raise Refused(f"The recorded {field} is not an inventory")
+    for name, entry in value.items():
+        if (not isinstance(name, str) or not name or name.startswith("/") or "\\" in name
+                or ".." in PurePosixPath(name).parts or PurePosixPath(name).as_posix() != name
+                or not isinstance(entry, dict) or entry.get("type") not in ("dir", "file")
+                or type(entry.get("mode")) is not int or not 0 <= entry["mode"] <= 0o7777):
+            raise Refused(f"The recorded {field} has an invalid inventory entry")
+        if name == "." and entry["type"] != "dir":
+            raise Refused(f"The recorded {field} has no directory root")
+        if entry["type"] == "dir" and set(entry) != {"type", "mode"}:
+            raise Refused(f"The recorded {field} has an invalid directory entry")
+        if entry["type"] == "file" and (set(entry) != {"type", "mode", "sha256", "bytes"}
+                                        or not isinstance(entry["sha256"], str)
+                                        or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
+                                        or type(entry["bytes"]) is not int or entry["bytes"] < 0):
+            raise Refused(f"The recorded {field} has an invalid file entry")
+
+
+def receipt_metadata(receipt: dict, locations: Locations) -> Path:
+    if type(receipt.get("receipt_format")) is not int or receipt["receipt_format"] != 1:
+        raise Refused("Unsupported receipt format")
+    if receipt.get("state") not in ("installed", "rolled back", "recovered to the before-state; not installed"):
+        raise Refused("The receipt has an unsupported state")
+    selected_locations(receipt, locations)
+    transaction = transaction_path(locations, receipt.get("transaction"))
+    plain_transaction_path(locations.state, transaction / "receipt.json")
+    recorded_path(receipt.get("journal"), transaction / "journal.json", "receipt journal", locations.state)
+    before = receipt.get("before")
+    recorded_inventory(before, "before")
+    recorded_inventory(receipt.get("after"), "after-inventory", absent=False)
+    for key, expected in (("backup", transaction / "backup" / SKILL),
+                          ("retired", transaction / "retired" / SKILL)):
+        if before is None:
+            if receipt.get(key) is not None:
+                raise Refused(f"The recorded {key} is unexpected without a before-state")
+        else:
+            recorded_path(receipt.get(key), expected, key, locations.state)
+    duplicates = receipt.get("duplicates")
+    if not isinstance(duplicates, list):
+        raise Refused("The recorded duplicates are not a list")
+    originals = set()
+    for index, duplicate in enumerate(duplicates):
+        if not isinstance(duplicate, dict):
+            raise Refused("The recorded duplicate is not an object")
+        original = duplicate_path(locations, duplicate.get("path"))
+        if str(original) in originals:
+            raise Refused("The recorded duplicate is repeated")
+        originals.add(str(original))
+        recorded_path(duplicate.get("retired_to"), transaction / "duplicates" / str(index) / original.name,
+                      "retired duplicate", locations.state)
+        recorded_path(duplicate.get("backup"), transaction / "backup" / f"duplicate-{index}" / original.name,
+                      "duplicate backup", locations.state)
+        recorded_inventory(duplicate.get("inventory"), "duplicate", absent=False)
+        if "resolved" in duplicate:
+            if not isinstance(duplicate["resolved"], str):
+                raise Refused(f"The receipt records no valid location for the retired duplicate {original}; rollback refused")
+            normalized_absolute(duplicate["resolved"], "resolved duplicate")
+    retirements = receipt.get("retirements", [])
+    if not isinstance(retirements, list):
+        raise Refused("The recorded retirements are not a list")
+    for item in retirements:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise Refused("The recorded retirement is not an object with a path")
+        try:
+            name = package_path(item["path"])
+        except ValueError:
+            raise Refused("The recorded retirement path is invalid") from None
+        if before is None or item["path"] not in before:
+            raise Refused("The recorded retirement is absent from the before-state")
+        for key, base in (("retired_copy", transaction / "retired" / SKILL),
+                          ("backup", transaction / "backup" / SKILL)):
+            if key in item:
+                recorded_path(item[key], base.joinpath(*name.parts), key, locations.state)
+    installer = receipt.get("installer_copy")
+    if installer is not None:
+        if not isinstance(installer, dict):
+            raise Refused("The recorded installer copy is not an object")
+        recorded_path(installer.get("path"), transaction / "installer" / PACKAGE_INSTALLER, "installer copy",
+                      locations.state)
+    command = receipt.get("rollback_command")
+    if command is not None and (not isinstance(command, list) or len(command) != 5
+                                or not isinstance(command[0], str) or not command[0]
+                                or command[1:] != [str(transaction / "installer" / PACKAGE_INSTALLER), "rollback",
+                                                   "--receipt", str(transaction / "receipt.json")]):
+        raise Refused("The recorded rollback command is not bound to this receipt")
+    if command is not None:
+        plain_transaction_path(locations.state, transaction / "installer" / PACKAGE_INSTALLER)
+    rollback = receipt.get("rollback")
+    if rollback is not None:
+        if not isinstance(rollback, dict) or not isinstance(rollback.get("journal"), str):
+            raise Refused("The recorded rollback evidence has no journal")
+        rollback_journal = normalized_absolute(rollback["journal"], "rollback evidence journal")
+        source, kind = journal_kind(locations, rollback_journal)
+        if source != transaction or kind != "rollback":
+            raise Refused("The recorded rollback evidence belongs to another transaction")
+        recorded_path(rollback.get("parked"), rollback_journal.parent / "parked" / SKILL,
+                      "rollback evidence parked target", locations.state)
+    return transaction
+
+
+def journal_metadata(record: dict, journal: Path, locations: Locations) -> None:
+    transaction, kind = journal_kind(locations, journal)
+    if record.get("operation") != kind:
+        raise Refused("The journal operation does not match its generated path")
+    recorded_path(record.get("target"), locations.target, "journal target")
+    recorded_inventory(record.get("origin"), "origin")
+    recorded_inventory(record.get("incoming"), "incoming")
+    if kind == "apply":
+        if record.get("incoming") is None:
+            raise Refused("The apply journal has no incoming inventory")
+        expected_backup = transaction / "backup" / SKILL
+        expected_incoming = transaction / "staged" / SKILL
+        expected_parked = transaction / "retired" / SKILL
+        if record.get("moves_last") is not None and record["moves_last"] is not False:
+            raise Refused("The apply journal has an invalid move order")
+    else:
+        if record.get("origin") is None:
+            raise Refused("The rollback journal has no origin inventory")
+        work = journal.parent
+        expected_backup = work / "origin-backup" / SKILL
+        expected_incoming = None
+        expected_parked = work / "parked" / SKILL
+        recorded_path(record.get("journal"), journal, "rollback journal", locations.state)
+        recorded_path(record.get("receipt"), transaction / "receipt.json", "rollback receipt", locations.state)
+        if record.get("moves_last") is not True:
+            raise Refused("The rollback journal has an invalid move order")
+        receipt = read_json(transaction / "receipt.json", "run recover again")
+        receipt_metadata(receipt, locations)
+        if canonical(record.get("incoming")) != canonical(receipt.get("before")):
+            raise Refused("The rollback journal's incoming inventory differs from its receipt")
+    backup = record.get("origin_backup")
+    if record.get("origin") is None:
+        if backup is not None:
+            raise Refused("The journal backup is unexpected without an origin")
+    elif backup is not None:
+        recorded_path(backup, expected_backup, "journal backup", locations.state)
+    recorded_path(record.get("parked"), expected_parked, "parked target", locations.state)
+    incoming_path = record.get("incoming_path")
+    if kind == "apply":
+        recorded_path(incoming_path, expected_incoming, "staged target", locations.state)
+    elif record.get("incoming") is None:
+        if incoming_path is not None:
+            raise Refused("The rollback journal has an unexpected incoming path")
+    elif incoming_path not in (str(transaction / "retired" / SKILL), str(journal.parent / "restore" / SKILL)):
+        raise Refused("The rollback incoming path is outside its transaction")
+    elif incoming_path is not None:
+        plain_transaction_path(locations.state, Path(incoming_path))
+    moves = record.get("moves")
+    if not isinstance(moves, list):
+        raise Refused("The journal moves are not a list")
+    for index, move in enumerate(moves):
+        if not isinstance(move, dict):
+            raise Refused("The journal move is not an object")
+        recorded_inventory(move.get("inventory"), "move", absent=False)
+        if kind == "apply":
+            source = duplicate_path(locations, move.get("from"))
+            recorded_path(move.get("to"), transaction / "duplicates" / str(index) / source.name, "retired move",
+                          locations.state)
+            recorded_path(move.get("backup"), transaction / "backup" / f"duplicate-{index}" / source.name,
+                          "move backup", locations.state)
+            if "resolved" in move:
+                normalized_absolute(move["resolved"], "resolved move")
+        else:
+            if index >= len(receipt["duplicates"]):
+                raise Refused("The rollback journal has an unrecorded duplicate")
+            original = duplicate_path(locations, move.get("to"))
+            recorded_path(str(original), Path(receipt["duplicates"][index]["path"]), "restored duplicate")
+            if move.get("from") not in (receipt["duplicates"][index]["retired_to"],
+                                        str(journal.parent / "restore-duplicates" / str(index) / original.name)):
+                raise Refused("The rollback duplicate source is outside its transaction")
+            plain_transaction_path(locations.state, Path(move["from"]))
+    if kind == "rollback" and len(moves) != len(receipt["duplicates"]):
+        raise Refused("The rollback journal omits a recorded duplicate")
+    # Undo creates these copies from the journal's parked and move paths before renaming them.
+    plain_transaction_path(locations.state, expected_parked.parent / "restore" / SKILL)
+    if kind == "apply":
+        for index, move in enumerate(moves):
+            destination = Path(move["to"])
+            plain_transaction_path(locations.state,
+                                   destination.parent.parent / f"restore-{index}" / Path(move["from"]).name)
+    for key, allowed in (("parked_drift", {str(expected_parked)}),
+                         ("moved_drift", {move["to"] for move in moves})):
+        if key not in record:
+            continue
+        if key == "moved_drift" and not isinstance(record[key], list):
+            raise Refused("The journal moved_drift is not a list")
+        values = [record[key]] if key == "parked_drift" else record[key]
+        if not isinstance(values, list) or any(not isinstance(item, str) or item not in allowed for item in values):
+            raise Refused(f"The journal {key} is not a generated path")
+    stale = record.get("stale_restore_copies", [])
+    stale_parents = {expected_parked.parent, transaction / "duplicates"}
+    if not isinstance(stale, list) or any(not isinstance(item, str) or Path(item).parent not in stale_parents
+                                          or not RESTORE_STALE_NAME.fullmatch(Path(item).name) for item in stale):
+        raise Refused("The journal has an invalid stale restoration path")
+    for item in stale:
+        plain_transaction_path(locations.state, Path(item))
+    state = record.get("state")
+    ordinary = {"staged", "prepared", "parking", "parked", "parked-drift", "activating", "activated", "undoing",
+                "restoring", "undone", "committed"}
+    if state is not None and (not isinstance(state, str) or (state not in ordinary and not re.fullmatch(
+            r"(?:moving|moved|restoring-move|restored-move)-[0-9]+", state))):
+        raise Refused("The journal has an invalid state")
+
+
+def current_journal(locations: Locations) -> Path:
+    current = locations.state / "CURRENT"
+    if is_link(current) or not current.is_file():
+        raise Refused("CURRENT is not a regular selector file")
+    try:
+        with open(current, "rb") as stream:
+            data = stream.read(512)
+            if stream.read(1):
+                raise Refused("CURRENT is too long for a generated journal selector")
+        selection = data.decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        raise Refused(f"Cannot read CURRENT as a UTF-8 journal selector: {error}") from None
+    if not selection.endswith("\n") or selection.count("\n") != 1:
+        raise Refused("CURRENT is not one generated journal selector line")
+    relative = Path(selection[:-1])
+    if relative.is_absolute() or any(part in (".", "..") for part in relative.parts) or str(relative) != selection[:-1]:
+        raise Refused("CURRENT is not a generated relative journal selector")
+    journal = locations.state / relative
+    journal_kind(locations, journal)
+    if not journal.parent.is_dir():
+        raise Refused("CURRENT does not select an existing transaction directory")
+    return journal
+
+
 # The swap engine. An operation moves `moves` (from -> to), parks the target and activates an
 # incoming tree. Undo decides from the filesystem, checked against recorded inventories, never
 # from the journal state alone.
 class Operation:
-    def __init__(self, journal_path: Path, record: dict) -> None:
+    def __init__(self, journal_path: Path, record: dict, locations: Locations) -> None:
+        journal_metadata(record, journal_path, locations)
         self.path = journal_path
         self.record = record
 
@@ -1232,6 +1560,19 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         problems = staging_problems(after, package_files, before or {}, plan["classification"])
         if problems:
             raise Refused("The staged tree does not match its expected inventory", problems)
+        retired = transaction / "retired" / SKILL
+        operation = Operation(journal, {
+            "operation": "apply",
+            "target": str(locations.target),
+            "origin": before,
+            "origin_backup": str(backup) if before is not None else None,
+            "incoming": after,
+            "incoming_path": str(staged),
+            "parked": str(retired),
+            "moves": moves,
+            "state": "staged",
+        }, locations)
+        write_json(journal, operation.record)
         checkpoint("apply:staged")
     except OSError as error:
         finish(locations.state)
@@ -1239,17 +1580,6 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
     except BaseException:
         finish(locations.state)
         raise
-    retired = transaction / "retired" / SKILL
-    operation = Operation(journal, {
-        "operation": "apply",
-        "target": str(locations.target),
-        "origin": before,
-        "origin_backup": str(backup) if before is not None else None,
-        "incoming": after,
-        "incoming_path": str(staged),
-        "parked": str(retired),
-        "moves": moves,
-    })
     attempt(operation, locations.state)
     try:
         discovered, unreadable = discoverable(locations.roots), None
@@ -1360,16 +1690,16 @@ def command_rollback(options) -> dict:
     given = Path(os.path.abspath(options.receipt))
     # The receipt is read before Locations.check(), so an unsearchable directory above it is diagnosed here.
     receipt = read_json(given, "run rollback again")
+    if is_link(given):
+        raise Refused("The selected receipt is a link or junction")
     if receipt.get("receipt_format") != 1:
         raise Refused("Unsupported receipt format")
-    locations = Locations(receipt["runtime"], receipt["home"], receipt.get("config_root"))
-    if str(locations.target) != receipt["target"] or str(locations.state) != receipt["state_root"]:
-        raise Refused("The receipt target does not match its runtime locations")
+    locations = locations_from_record(receipt)
+    transaction = receipt_metadata(receipt, locations)
     # Only the receipt inside its transaction is authoritative; a copy elsewhere must be identical.
-    transaction = Path(receipt["transaction"])
     receipt_path = transaction / "receipt.json"
-    if transaction.parent != locations.state:
-        raise Refused("The receipt's transaction is not in the runtime's installer state directory")
+    if is_link(receipt_path):
+        raise Refused("The canonical receipt is a link or junction")
     if not same_path(str(given), str(receipt_path)) and canonical(read_json(receipt_path, "run rollback again")) != canonical(receipt):
         raise Refused(f"The receipt differs from the canonical receipt {receipt_path}; roll back with that one")
     if receipt.get("state") != "installed":
@@ -1497,16 +1827,17 @@ def command_rollback(options) -> dict:
             "parked": str(work / "parked" / SKILL),
             "moves": moves,
             "moves_last": True,
-        })
+        }, locations)
         attempt(operation, locations.state)
         operation.record["rollback_evidence"] = {"maintenance_boundary": boundary, "test_hooks": active_test_hooks()}
         operation.save("committed")
-        mark_rolled_back(operation.record)
+        mark_rolled_back(operation.record, locations)
         finish(locations.state)
         return {"result": "rolled back", "target": str(locations.target), "restored": "absent" if receipt["before"] is None else "before-inventory"}
 
 
-def mark_rolled_back(record: dict, tolerant: bool = False) -> bool:
+def mark_rolled_back(record: dict, locations: Locations, tolerant: bool = False) -> bool:
+    journal_metadata(record, Path(record.get("journal", "")), locations)
     receipt_path = Path(record["receipt"])
     try:
         receipt = read_json(receipt_path)
@@ -1514,6 +1845,7 @@ def mark_rolled_back(record: dict, tolerant: bool = False) -> bool:
         if tolerant:
             return False
         raise
+    receipt_metadata(receipt, locations)
     receipt["state"] = "rolled back"
     receipt["rollback"] = {"journal": record["journal"], "parked": record["parked"], **record.get("rollback_evidence", {})}
     write_json(receipt_path, receipt)
@@ -1524,7 +1856,11 @@ def command_recover(options) -> dict:
     if options.plan or options.receipt:
         # The recorded config root, so recovery finds the state whatever the environment now says.
         recorded = read_json(Path(options.plan or options.receipt), "run recover again")
-        locations = Locations(recorded["runtime"], recorded["home"], recorded.get("config_root"))
+        locations = locations_from_record(recorded)
+        if options.plan and (type(recorded.get("plan_format")) is not int or recorded["plan_format"] != 1):
+            raise Refused("Unsupported plan format")
+        if options.receipt:
+            receipt_metadata(recorded, locations)
     elif options.runtime:
         locations = Locations(options.runtime, options.home)
     else:
@@ -1547,16 +1883,18 @@ def command_recover(options) -> dict:
         current = locations.state / "CURRENT"
         if not exists(current):
             return nothing
-        journal = locations.state / current.read_text(encoding="utf-8").strip()
+        journal = current_journal(locations)
         if not exists(journal):
-            # The journal is written durably before the first rename, so nothing was renamed.
-            finish(locations.state)
-            return {"result": "no rename happened; staging data kept", "transaction": str(journal.parent)}
+            raise Incomplete(f"The selected journal {journal} is missing; rename state cannot be established. "
+                             "CURRENT and staging data were kept for inspection")
         record = read_json(journal)
-        operation = Operation(journal, record)
+        operation = Operation(journal, record, locations)
         if record.get("state") == "committed":
+            if differences(record["incoming"], inventory(locations.target)) or any(
+                    differences(move["inventory"], inventory(Path(move["to"]))) for move in record["moves"]):
+                raise Refused("The committed journal does not match the installed state; CURRENT was kept")
             result = {"result": "already committed", "journal": str(journal)}
-            if record["operation"] == "rollback" and not mark_rolled_back(record, tolerant=True):
+            if record["operation"] == "rollback" and not mark_rolled_back(record, locations, tolerant=True):
                 result["receipt_not_updated"] = record["receipt"]
             if record["operation"] == "apply":
                 # The apply output may never have been printed: name the receipt and what it retired.
@@ -1565,8 +1903,10 @@ def command_recover(options) -> dict:
                 try:
                     value = read_json(receipt)
                 except Refused as error:
-                    result["receipt_unreadable"] = str(error)
+                    raise Incomplete(f"The committed apply receipt {receipt} is unavailable: {error}; "
+                                     "CURRENT was kept for inspection") from None
                 else:
+                    receipt_metadata(value, locations)
                     result.update({key: value[key] for key in ("retirements", "rollback_command") if key in value})
             finish(locations.state)
             return result

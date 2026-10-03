@@ -661,6 +661,297 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
+    def test_recover_rejects_untrusted_current_before_touching_any_journal(self):
+        before, parked = self.crash_after_parking()
+        current = self.state() / "CURRENT"
+        original = current.read_bytes()
+        journal = self.state() / original.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        foreign = self.base / "foreign"
+        foreign.mkdir()
+        (foreign / "journal.json").write_bytes(journal_bytes)
+        foreign_before = snapshot(foreign)
+        pristine = self.base / "pristine-home"
+        shutil.copytree(self.home, pristine)
+        cases = (str(foreign / "journal.json").encode() + b"\n", b"../foreign/journal.json\n",
+                 b"not-a-transaction/journal.json\n", original.rstrip(b"\n"), b"\xff\n", b"x" * 1024)
+        for selection in cases:
+            with self.subTest(selection=selection[:48]):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home)
+                (foreign / "journal.json").write_bytes(journal_bytes)
+                current.write_bytes(selection)
+                refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                             "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(current.read_bytes(), selection)
+                self.assertEqual(journal.read_bytes(), journal_bytes)
+                self.assertEqual(snapshot(foreign), foreign_before)
+                self.assertIsNone(snapshot(self.target))
+                self.assertIsNotNone(snapshot(parked))
+        shutil.rmtree(self.home)
+        shutil.copytree(pristine, self.home)
+        current.write_bytes(original)
+        journal.unlink()
+        uncertain = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                       "--maintenance-confirmed")
+        self.assert_refused(uncertain, 3)
+        self.assertIn("journal", json.loads(uncertain.stderr)["error"].lower())
+        self.assertEqual(current.read_bytes(), original)
+        self.assertIsNone(snapshot(self.target))
+        journal.write_bytes(journal_bytes)
+        self.recover()
+        self.assertEqual(snapshot(self.target), before)
+
+    def test_recover_rejects_forged_journal_paths_and_state_before_a_write(self):
+        self.crash_after_parking()
+        current = self.state() / "CURRENT"
+        journal = self.state() / current.read_text(encoding="utf-8").strip()
+        original = json.loads(journal.read_text(encoding="utf-8"))
+        foreign = self.base / "foreign"
+        foreign.mkdir()
+        (foreign / "marker").write_bytes(b"untouched\n")
+        foreign_before = snapshot(foreign)
+        parked_before = snapshot(Path(original["parked"]))
+        pristine = self.base / "pristine-home"
+        shutil.copytree(self.home, pristine)
+        changes = (
+            ("target", lambda value: value.__setitem__("target", str(foreign))),
+            ("parked", lambda value: value.__setitem__("parked", str(foreign / "parked"))),
+            ("backup", lambda value: value.__setitem__("origin_backup", str(foreign / "backup"))),
+            ("incoming", lambda value: value.__setitem__("incoming_path", str(foreign / "incoming"))),
+            ("moves type", lambda value: value.__setitem__("moves", "invalid")),
+            ("origin type", lambda value: value.__setitem__("origin", "invalid")),
+            ("false commit", lambda value: value.__setitem__("state", "committed")),
+        )
+        for label, change in changes:
+            with self.subTest(field=label):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home)
+                forged = json.loads(json.dumps(original))
+                change(forged)
+                journal.write_text(json.dumps(forged), encoding="utf-8")
+                recorded = journal.read_bytes()
+                refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                             "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(journal.read_bytes(), recorded)
+                self.assertTrue(current.exists())
+                self.assertEqual(snapshot(foreign), foreign_before)
+                self.assertEqual(snapshot(Path(original["parked"])), parked_before)
+                self.assertIsNone(snapshot(self.target))
+
+    def test_rollback_rejects_forged_receipt_paths_before_creating_a_transaction(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        original = json.loads(receipt_path.read_text(encoding="utf-8"))
+        installed = snapshot(self.target)
+        foreign = self.base / "foreign"
+        foreign.mkdir()
+        (foreign / "marker").write_bytes(b"untouched\n")
+        foreign_before = snapshot(foreign)
+        pristine = self.base / "pristine-home"
+        shutil.copytree(self.home, pristine)
+        changes = (
+            ("home type", lambda value: value.__setitem__("home", [])),
+            ("config root type", lambda value: value.__setitem__("config_root", {})),
+            ("transaction", lambda value: value.__setitem__("transaction", str(foreign))),
+            ("journal", lambda value: value.__setitem__("journal", str(foreign / "journal.json"))),
+            ("backup", lambda value: value.__setitem__("backup", str(foreign / "backup"))),
+            ("retired", lambda value: value.__setitem__("retired", str(foreign / "retired"))),
+            ("duplicate path", lambda value: value.__setitem__("duplicates", [{"path": str(foreign / "duplicate"),
+                                                                                "retired_to": str(foreign / "retired"),
+                                                                                "backup": str(foreign / "backup"),
+                                                                                "inventory": {}}])),
+            ("retirement copy", lambda value: value["retirements"][0].__setitem__("retired_copy", str(foreign / "copy"))),
+            ("duplicate schema", lambda value: value.__setitem__("duplicates", "invalid")),
+        )
+        for label, change in changes:
+            with self.subTest(field=label):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home)
+                forged = json.loads(json.dumps(original))
+                change(forged)
+                receipt_path.write_text(json.dumps(forged), encoding="utf-8")
+                recorded = receipt_path.read_bytes()
+                refused = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(receipt_path.read_bytes(), recorded)
+                self.assertEqual(snapshot(self.target), installed)
+                self.assertEqual(snapshot(foreign), foreign_before)
+                self.assertFalse((self.state() / "CURRENT").exists())
+                self.assertFalse(list(self.state().glob("*/rollback-*")))
+
+    def test_recover_committed_rollback_rejects_foreign_receipt_before_marking_it(self):
+        before = self.v52_layout()
+        receipt_path = self.installed()
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:committed"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        journal = self.state() / current.read_text(encoding="utf-8").strip()
+        original = json.loads(journal.read_text(encoding="utf-8"))
+        foreign = self.base / "foreign"
+        foreign.mkdir()
+        (foreign / "receipt.json").write_bytes(receipt_path.read_bytes())
+        foreign_before = snapshot(foreign)
+        pristine = self.base / "pristine-home"
+        shutil.copytree(self.home, pristine)
+        for field, replacement in (("receipt", foreign / "receipt.json"), ("journal", foreign / "journal.json"),
+                                   ("parked", foreign / "parked")):
+            with self.subTest(field=field):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home)
+                forged = dict(original, **{field: str(replacement)})
+                journal.write_text(json.dumps(forged), encoding="utf-8")
+                recorded = journal.read_bytes()
+                receipt_before = receipt_path.read_bytes()
+                refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(journal.read_bytes(), recorded)
+                self.assertEqual(receipt_path.read_bytes(), receipt_before)
+                self.assertEqual(snapshot(foreign), foreign_before)
+                self.assertTrue(current.exists())
+                self.assertEqual(snapshot(self.target), before)
+        shutil.rmtree(self.home)
+        shutil.copytree(pristine, self.home)
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "rolled back")
+
+    @unittest.skipIf(os.name == "nt", "directory symlink requires Windows privileges")
+    def test_recover_rejects_a_linked_transaction_selector(self):
+        if not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        before, parked = self.crash_after_parking()
+        current = self.state() / "CURRENT"
+        selection = current.read_bytes()
+        transaction = parked.parents[1]
+        held = self.base / "held-transaction"
+        transaction.rename(held)
+        os.symlink(held, transaction, target_is_directory=True)
+        journal_before = (held / "journal.json").read_bytes()
+        refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                     "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(current.read_bytes(), selection)
+        self.assertEqual((held / "journal.json").read_bytes(), journal_before)
+        self.assertIsNone(snapshot(self.target))
+        transaction.unlink()
+        held.rename(transaction)
+        self.recover()
+        self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "directory symlink requires Windows privileges")
+    def test_rollback_rejects_a_linked_transaction_backup_component(self):
+        if not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        self.v52_layout()
+        receipt_path = self.installed()
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        active = snapshot(self.target)
+        backup_dir = Path(receipt["backup"]).parent
+        held = self.base / "held-backup"
+        backup_dir.rename(held)
+        os.symlink(held, backup_dir, target_is_directory=True)
+        foreign_before = snapshot(held)
+        recorded = receipt_path.read_bytes()
+        refused = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(receipt_path.read_bytes(), recorded)
+        self.assertEqual(snapshot(held), foreign_before)
+        self.assertEqual(snapshot(self.target), active)
+        self.assertFalse((self.state() / "CURRENT").exists())
+        backup_dir.unlink()
+        held.rename(backup_dir)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+
+    @unittest.skipIf(os.name == "nt", "directory symlink requires Windows privileges")
+    def test_recover_rejects_a_linked_derived_restore_directory(self):
+        if not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        before, parked = self.crash_after_parking()
+        current = self.state() / "CURRENT"
+        journal = self.state() / current.read_text(encoding="utf-8").strip()
+        journal_before = journal.read_bytes()
+        shutil.rmtree(parked)
+        foreign = self.base / "foreign-restore"
+        foreign.mkdir()
+        (foreign / "marker").write_bytes(b"untouched\n")
+        foreign_before = snapshot(foreign)
+        restore_dir = parked.parent / "restore"
+        os.symlink(foreign, restore_dir, target_is_directory=True)
+        refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                     "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(journal.read_bytes(), journal_before)
+        self.assertEqual(snapshot(foreign), foreign_before)
+        self.assertTrue(current.exists())
+        self.assertIsNone(snapshot(self.target))
+        restore_dir.unlink()
+        self.recover()
+        self.assertEqual(snapshot(self.target), before)
+
+    def test_duplicate_metadata_is_bound_to_the_retired_copy_and_skill_roots(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        self.v52_layout(target)
+        self.v52_layout(legacy)
+        plan = self.plan("codex")
+        crashed = self.apply(plan, "--retire-duplicate", legacy,
+                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        journal = state / current.read_text(encoding="utf-8").strip()
+        original = json.loads(journal.read_text(encoding="utf-8"))
+        foreign = self.base / "foreign"
+        foreign.mkdir()
+        (foreign / "marker").write_bytes(b"untouched\n")
+        foreign_before = snapshot(foreign)
+        pristine = self.base / "pristine-home"
+        shutil.copytree(self.home, pristine)
+        for field in ("from", "to", "backup"):
+            with self.subTest(field=field):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home)
+                forged = json.loads(json.dumps(original))
+                forged["moves"][0][field] = str(foreign / field)
+                journal.write_text(json.dumps(forged), encoding="utf-8")
+                recorded = journal.read_bytes()
+                refused = self.run_installer("recover", "--runtime", "codex", "--home", self.home,
+                                             "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(journal.read_bytes(), recorded)
+                self.assertEqual(snapshot(foreign), foreign_before)
+                self.assertEqual(current.read_text(encoding="utf-8").strip(), str(journal.relative_to(state)))
+        shutil.rmtree(self.home)
+        shutil.copytree(pristine, self.home)
+        self.recover("codex")
+
+        installed = self.apply(plan, "--retire-duplicate", legacy)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        receipt_path = Path(json.loads(installed.stdout)["receipt"])
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        active = snapshot(target)
+        installed_home = self.base / "installed-home"
+        shutil.copytree(self.home, installed_home)
+        for field in ("path", "retired_to", "backup"):
+            with self.subTest(receipt_field=field):
+                shutil.rmtree(self.home)
+                shutil.copytree(installed_home, self.home)
+                forged = json.loads(json.dumps(receipt))
+                forged["duplicates"][0][field] = str(foreign / field)
+                receipt_path.write_text(json.dumps(forged), encoding="utf-8")
+                recorded = receipt_path.read_bytes()
+                refused = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(receipt_path.read_bytes(), recorded)
+                self.assertEqual(snapshot(target), active)
+                self.assertEqual(snapshot(foreign), foreign_before)
+                self.assertFalse((state / "CURRENT").exists())
+
     def test_recover_restores_from_backup_when_parked_copy_drifted(self):
         before, parked = self.crash_after_parking()
         (parked / "local-notes.md").write_bytes(b"changed while parked\n")
