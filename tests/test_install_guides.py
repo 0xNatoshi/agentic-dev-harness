@@ -217,11 +217,14 @@ $receiptPath = $env:HARNESS_GUIDE_EXTERNAL_RECEIPT
             with self.subTest(guide=guide):
                 self.poison_marker.unlink(missing_ok=True)
                 result, _, target, original = self.run_skill_rollback(guide, altered_receipt=True)
+                runtime = "codex" if guide == "INSTALL-CODEX.md" else "claude"
+                self.assertTrue((self.base / (runtime + "-canonical.txt")).is_file(),
+                                "The authentic apply must complete before the altered-receipt refusal is tested: "
+                                + result.stdout + result.stderr)
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertFalse(self.poison_marker.exists(), "An external receipt selected executable code")
                 self.assertEqual((target / "operator-notes.txt").read_bytes(), original["operator-notes.txt"])
                 self.assertNotEqual((target / "SKILL.md").read_bytes(), original["SKILL.md"])
-                runtime = "codex" if guide == "INSTALL-CODEX.md" else "claude"
                 canonical = Path((self.base / (runtime + "-canonical.txt")).read_text(encoding="utf-8"))
                 receipt = json.loads(canonical.read_text(encoding="utf-8"))
                 self.assertEqual(receipt["state"], "installed")
