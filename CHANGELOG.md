@@ -4,6 +4,7 @@
 
 Development version: 6.5.0. These are unreleased source changes; existing release tags and assets remain immutable (next package-version delivery is tracked in #63).
 
+- Bind recovery selectors, journals, receipts and duplicate moves to the selected install state and generated transaction paths (#83). Reject malformed or linked transaction metadata before rollback or recovery changes state, write the staged apply journal before its crash checkpoint, and retain `CURRENT` when a journal is missing so the operator can inspect uncertain recovery data.
 - Authenticate captured package ZIP bytes before any bundled code or Python discovery in both Windows installation guides. Create a fresh verified workspace, retain archive-member checks before full extraction, isolate Python startup, and exercise substituted packages and Windows PowerShell in the guide regression gate (#81).
 
 - Bind every operative push to the verified origin and intended branch refspec, pin exported CI actions with upstream provenance, disable checkout credential persistence and propagate the standing local-review policy across the active family (#82, #87, #90, #98). Add source gates and disposable execution proofs; preserve prior template snapshots.

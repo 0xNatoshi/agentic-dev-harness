@@ -49,3 +49,35 @@ jobs:
       - name: Exercise installation guides with Windows PowerShell
         shell: powershell
         run: python -m unittest tests.test_install_guides -v
+
+  windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Inspect native temporary-volume ownership
+        shell: powershell
+        run: |
+          $root = [IO.Path]::GetPathRoot([IO.Path]::GetTempPath())
+          $acl = Get-Acl -LiteralPath $root -ErrorAction Stop
+          $raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+          [ordered]@{
+            path = $root
+            owner_sid = $raw.Owner.Value
+            dacl_present = [bool]($raw.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclPresent)
+            dacl_null = ($null -eq $raw.DiscretionaryAcl)
+          } | ConvertTo-Json -Compress
+      - name: Verify native volume owner boundary
+        run: python -m unittest tests.test_installer.InstallerTests.test_windows_accepts_native_volume_root_only_as_an_ancestor -v
+      - name: Verify installer transactions and junctions
+        run: python -m unittest tests.test_installer -v
+      - name: Prove native DACL regressions on the unfixed and fixed installers
+        run: python tests/prove_state_ownership.py

@@ -85,6 +85,15 @@ def unlink_directory(link: Path) -> None:
         os.unlink(link)
 
 
+def relocated_transaction(value, old: Path, new: Path):
+    """Rebind every generated receipt path while preserving its valid schema."""
+    if isinstance(value, dict):
+        return {key: relocated_transaction(item, old, new) for key, item in value.items()}
+    if isinstance(value, list):
+        return [relocated_transaction(item, old, new) for item in value]
+    return value.replace(str(old), str(new)) if isinstance(value, str) else value
+
+
 class InstallerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -146,6 +155,56 @@ sys.exit(installer.main(sys.argv[3:]))
         return subprocess.run([sys.executable, "-B", "-c", runner, str(self.installer), json.dumps(limits),
                                *map(str, arguments)], cwd=self.base, env=self.environment(), capture_output=True,
                               text=True, encoding="utf-8", timeout=120)
+
+    def run_with_state_drift(self, trigger, *arguments, env=None):
+        """Exercise the public command after a deterministic filesystem callback changes state permissions."""
+        runner = """import importlib.util, os, pathlib, stat, sys
+spec = importlib.util.spec_from_file_location('harness_state_drift_install', sys.argv[1])
+installer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(installer)
+trigger, state, target = sys.argv[2], pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4])
+drifted = False
+def change_state():
+    global drifted
+    if not drifted:
+        state.chmod(stat.S_IMODE(state.stat().st_mode) | stat.S_IWGRP)
+        drifted = True
+original_rename = installer.rename
+def rename(source, destination, point):
+    try:
+        result = original_rename(source, destination, point)
+    except OSError:
+        if trigger == point + ':fault':
+            change_state()
+        raise
+    if point == trigger:
+        change_state()
+    return result
+installer.rename = rename
+original_discoverable = installer.discoverable
+def discoverable(roots):
+    result = original_discoverable(roots)
+    if trigger == 'apply:post-rename-discovery' and (state / 'CURRENT').exists() and target.exists():
+        change_state()
+    return result
+installer.discoverable = discoverable
+original_write_json = installer.write_json
+def write_json(path, value, *args, **kwargs):
+    result = original_write_json(path, value, *args, **kwargs)
+    if isinstance(value, dict):
+        if trigger == 'apply:receipt' and value.get('receipt_format') == 1 and value.get('state') == 'installed':
+            change_state()
+        if trigger == 'rollback:receipt' and value.get('receipt_format') == 1 and value.get('state') == 'rolled back':
+            change_state()
+        if path.name == 'journal.json' and value.get('state') == 'committed' and trigger == value.get('operation') + ':committed':
+            change_state()
+    return result
+installer.write_json = write_json
+sys.exit(installer.main(sys.argv[5:]))
+"""
+        return subprocess.run([sys.executable, "-B", "-c", runner, str(self.installer), trigger,
+                               str(self.state()), str(self.target), *map(str, arguments)], cwd=self.base,
+                              env=self.environment(env), capture_output=True, text=True, encoding="utf-8", timeout=120)
 
     def run_recorded(self, command, *extra):
         """Run a recorded argument list as the operator would, without the test's -B or installer path."""
@@ -836,6 +895,469 @@ sys.exit(installer.main(sys.argv[3:]))
         self.assertEqual([item["path"] for item in json.loads(result.stderr)["details"]], ["SKILL.md"])
         self.assertEqual(snapshot(self.target), edited)
 
+    def test_apply_requires_integer_plan_format_before_installing(self):
+        for label, plan_format in (("boolean", True), ("float", 1.0), ("integer", 1)):
+            with self.subTest(plan_format=label):
+                self.home = self.base / label
+                self.home.mkdir()
+                before = self.v52_layout()
+                plan = self.plan()
+                value = json.loads(plan.read_text(encoding="utf-8"))
+                value["plan_format"] = plan_format
+                plan.write_text(json.dumps(value), encoding="utf-8")
+                saved_plan = plan.read_bytes()
+
+                result = self.apply(plan)
+                if label == "integer":
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    receipt = Path(json.loads(result.stdout)["receipt"])
+                    self.assertTrue(receipt.is_file())
+                    self.assertNotEqual(snapshot(self.target), before)
+                    self.assertFalse((self.state() / "CURRENT").exists())
+                else:
+                    self.assert_refused(result, 1)
+                    self.assertIn("Unsupported plan format", json.loads(result.stderr)["error"])
+                    self.assertEqual(snapshot(self.target), before)
+                    self.assertFalse(self.state().exists())
+                self.assertEqual(plan.read_bytes(), saved_plan)
+
+    def test_apply_refuses_malformed_operational_plan_as_json_before_lock(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        original = json.loads(plan.read_text(encoding="utf-8"))
+        operative = (
+            "installer_version", "runtime", "home", "config_root", "target", "skill_roots", "state_root",
+            "package", "retirement_list", "before", "classification", "retirements", "retirement_copies",
+            "duplicates", "duplicate_inventories",
+        )
+        malformed = [(f"missing {field}", field, "missing") for field in operative]
+        wrong_type = {field: [] for field in operative}
+        wrong_type.update(skill_roots={}, retirements={}, duplicates={})
+        malformed.extend((f"wrong type {field}", field, wrong_type[field]) for field in operative)
+        malformed.extend((f"null {field}", field, None) for field in operative if field != "before")
+        malformed.extend([
+            ("home has NUL", "home", str(self.home) + "\x00"),
+            ("config is not normalized", "config_root", str(self.home / ".claude" / "..")),
+            ("target has NUL", "target", str(self.target) + "\x00"),
+            ("state has NUL", "state_root", str(self.state()) + "\x00"),
+            ("skill root has NUL", "skill_roots", [str(self.roots[0]) + "\x00"]),
+            ("duplicate has NUL", "duplicates", [str(self.roots[0] / "copy") + "\x00"]),
+            ("duplicate inventory has NUL", "duplicate_inventories", {str(self.roots[0]) + "\x00": {}}),
+            ("package source has NUL", "package", {**original["package"], "source": str(self.package) + "\x00"}),
+            ("package source is not a path", "package", {**original["package"], "source": 42}),
+            ("package archive field missing", "package",
+             {key: item for key, item in original["package"].items() if key != "archive_sha256"}),
+            ("before inventory path has NUL", "before",
+             {**original["before"], "bad\x00": original["before"]["SKILL.md"]}),
+            ("classification path has NUL", "classification",
+             {**original["classification"], "bad\x00": "package"}),
+            ("retirement copy root has NUL", "retirement_copies",
+             {**original["retirement_copies"], "state_root": str(self.state()) + "\x00"}),
+            ("retirement copy transaction field missing", "retirement_copies",
+             {key: item for key, item in original["retirement_copies"].items() if key != "transaction"}),
+        ])
+        for field in original["package"]:
+            malformed.append((f"package field missing {field}", "package",
+                              {key: item for key, item in original["package"].items() if key != field}))
+            malformed.append((f"package field wrong type {field}", "package",
+                              {**original["package"], field: []}))
+            if field != "archive_sha256":
+                malformed.append((f"package field null {field}", "package",
+                                  {**original["package"], field: None}))
+        malformed.append(("package manifest hash is an integer", "package",
+                          {**original["package"], "manifest_sha256": 42}))
+        for label, field, replacement in malformed:
+            with self.subTest(label=label):
+                # Each candidate starts from the same disposable before-state, even on an unfixed installer
+                # that wrongly opened state or applied a malformed plan in an earlier candidate.
+                shutil.rmtree(self.state(), ignore_errors=True)
+                shutil.rmtree(self.target, ignore_errors=True)
+                before = self.v52_layout()
+                value = json.loads(json.dumps(original))
+                if replacement == "missing":
+                    del value[field]
+                else:
+                    value[field] = replacement
+                plan.write_text(json.dumps(value), encoding="utf-8")
+                saved = plan.read_bytes()
+                refused = self.apply(plan)
+                self.assert_refused(refused, 1)
+                self.assertIn("plan", json.loads(refused.stderr)["error"])
+                self.assertEqual(snapshot(self.target), before)
+                self.assertFalse(self.state().exists())
+                self.assertFalse((self.state() / "LOCK").exists())
+                self.assertFalse((self.state() / "CURRENT").exists())
+                self.assertEqual(plan.read_bytes(), saved)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit authority; Windows DACL cases are exercised separately")
+    def test_apply_refuses_untrusted_state_or_parent_without_creating_lock(self):
+        for unsafe in ("state", "parent"):
+            with self.subTest(unsafe=unsafe):
+                self.home = self.base / unsafe
+                self.home.mkdir()
+                before = self.v52_layout()
+                plan = self.plan()
+                path = self.state() if unsafe == "state" else self.state().parent
+                if unsafe == "state":
+                    path.mkdir()
+                path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IWGRP)
+                mode = stat.S_IMODE(path.stat().st_mode)
+                witness = self.home / "witness.txt"
+                witness.write_bytes(b"outside the installer state\n")
+                state_before = snapshot(self.state())
+                result = self.apply(plan)
+                self.assert_refused(result, 2)
+                self.assertIn("not protected", json.loads(result.stderr)["error"])
+                self.assertEqual(snapshot(self.target), before)
+                self.assertEqual(snapshot(self.state()), state_before)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), mode)
+                self.assertFalse((self.state() / "LOCK").exists())
+                self.assertFalse((self.state() / "CURRENT").exists())
+                self.assertEqual(witness.read_bytes(), b"outside the installer state\n")
+
+    @unittest.skipIf(os.name == "nt", "relative POSIX link targets; Windows junction paths have native coverage")
+    def test_apply_refuses_an_unsafe_intermediate_link_destination(self):
+        for target_style in ("absolute", "relative"):
+            with self.subTest(target_style=target_style):
+                case = self.base / target_style
+                safe, middle, real = (case / name for name in ("safe", "middle", "real"))
+                safe.mkdir(parents=True)
+                middle.mkdir()
+                middle.chmod(0o777)
+                real_home = real / "home"
+                real_home.mkdir(parents=True)
+                alias = safe / "home"
+                first = str(middle / "hop") if target_style == "absolute" else "../middle/hop"
+                second = str(real_home) if target_style == "absolute" else "../real/home"
+                os.symlink(first, alias, target_is_directory=True)
+                os.symlink(second, middle / "hop", target_is_directory=True)
+                self.home = alias
+                before = self.v52_layout()
+                plan = self.plan()
+                witness = middle / "witness.txt"
+                witness.write_bytes(b"intermediate directory witness\n")
+                state_before = snapshot(self.state())
+                refused = self.apply(plan)
+                self.assert_refused(refused, 2)
+                self.assertIn("not protected", json.loads(refused.stderr)["error"])
+                self.assertEqual(snapshot(self.target), before)
+                self.assertEqual(snapshot(self.state()), state_before)
+                self.assertFalse((self.state() / "LOCK").exists())
+                self.assertEqual(witness.read_bytes(), b"intermediate directory witness\n")
+                self.assertEqual(os.readlink(alias), first)
+                self.assertEqual(os.readlink(middle / "hop"), second)
+                middle.chmod(0o700)
+                applied = self.apply(plan)
+                self.assertEqual(applied.returncode, 0, applied.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit authority; Windows DACL cases are exercised separately")
+    def test_recover_refuses_untrusted_selector_or_journal_before_creating_lock(self):
+        for unsafe in ("CURRENT", "journal.json"):
+            with self.subTest(unsafe=unsafe):
+                self.home = self.base / ("recover-" + unsafe)
+                self.home.mkdir()
+                before = self.v52_layout()
+                plan = self.plan()
+                crashed = self.apply(plan, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                state = self.state()
+                (state / "LOCK").unlink()
+                current = state / "CURRENT"
+                journal = state / current.read_text(encoding="utf-8").strip()
+                control = current if unsafe == "CURRENT" else journal
+                control.chmod(stat.S_IMODE(control.stat().st_mode) | stat.S_IWGRP)
+                target_before, state_before = snapshot(self.target), snapshot(state)
+                witness = self.home / "witness.txt"
+                witness.write_bytes(b"outside the installer state\n")
+                result = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+                self.assert_refused(result, 2)
+                self.assertEqual(snapshot(self.target), target_before)
+                self.assertEqual(snapshot(state), state_before)
+                self.assertFalse((state / "LOCK").exists())
+                self.assertEqual(witness.read_bytes(), b"outside the installer state\n")
+                control.chmod(stat.S_IMODE(control.stat().st_mode) & ~stat.S_IWGRP)
+                recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertEqual(json.loads(recovered.stdout)["result"], "restored")
+                self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit authority; Windows DACL cases are exercised separately")
+    def test_rollback_refuses_untrusted_canonical_receipt_before_creating_lock(self):
+        before = self.v52_layout()
+        receipt = self.installed()
+        (self.state() / "LOCK").unlink()
+        receipt.chmod(stat.S_IMODE(receipt.stat().st_mode) | stat.S_IWGRP)
+        state_before, target_before = snapshot(self.state()), snapshot(self.target)
+        witness = self.home / "witness.txt"
+        witness.write_bytes(b"outside the installer state\n")
+        result = self.run_installer("rollback", "--receipt", receipt, "--maintenance-confirmed")
+        self.assert_refused(result, 2)
+        self.assertEqual(snapshot(self.state()), state_before)
+        self.assertEqual(snapshot(self.target), target_before)
+        self.assertFalse((self.state() / "LOCK").exists())
+        self.assertEqual(witness.read_bytes(), b"outside the installer state\n")
+        receipt.chmod(stat.S_IMODE(receipt.stat().st_mode) & ~stat.S_IWGRP)
+        restored = self.run_installer("rollback", "--receipt", receipt, "--maintenance-confirmed")
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires a real macOS extended ACL")
+    def test_apply_refuses_inheritable_mac_acl_before_creating_state(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        parent = self.state().parent
+        parent.chmod(0o700)
+        subprocess.run(["chmod", "+a", "everyone allow add_file,delete_child,file_inherit,directory_inherit",
+                        str(parent)], check=True, capture_output=True)
+        self.addCleanup(lambda: subprocess.run(["chmod", "-N", str(parent)], check=True, capture_output=True))
+        acl_before = subprocess.run(["ls", "-lde", str(parent)], check=True, capture_output=True).stdout
+        witness = self.home / "witness.txt"
+        witness.write_bytes(b"outside the installer state\n")
+        refused = self.apply(plan)
+        self.assert_refused(refused, 2)
+        self.assertEqual(snapshot(self.target), before)
+        self.assertFalse(self.state().exists())
+        self.assertEqual(subprocess.run(["ls", "-lde", str(parent)], check=True, capture_output=True).stdout, acl_before)
+        self.assertEqual(witness.read_bytes(), b"outside the installer state\n")
+        subprocess.run(["chmod", "-N", str(parent)], check=True, capture_output=True)
+        installed = self.apply(plan)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires a real macOS extended ACL")
+    def test_recover_refuses_mac_acl_on_journal_before_creating_lock(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        crashed = self.apply(plan, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.state()
+        (state / "LOCK").unlink()
+        journal = state / (state / "CURRENT").read_text(encoding="utf-8").strip()
+        self.assertEqual(stat.S_IMODE(journal.stat().st_mode), 0o600)
+        subprocess.run(["chmod", "+a", "everyone allow write,delete,writesecurity", str(journal)],
+                       check=True, capture_output=True)
+        self.addCleanup(lambda: subprocess.run(["chmod", "-N", str(journal)], check=True, capture_output=True))
+        acl_before = subprocess.run(["ls", "-le", str(journal)], check=True, capture_output=True).stdout
+        target_before, state_before = snapshot(self.target), snapshot(state)
+        refused = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assert_refused(refused, 2)
+        self.assertEqual(snapshot(self.target), target_before)
+        self.assertEqual(snapshot(state), state_before)
+        self.assertFalse((state / "LOCK").exists())
+        self.assertEqual(subprocess.run(["ls", "-le", str(journal)], check=True, capture_output=True).stdout, acl_before)
+        subprocess.run(["chmod", "-N", str(journal)], check=True, capture_output=True)
+        recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires a real macOS extended ACL")
+    def test_mac_inherited_read_acl_allows_private_install(self):
+        self.v52_layout()
+        plan = self.plan()
+        parent = self.state().parent
+        parent.chmod(0o700)
+        subprocess.run(["chmod", "+a", "everyone allow read,file_inherit,directory_inherit", str(parent)],
+                       check=True, capture_output=True)
+        self.addCleanup(lambda: subprocess.run(["chmod", "-N", str(parent)], check=True, capture_output=True))
+        installed = self.apply(plan)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertTrue((self.state() / "LOCK").is_file())
+
+    @unittest.skipUnless(os.name == "nt", "requires a real Windows DACL")
+    def test_windows_accepts_native_volume_root_only_as_an_ancestor(self):
+        spec = importlib.util.spec_from_file_location("harness_native_volume_owner", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        root = Path(self.base.anchor)
+        # A second native implementation observes the owner without changing volume permissions.
+        # Python launched by PowerShell 7 inherits module paths that Windows PowerShell 5.1 cannot load.
+        observer_env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+        observer_env["HARNESS_NATIVE_VOLUME"] = str(root)
+        observation = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "$ErrorActionPreference = 'Stop'; "
+             "$acl = Get-Acl -LiteralPath $env:HARNESS_NATIVE_VOLUME -ErrorAction Stop; "
+             "$raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0); "
+             "$raw.Owner.Value"],
+            # PowerShell may initialize profile-local module metadata; only installer processes use the guard.
+            env=observer_env,
+            capture_output=True, text=True, encoding="utf-8", timeout=30,
+        )
+        self.assertEqual(observation.returncode, 0, observation.stderr + observation.stdout)
+        observed = observation.stdout.strip()
+        self.assertRegex(observed, r"\AS-\d+-\d+(?:-\d+)+\Z")
+        installer._windows_control_component(root, "ancestor")
+        if observed == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464":
+            with self.assertRaisesRegex(installer.UntrustedState, "owner SID is not trusted for this role"):
+                installer._windows_control_component(root, "container")
+
+    @unittest.skipUnless(os.name == "nt", "requires a real Windows DACL")
+    def test_windows_refuses_foreign_write_dacl_before_creating_lock(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        self.state().mkdir()
+        witness = self.home / "witness.txt"
+        witness.write_bytes(b"outside the installer state\n")
+        subprocess.run(["icacls", str(self.state()), "/grant", "*S-1-1-0:(W)"], check=True, capture_output=True)
+        acl_before = subprocess.run(["icacls", str(self.state())], check=True, capture_output=True).stdout
+        state_before = snapshot(self.state())
+        refused = self.apply(plan)
+        self.assert_refused(refused, 2)
+        self.assertIn(str(self.state()).casefold(), json.loads(refused.stderr)["error"].casefold())
+        self.assertIn("another principal has a DACL mutation grant", json.loads(refused.stderr)["error"])
+        self.assertEqual(snapshot(self.target), before)
+        self.assertEqual(snapshot(self.state()), state_before)
+        self.assertFalse((self.state() / "LOCK").exists())
+        self.assertEqual(witness.read_bytes(), b"outside the installer state\n")
+        self.assertEqual(subprocess.run(["icacls", str(self.state())], check=True, capture_output=True).stdout,
+                         acl_before)
+
+    @unittest.skipUnless(os.name == "nt", "requires a real Windows DACL")
+    def test_windows_recover_refuses_delete_child_or_write_dac(self):
+        for label, right in (("container", "DC"), ("CURRENT", "WDAC")):
+            with self.subTest(right=right):
+                self.home = self.base / label
+                self.home.mkdir()
+                before = self.v52_layout()
+                plan = self.plan()
+                crashed = self.apply(plan, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                state = self.state()
+                (state / "LOCK").unlink()
+                control = state if label == "container" else state / "CURRENT"
+                witness = self.home / "witness.txt"
+                witness.write_bytes(b"outside the installer state\n")
+                subprocess.run(["icacls", str(control), "/grant", f"*S-1-1-0:({right})"],
+                               check=True, capture_output=True)
+                acl_before = subprocess.run(["icacls", str(control)], check=True, capture_output=True).stdout
+                target_before, state_before = snapshot(self.target), snapshot(state)
+                refused = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+                self.assert_refused(refused, 2)
+                self.assertIn(str(control).casefold(), json.loads(refused.stderr)["error"].casefold())
+                self.assertIn("another principal has a DACL mutation grant", json.loads(refused.stderr)["error"])
+                self.assertEqual(snapshot(self.target), target_before)
+                self.assertEqual(snapshot(state), state_before)
+                self.assertFalse((state / "LOCK").exists())
+                self.assertEqual(witness.read_bytes(), b"outside the installer state\n")
+                self.assertEqual(subprocess.run(["icacls", str(control)], check=True, capture_output=True).stdout,
+                                 acl_before)
+                self.assertIsNone(target_before)
+                self.assertIsNotNone(before)
+
+    @unittest.skipUnless(os.name == "nt", "requires real Windows junctions and DACLs")
+    def test_windows_refuses_unsafe_intermediate_junction_destination(self):
+        case = self.base / "junction-chain"
+        safe, middle, real = (case / name for name in ("safe", "middle", "real"))
+        safe.mkdir(parents=True)
+        middle.mkdir()
+        real_home = real / "home"
+        real_home.mkdir(parents=True)
+        link_directory(middle / "hop", real_home)
+        alias = safe / "home"
+        link_directory(alias, middle / "hop")
+        self.home = alias
+        before = self.v52_layout()
+        plan = self.plan()
+        witness = middle / "witness.txt"
+        witness.write_bytes(b"intermediate junction witness\n")
+        subprocess.run(["icacls", str(middle), "/grant", "*S-1-1-0:(DC)"], check=True, capture_output=True)
+        state_before = snapshot(self.state())
+        refused = self.apply(plan)
+        self.assert_refused(refused, 2)
+        self.assertIn(str(middle).casefold(), json.loads(refused.stderr)["error"].casefold())
+        self.assertIn("another principal has a DACL mutation grant", json.loads(refused.stderr)["error"])
+        self.assertEqual(snapshot(self.target), before)
+        self.assertEqual(snapshot(self.state()), state_before)
+        self.assertFalse((self.state() / "LOCK").exists())
+        self.assertEqual(witness.read_bytes(), b"intermediate junction witness\n")
+
+    @unittest.skipUnless(os.name == "nt", "requires a real Windows DACL")
+    def test_windows_safe_read_inheritance_allows_install_and_rollback(self):
+        before = self.v52_layout()
+        parent = self.state().parent
+        subprocess.run(["icacls", str(parent), "/grant", "*S-1-1-0:(OI)(CI)(RX)"],
+                       check=True, capture_output=True)
+        receipt = self.installed()
+        restored = self.run_installer("rollback", "--receipt", receipt, "--maintenance-confirmed")
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX umask does not define Windows DACL creation")
+    def test_new_control_metadata_is_private_even_with_permissive_umask(self):
+        self.v52_layout()
+        plan = self.plan()
+        launcher = ("import os, runpy, sys; os.umask(0); "
+                    "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')")
+        applied = subprocess.run([sys.executable, "-B", "-c", launcher, str(self.installer), "apply", "--plan", str(plan),
+                                  "--checksums", str(self.checksums), "--maintenance-confirmed"], cwd=self.base,
+                                 env=self.environment(), capture_output=True, text=True, encoding="utf-8", timeout=120)
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        receipt = Path(json.loads(applied.stdout)["receipt"])
+        transaction = receipt.parent
+        for directory in (self.state(), transaction, transaction / "installer"):
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700, directory)
+        for control in (self.state() / "LOCK", receipt, transaction / "journal.json",
+                        transaction / "installer" / "install.py"):
+            self.assertEqual(stat.S_IMODE(control.stat().st_mode), 0o600, control)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mkdir race; Windows CreateDirectoryW needs native DACL coverage")
+    def test_concurrent_private_state_creation_rechecks_existing_directory(self):
+        runner = """import errno, importlib.util, os, pathlib, sys
+spec = importlib.util.spec_from_file_location('harness_raced_install', sys.argv[1])
+installer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(installer)
+state, unsafe = pathlib.Path(sys.argv[2]), sys.argv[3] == 'unsafe'
+original = os.mkdir
+raced = False
+def mkdir(path, *args, **kwargs):
+    global raced
+    if not raced and os.fspath(path) == os.fspath(state):
+        raced = True
+        original(path, *args, **kwargs)
+        if unsafe:
+            os.chmod(path, 0o777)
+        raise FileExistsError(errno.EEXIST, 'created concurrently', os.fspath(path))
+    return original(path, *args, **kwargs)
+os.mkdir = mkdir
+sys.exit(installer.main(sys.argv[4:]))
+"""
+        for kind in ("safe", "unsafe"):
+            with self.subTest(kind=kind):
+                self.home = self.base / ("concurrent-" + kind)
+                self.home.mkdir()
+                before = self.v52_layout()
+                plan = self.plan()
+                witness = self.home / "witness.txt"
+                witness.write_bytes(b"outside installer state\n")
+                result = subprocess.run([sys.executable, "-B", "-c", runner, str(self.installer), str(self.state()), kind,
+                                         "apply", "--plan", str(plan), "--checksums", str(self.checksums),
+                                         "--maintenance-confirmed"], cwd=self.base, env=self.environment(),
+                                        capture_output=True, text=True, encoding="utf-8", timeout=120)
+                if kind == "safe":
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(stat.S_IMODE(self.state().stat().st_mode), 0o700)
+                    self.assertTrue((self.state() / "LOCK").is_file())
+                    self.assertNotEqual(snapshot(self.target), before)
+                else:
+                    self.assert_refused(result, 2)
+                    self.assertEqual(stat.S_IMODE(self.state().stat().st_mode), 0o777)
+                    self.assertFalse((self.state() / "LOCK").exists())
+                    self.assertFalse((self.state() / "CURRENT").exists())
+                    self.assertEqual(snapshot(self.target), before)
+                self.assertEqual(witness.read_bytes(), b"outside installer state\n")
+
+    @unittest.skipIf(os.name == "nt", "legacy POSIX modes are separate from Windows DACLs")
+    def test_legacy_public_read_control_modes_remain_usable(self):
+        before = self.v52_layout()
+        receipt = self.installed()
+        transaction = receipt.parent
+        self.state().chmod(0o755)
+        transaction.chmod(0o755)
+        for control in (self.state() / "LOCK", receipt, transaction / "journal.json"):
+            control.chmod(0o644)
+        rolled_back = self.run_installer("rollback", "--receipt", receipt, "--maintenance-confirmed")
+        self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
+        self.assertEqual(snapshot(self.target), before)
+
     def test_apply_refuses_plan_drift(self):
         self.v52_layout()
         plan = self.plan()
@@ -906,7 +1428,16 @@ sys.exit(installer.main(sys.argv[3:]))
         plan.write_text(json.dumps(value), encoding="utf-8")
         result = self.apply(plan)
         self.assert_refused(result, 1)
-        self.assertEqual(json.loads(result.stderr)["details"], ["installer_version", "retirements", "retirement_copies"])
+        self.assertEqual(json.loads(result.stderr)["details"], ["retirements", "retirement_copies"])
+        self.assertEqual(snapshot(self.target), before)
+        self.assertFalse(self.state().exists())
+        # A complete old-version plan still reaches the value-drift comparison under the lock.
+        value = json.loads(self.plan().read_text(encoding="utf-8"))
+        value["installer_version"] = "1.0.0"
+        plan.write_text(json.dumps(value), encoding="utf-8")
+        result = self.apply(plan)
+        self.assert_refused(result, 1)
+        self.assertEqual(json.loads(result.stderr)["details"], ["installer_version"])
         self.assertEqual(snapshot(self.target), before)
         self.assertFalse((self.state() / "CURRENT").exists())
 
@@ -937,6 +1468,111 @@ sys.exit(installer.main(sys.argv[3:]))
         self.assertEqual(recover.returncode, 0, recover.stderr)
         self.assertEqual(snapshot(self.target), before)
         self.assertFalse((self.state() / "CURRENT").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode drift; Windows DACL trust is qualified natively")
+    def test_apply_lost_state_protection_after_renames_reports_incomplete(self):
+        for trigger in ("apply:park", "apply:post-rename-discovery", "apply:receipt", "apply:committed"):
+            with self.subTest(trigger=trigger):
+                self.home = self.base / trigger.replace(":", "-")
+                self.home.mkdir()
+                before = self.v52_layout()
+                plan = self.plan()
+                witness = self.home / "witness.txt"
+                witness.write_bytes(b"outside recovery data\n")
+                result = self.run_with_state_drift(trigger, "apply", "--plan", plan, "--checksums", self.checksums,
+                                                   "--maintenance-confirmed")
+                self.assert_refused(result, 3)
+                report = json.loads(result.stderr)
+                self.assertIn("CURRENT", report["error"])
+                self.assertIn("recover", report["error"])
+                current = self.state() / "CURRENT"
+                self.assertTrue(current.is_file())
+                journal = self.state() / current.read_text(encoding="utf-8").strip()
+                transaction = journal.parent
+                self.assertTrue((transaction / "backup" / "github-workflow").is_dir())
+                self.assertTrue(stat.S_IMODE(self.state().stat().st_mode) & stat.S_IWGRP)
+                self.assertEqual(witness.read_bytes(), b"outside recovery data\n")
+                if trigger == "apply:park":
+                    self.assertIsNone(snapshot(self.target))
+                else:
+                    self.assertNotEqual(snapshot(self.target), before)
+                self.state().chmod(stat.S_IMODE(self.state().stat().st_mode) & ~stat.S_IWGRP)
+                recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertFalse(current.exists())
+                if trigger == "apply:committed":
+                    self.assertEqual(json.loads(recovered.stdout)["result"], "already committed")
+                    self.assertNotEqual(snapshot(self.target), before)
+                else:
+                    self.assertEqual(json.loads(recovered.stdout)["result"], "restored")
+                    self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode drift; Windows DACL trust is qualified natively")
+    def test_rollback_lost_state_protection_during_finalization_reports_incomplete(self):
+        for trigger in ("rollback:committed", "rollback:receipt"):
+            with self.subTest(trigger=trigger):
+                self.home = self.base / trigger.replace(":", "-")
+                self.home.mkdir()
+                before = self.v52_layout()
+                receipt = self.installed()
+                result = self.run_with_state_drift(trigger, "rollback", "--receipt", receipt,
+                                                   "--maintenance-confirmed")
+                self.assert_refused(result, 3)
+                self.assertIn("recover", json.loads(result.stderr)["error"])
+                current = self.state() / "CURRENT"
+                self.assertTrue(current.is_file())
+                self.assertEqual(snapshot(self.target), before)
+                self.assertTrue(stat.S_IMODE(self.state().stat().st_mode) & stat.S_IWGRP)
+                self.state().chmod(stat.S_IMODE(self.state().stat().st_mode) & ~stat.S_IWGRP)
+                recovered = self.run_installer("recover", "--receipt", receipt, "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertEqual(json.loads(recovered.stdout)["result"], "already committed")
+                self.assertFalse(current.exists())
+                self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["state"], "rolled back")
+                self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode drift; Windows DACL trust is qualified natively")
+    def test_recover_lost_state_protection_after_restoration_reports_incomplete(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        crashed = self.apply(plan, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        self.assertTrue(current.is_file())
+        result = self.run_with_state_drift("apply:undo-park", "recover", "--plan", plan,
+                                           "--maintenance-confirmed")
+        self.assert_refused(result, 3)
+        self.assertIn("recover", json.loads(result.stderr)["error"])
+        self.assertTrue(current.is_file())
+        self.assertEqual(snapshot(self.target), before)
+        self.assertTrue(stat.S_IMODE(self.state().stat().st_mode) & stat.S_IWGRP)
+        self.state().chmod(stat.S_IMODE(self.state().stat().st_mode) & ~stat.S_IWGRP)
+        recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(json.loads(recovered.stdout)["result"], "restored")
+        self.assertFalse(current.exists())
+        self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode drift; Windows DACL trust is qualified natively")
+    def test_journal_error_recording_does_not_mask_incomplete_restoration(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        result = self.run_with_state_drift("apply:undo-park:fault", "apply", "--plan", plan,
+                                           "--checksums", self.checksums, "--maintenance-confirmed",
+                                           env={"DEV_HARNESS_INSTALL_TEST_FAULT": "apply:activate,apply:undo-park"})
+        self.assert_refused(result, 3)
+        report = json.loads(result.stderr)
+        self.assertIn("journal update refused", report["error"])
+        self.assertIn("recover", report["error"])
+        current = self.state() / "CURRENT"
+        self.assertTrue(current.is_file())
+        self.assertIsNone(snapshot(self.target))
+        self.assertTrue(stat.S_IMODE(self.state().stat().st_mode) & stat.S_IWGRP)
+        self.state().chmod(stat.S_IMODE(self.state().stat().st_mode) & ~stat.S_IWGRP)
+        recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertFalse(current.exists())
+        self.assertEqual(snapshot(self.target), before)
 
     def checkpoints(self, *arguments):
         trace = self.base / "trace.txt"
@@ -1013,6 +1649,1157 @@ sys.exit(installer.main(sys.argv[3:]))
         result = self.run_installer("recover", "--runtime", runtime, "--home", self.home, "--maintenance-confirmed")
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
+
+    def test_recover_rejects_untrusted_current_before_touching_any_journal(self):
+        before, parked = self.crash_after_parking()
+        current = self.state() / "CURRENT"
+        original = current.read_bytes()
+        journal = self.state() / original.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        foreign = self.base / "foreign"
+        foreign.mkdir()
+        (foreign / "journal.json").write_bytes(journal_bytes)
+        foreign_before = snapshot(foreign)
+        pristine = self.base / "pristine-home"
+        shutil.copytree(self.home, pristine)
+        cases = (str(foreign / "journal.json").encode() + b"\n", b"../foreign/journal.json\n",
+                 b"not-a-transaction/journal.json\n", original.rstrip(b"\n"), b"\xff\n", b"x" * 1024)
+        for selection in cases:
+            with self.subTest(selection=selection[:48]):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home)
+                (foreign / "journal.json").write_bytes(journal_bytes)
+                current.write_bytes(selection)
+                refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                             "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(current.read_bytes(), selection)
+                self.assertEqual(journal.read_bytes(), journal_bytes)
+                self.assertEqual(snapshot(foreign), foreign_before)
+                self.assertIsNone(snapshot(self.target))
+                self.assertIsNotNone(snapshot(parked))
+        shutil.rmtree(self.home)
+        shutil.copytree(pristine, self.home)
+        current.write_bytes(original)
+        journal.unlink()
+        uncertain = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                       "--maintenance-confirmed")
+        self.assert_refused(uncertain, 3)
+        self.assertIn("journal", json.loads(uncertain.stderr)["error"].lower())
+        self.assertEqual(current.read_bytes(), original)
+        self.assertIsNone(snapshot(self.target))
+        journal.write_bytes(journal_bytes)
+        self.recover()
+        self.assertEqual(snapshot(self.target), before)
+
+    def test_recover_rejects_forged_journal_paths_and_state_before_a_write(self):
+        self.crash_after_parking()
+        current = self.state() / "CURRENT"
+        journal = self.state() / current.read_text(encoding="utf-8").strip()
+        original = json.loads(journal.read_text(encoding="utf-8"))
+        foreign = self.base / "foreign"
+        foreign.mkdir()
+        (foreign / "marker").write_bytes(b"untouched\n")
+        foreign_before = snapshot(foreign)
+        parked_before = snapshot(Path(original["parked"]))
+        pristine = self.base / "pristine-home"
+        shutil.copytree(self.home, pristine)
+        changes = (
+            ("target", lambda value: value.__setitem__("target", str(foreign))),
+            ("parked", lambda value: value.__setitem__("parked", str(foreign / "parked"))),
+            ("backup", lambda value: value.__setitem__("origin_backup", str(foreign / "backup"))),
+            ("incoming", lambda value: value.__setitem__("incoming_path", str(foreign / "incoming"))),
+            ("moves type", lambda value: value.__setitem__("moves", "invalid")),
+            ("origin type", lambda value: value.__setitem__("origin", "invalid")),
+            ("false commit", lambda value: value.__setitem__("state", "committed")),
+        )
+        for label, change in changes:
+            with self.subTest(field=label):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home)
+                forged = json.loads(json.dumps(original))
+                change(forged)
+                journal.write_text(json.dumps(forged), encoding="utf-8")
+                recorded = journal.read_bytes()
+                refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                             "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(journal.read_bytes(), recorded)
+                self.assertTrue(current.exists())
+                self.assertEqual(snapshot(foreign), foreign_before)
+                self.assertEqual(snapshot(Path(original["parked"])), parked_before)
+                self.assertIsNone(snapshot(self.target))
+
+    def test_rollback_rejects_forged_receipt_paths_before_creating_a_transaction(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        original = json.loads(receipt_path.read_text(encoding="utf-8"))
+        installed = snapshot(self.target)
+        foreign = self.base / "foreign"
+        foreign.mkdir()
+        (foreign / "marker").write_bytes(b"untouched\n")
+        foreign_before = snapshot(foreign)
+        pristine = self.base / "pristine-home"
+        shutil.copytree(self.home, pristine)
+        changes = (
+            ("home type", lambda value: value.__setitem__("home", [])),
+            ("config root type", lambda value: value.__setitem__("config_root", {})),
+            ("transaction", lambda value: value.__setitem__("transaction", str(foreign))),
+            ("journal", lambda value: value.__setitem__("journal", str(foreign / "journal.json"))),
+            ("backup", lambda value: value.__setitem__("backup", str(foreign / "backup"))),
+            ("retired", lambda value: value.__setitem__("retired", str(foreign / "retired"))),
+            ("duplicate path", lambda value: value.__setitem__("duplicates", [{"path": str(foreign / "duplicate"),
+                                                                                "retired_to": str(foreign / "retired"),
+                                                                                "backup": str(foreign / "backup"),
+                                                                                "inventory": {}}])),
+            ("retirement copy", lambda value: value["retirements"][0].__setitem__("retired_copy", str(foreign / "copy"))),
+            ("duplicate schema", lambda value: value.__setitem__("duplicates", "invalid")),
+        )
+        for label, change in changes:
+            with self.subTest(field=label):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home)
+                forged = json.loads(json.dumps(original))
+                change(forged)
+                receipt_path.write_text(json.dumps(forged), encoding="utf-8")
+                recorded = receipt_path.read_bytes()
+                refused = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(receipt_path.read_bytes(), recorded)
+                self.assertEqual(snapshot(self.target), installed)
+                self.assertEqual(snapshot(foreign), foreign_before)
+                self.assertFalse((self.state() / "CURRENT").exists())
+                self.assertFalse(list(self.state().glob("*/rollback-*")))
+
+    def test_rollback_binds_operative_receipt_fields_to_its_committed_apply_journal(self):
+        for variant in ("omitted_duplicate", "sibling_duplicate", "missing_before", "missing_journal", "uncommitted_journal"):
+            with self.subTest(variant=variant):
+                self.home = self.base / variant
+                self.home.mkdir()
+                duplicate = variant in ("omitted_duplicate", "sibling_duplicate")
+                if duplicate:
+                    target = self.home / ".agents" / "skills" / "github-workflow"
+                    legacy = self.home / ".codex" / "skills" / "github-workflow"
+                    self.v52_layout(target)
+                    self.v52_layout(legacy)
+                    installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+                    self.assertEqual(installed.returncode, 0, installed.stderr)
+                    receipt_path = Path(json.loads(installed.stdout)["receipt"])
+                else:
+                    target = self.target
+                    self.v52_layout()
+                    receipt_path = self.installed()
+                original = json.loads(receipt_path.read_text(encoding="utf-8"))
+                receipt = json.loads(json.dumps(original))
+                journal = Path(original["journal"])
+                journal_bytes = journal.read_bytes()
+                held_journal = journal.with_name("held-journal.json")
+                observed = [target, Path(original["retired"]), Path(original["backup"])]
+                for entry in original["duplicates"]:
+                    observed.extend(Path(entry[key]) for key in ("path", "retired_to", "backup"))
+                if variant == "omitted_duplicate":
+                    receipt["duplicates"] = []
+                elif variant == "sibling_duplicate":
+                    sibling = legacy.parent / "sibling" / legacy.name
+                    receipt["duplicates"][0]["path"] = str(sibling)
+                    receipt["duplicates"][0]["resolved"] = os.path.realpath(str(sibling))
+                    observed.append(sibling)
+                elif variant == "missing_before":
+                    receipt.update(before=None, backup=None, retired=None, retirements=[])
+                elif variant == "missing_journal":
+                    journal.rename(held_journal)
+                else:
+                    record = json.loads(journal_bytes)
+                    record["state"] = "activated"
+                    journal.write_text(json.dumps(record), encoding="utf-8")
+                journal_after = journal.read_bytes() if journal.exists() else None
+                receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+                receipt_bytes = receipt_path.read_bytes()
+                trees_before = {str(path): snapshot(path) for path in observed}
+                refused = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual({str(path): snapshot(path) for path in observed}, trees_before)
+                self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+                self.assertFalse((self.state() / "CURRENT").exists())
+                self.assertFalse(list(receipt_path.parent.glob("rollback-*")))
+                if variant == "missing_journal":
+                    self.assertFalse(journal.exists())
+                    self.assertEqual(held_journal.read_bytes(), journal_bytes)
+                else:
+                    self.assertEqual(journal.read_bytes(), journal_after)
+
+    def test_recover_committed_rollback_rejects_foreign_receipt_before_marking_it(self):
+        before = self.v52_layout()
+        receipt_path = self.installed()
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:committed"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        journal = self.state() / current.read_text(encoding="utf-8").strip()
+        original = json.loads(journal.read_text(encoding="utf-8"))
+        foreign = self.base / "foreign"
+        foreign.mkdir()
+        (foreign / "receipt.json").write_bytes(receipt_path.read_bytes())
+        foreign_before = snapshot(foreign)
+        pristine = self.base / "pristine-home"
+        shutil.copytree(self.home, pristine)
+        for field, replacement in (("receipt", foreign / "receipt.json"), ("journal", foreign / "journal.json"),
+                                   ("parked", foreign / "parked")):
+            with self.subTest(field=field):
+                shutil.rmtree(self.home)
+                shutil.copytree(pristine, self.home)
+                forged = dict(original, **{field: str(replacement)})
+                journal.write_text(json.dumps(forged), encoding="utf-8")
+                recorded = journal.read_bytes()
+                receipt_before = receipt_path.read_bytes()
+                refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(journal.read_bytes(), recorded)
+                self.assertEqual(receipt_path.read_bytes(), receipt_before)
+                self.assertEqual(snapshot(foreign), foreign_before)
+                self.assertTrue(current.exists())
+                self.assertEqual(snapshot(self.target), before)
+        shutil.rmtree(self.home)
+        shutil.copytree(pristine, self.home)
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "rolled back")
+
+    def test_recover_refuses_malformed_journal_history_and_evidence_before_mutation(self):
+        for label in ("history-map", "history-item", "evidence-list", "evidence-authority-paths",
+                      "evidence-boundary-missing", "evidence-hooks-list"):
+            with self.subTest(label=label):
+                self.home = self.base / label
+                self.home.mkdir()
+                before = self.v52_layout()
+                if label.startswith("history-"):
+                    plan = self.plan()
+                    crashed = self.apply(plan, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+                    receipt_path = None
+                else:
+                    receipt_path = self.installed()
+                    crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                                 env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:committed"})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                current = self.state() / "CURRENT"
+                current_bytes = current.read_bytes()
+                journal = self.state() / current_bytes.decode("utf-8").strip()
+                original = json.loads(journal.read_text(encoding="utf-8"))
+                foreign = self.base / (label + "-foreign")
+                foreign.mkdir()
+                (foreign / "witness").write_bytes(b"outside recovery state\n")
+                foreign_before = snapshot(foreign)
+                if label == "history-map":
+                    forged = {**original, "history": {}}
+                elif label == "history-item":
+                    forged = {**original, "history": [{}]}
+                elif label == "evidence-list":
+                    forged = {**original, "rollback_evidence": []}
+                elif label == "evidence-authority-paths":
+                    forged = {**original, "rollback_evidence": {
+                        "journal": str(foreign / "journal.json"), "parked": str(foreign / "parked")}}
+                elif label == "evidence-boundary-missing":
+                    forged = {**original, "rollback_evidence": {
+                        "maintenance_boundary": {}, "test_hooks": original["rollback_evidence"]["test_hooks"]}}
+                else:
+                    forged = {**original, "rollback_evidence": {
+                        "maintenance_boundary": original["rollback_evidence"]["maintenance_boundary"],
+                        "test_hooks": []}}
+                journal.write_text(json.dumps(forged), encoding="utf-8")
+                state_before = snapshot(self.state())
+                target_before = snapshot(self.target)
+                receipt_bytes = receipt_path.read_bytes() if receipt_path else None
+                refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                             "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(snapshot(self.state()), state_before)
+                self.assertEqual(snapshot(self.target), target_before)
+                self.assertEqual(current.read_bytes(), current_bytes)
+                self.assertEqual(journal.read_text(encoding="utf-8"), json.dumps(forged))
+                if receipt_path:
+                    self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+                self.assertEqual(snapshot(foreign), foreign_before)
+
+                # Missing historical audit fields remain recoverable; the current writer's evidence is retained.
+                honest = dict(original)
+                if label.startswith("history-"):
+                    honest.pop("history")
+                elif label != "evidence-authority-paths":
+                    honest.pop("rollback_evidence")
+                journal.write_text(json.dumps(honest), encoding="utf-8")
+                recovered = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                               "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertFalse(current.exists())
+                self.assertEqual(snapshot(self.target), before)
+                if receipt_path:
+                    rollback = json.loads(receipt_path.read_text(encoding="utf-8"))["rollback"]
+                    self.assertEqual(rollback["journal"], str(journal))
+                    self.assertEqual(rollback["parked"], original["parked"])
+                    self.assertEqual("maintenance_boundary" in rollback, label == "evidence-authority-paths")
+                    self.assertEqual("test_hooks" in rollback, label == "evidence-authority-paths")
+
+    def test_recover_rejects_a_linked_transaction_selector(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        before, parked = self.crash_after_parking()
+        current = self.state() / "CURRENT"
+        selection = current.read_bytes()
+        transaction = parked.parents[1]
+        held = self.base / "held-transaction"
+        transaction.rename(held)
+        link_directory(transaction, held)
+        journal_before = (held / "journal.json").read_bytes()
+        refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                     "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(current.read_bytes(), selection)
+        self.assertEqual((held / "journal.json").read_bytes(), journal_before)
+        self.assertIsNone(snapshot(self.target))
+        unlink_directory(transaction)
+        held.rename(transaction)
+        self.recover()
+        self.assertEqual(snapshot(self.target), before)
+
+    def test_rollback_rejects_a_linked_transaction_backup_component(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        self.v52_layout()
+        receipt_path = self.installed()
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        active = snapshot(self.target)
+        backup_dir = Path(receipt["backup"]).parent
+        held = self.base / "held-backup"
+        backup_dir.rename(held)
+        link_directory(backup_dir, held)
+        foreign_before = snapshot(held)
+        recorded = receipt_path.read_bytes()
+        refused = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(receipt_path.read_bytes(), recorded)
+        self.assertEqual(snapshot(held), foreign_before)
+        self.assertEqual(snapshot(self.target), active)
+        self.assertFalse((self.state() / "CURRENT").exists())
+        unlink_directory(backup_dir)
+        held.rename(backup_dir)
+        rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rollback.returncode, 0, rollback.stderr)
+
+    def test_recover_rejects_a_linked_derived_restore_directory(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        before, parked = self.crash_after_parking()
+        current = self.state() / "CURRENT"
+        journal = self.state() / current.read_text(encoding="utf-8").strip()
+        journal_before = journal.read_bytes()
+        shutil.rmtree(parked)
+        foreign = self.base / "foreign-restore"
+        foreign.mkdir()
+        (foreign / "marker").write_bytes(b"untouched\n")
+        foreign_before = snapshot(foreign)
+        restore_dir = parked.parent / "restore"
+        link_directory(restore_dir, foreign)
+        refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                     "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(journal.read_bytes(), journal_before)
+        self.assertEqual(snapshot(foreign), foreign_before)
+        self.assertTrue(current.exists())
+        self.assertIsNone(snapshot(self.target))
+        unlink_directory(restore_dir)
+        self.recover()
+        self.assertEqual(snapshot(self.target), before)
+
+    def test_duplicate_metadata_is_bound_to_the_retired_copy_and_skill_roots(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        self.v52_layout(target)
+        self.v52_layout(legacy)
+        plan = self.plan("codex")
+        crashed = self.apply(plan, "--retire-duplicate", legacy,
+                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        journal = state / current.read_text(encoding="utf-8").strip()
+        original = json.loads(journal.read_text(encoding="utf-8"))
+        foreign = self.base / "foreign"
+        foreign.mkdir()
+        (foreign / "marker").write_bytes(b"untouched\n")
+        foreign_before = snapshot(foreign)
+        original_bytes = journal.read_bytes()
+        for field in ("from", "to", "backup"):
+            with self.subTest(field=field):
+                forged = json.loads(json.dumps(original))
+                forged["moves"][0][field] = str(foreign / field)
+                journal.write_text(json.dumps(forged), encoding="utf-8")
+                recorded = journal.read_bytes()
+                refused = self.run_installer("recover", "--runtime", "codex", "--home", self.home,
+                                             "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(journal.read_bytes(), recorded)
+                self.assertEqual(snapshot(foreign), foreign_before)
+                self.assertEqual(current.read_text(encoding="utf-8").strip(), str(journal.relative_to(state)))
+        journal.write_bytes(original_bytes)
+        self.recover("codex")
+
+        installed = self.apply(plan, "--retire-duplicate", legacy)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        receipt_path = Path(json.loads(installed.stdout)["receipt"])
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        active = snapshot(target)
+        receipt_bytes = receipt_path.read_bytes()
+        for field in ("path", "retired_to", "backup"):
+            with self.subTest(receipt_field=field):
+                forged = json.loads(json.dumps(receipt))
+                forged["duplicates"][0][field] = str(foreign / field)
+                receipt_path.write_text(json.dumps(forged), encoding="utf-8")
+                recorded = receipt_path.read_bytes()
+                refused = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(receipt_path.read_bytes(), recorded)
+                self.assertEqual(snapshot(target), active)
+                self.assertEqual(snapshot(foreign), foreign_before)
+                self.assertFalse((state / "CURRENT").exists())
+        receipt_path.write_bytes(receipt_bytes)
+
+    def test_recover_refuses_a_duplicate_root_retargeted_after_retirement(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        crashed = self.apply(self.plan("codex"), "--retire-duplicate", legacy,
+                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        move = json.loads(journal_bytes)["moves"][0]
+        parked = Path(json.loads(journal_bytes)["parked"])
+        parked_before, moved_before = snapshot(parked), snapshot(Path(move["to"]))
+        root = legacy.parent
+        held = self.base / "held-skills"
+        foreign = self.base / "foreign-skills"
+        foreign.mkdir()
+        (foreign / "marker").write_bytes(b"untouched\n")
+        shutil.move(str(root), str(held))
+        link_directory(root, foreign)
+        foreign_before = snapshot(foreign)
+        try:
+            refused = self.run_installer("recover", "--runtime", "codex", "--home", self.home,
+                                         "--maintenance-confirmed")
+            self.assert_refused(refused, 2)
+            self.assertEqual(current.read_bytes(), current_bytes)
+            self.assertEqual(journal.read_bytes(), journal_bytes)
+            self.assertEqual(snapshot(parked), parked_before)
+            self.assertEqual(snapshot(Path(move["to"])), moved_before)
+            self.assertEqual(snapshot(foreign), foreign_before)
+            self.assertIsNone(snapshot(target))
+        finally:
+            unlink_directory(root)
+            shutil.move(str(held), str(root))
+        self.recover("codex")
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+
+    def test_recover_accepts_an_unchanged_linked_duplicate_root(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        physical_root = self.base / "dotfiles" / "skills"
+        legacy_source = physical_root / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy_source)
+        (self.home / ".codex").mkdir()
+        link_directory(self.home / ".codex" / "skills", physical_root)
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        try:
+            crashed = self.apply(self.plan("codex"), "--retire-duplicate", legacy,
+                                 env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+            self.assertEqual(crashed.returncode, 70, crashed.stderr)
+            self.recover("codex")
+            self.assertEqual((snapshot(target), snapshot(legacy_source)), (before, legacy_before))
+        finally:
+            unlink_directory(self.home / ".codex" / "skills")
+
+    def test_recover_refuses_a_rollback_duplicate_root_retargeted_after_restoration(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        receipt_path = Path(json.loads(installed.stdout)["receipt"])
+        active = snapshot(target)
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:moved-0"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        receipt_bytes = receipt_path.read_bytes()
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+        root = legacy.parent
+        held = self.base / "held-skills"
+        foreign = self.base / "foreign-skills"
+        foreign.mkdir()
+        shutil.copytree(legacy, foreign / legacy.name, symlinks=True)
+        (foreign / "marker").write_bytes(b"untouched\n")
+        shutil.move(str(root), str(held))
+        link_directory(root, foreign)
+        foreign_before, held_before = snapshot(foreign), snapshot(held)
+        try:
+            refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(refused, 2)
+            self.assertEqual(current.read_bytes(), current_bytes)
+            self.assertEqual(journal.read_bytes(), journal_bytes)
+            self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+            self.assertEqual((snapshot(foreign), snapshot(held)), (foreign_before, held_before))
+            self.assertEqual(snapshot(target), before)
+        finally:
+            unlink_directory(root)
+            shutil.move(str(held), str(root))
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (active, None))
+
+    def test_recover_rollback_accepts_an_unchanged_linked_duplicate_root(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        physical_root = self.base / "dotfiles" / "skills"
+        legacy_source = physical_root / "github-workflow"
+        self.v52_layout(target)
+        self.v52_layout(legacy_source)
+        (self.home / ".codex").mkdir()
+        root = self.home / ".codex" / "skills"
+        link_directory(root, physical_root)
+        try:
+            legacy = root / "github-workflow"
+            installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            receipt_path = Path(json.loads(installed.stdout)["receipt"])
+            active = snapshot(target)
+            crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                         env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:moved-0"})
+            self.assertEqual(crashed.returncode, 70, crashed.stderr)
+            recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertEqual((snapshot(target), snapshot(legacy_source)), (active, None))
+        finally:
+            unlink_directory(root)
+
+    def test_recover_rollback_binds_changed_receipt_resolution_to_the_apply_journal(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        receipt_path = Path(json.loads(installed.stdout)["receipt"])
+        active = snapshot(target)
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:moved-0"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        receipt_bytes = receipt_path.read_bytes()
+        record = json.loads(journal_bytes)
+        parked = Path(record["parked"])
+        parked_before = snapshot(parked)
+        retired_duplicate = Path(json.loads(receipt_bytes)["duplicates"][0]["retired_to"])
+        retired_before = snapshot(retired_duplicate)
+        root = legacy.parent
+        held = self.base / "held-skills"
+        foreign = self.base / "foreign-skills"
+        foreign.mkdir()
+        shutil.copytree(legacy, foreign / legacy.name, symlinks=True)
+        self.assertEqual(snapshot(foreign / legacy.name), legacy_before)
+        (foreign / "marker").write_bytes(b"untouched\n")
+        shutil.move(str(root), str(held))
+        link_directory(root, foreign)
+        receipt = json.loads(receipt_bytes)
+        receipt["duplicates"][0]["resolved"] = os.path.realpath(str(legacy))
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        forged_bytes = receipt_path.read_bytes()
+        foreign_before, held_before = snapshot(foreign), snapshot(held)
+        try:
+            refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(refused, 1)
+            self.assertEqual((current.read_bytes(), journal.read_bytes(), receipt_path.read_bytes()),
+                             (current_bytes, journal_bytes, forged_bytes))
+            self.assertEqual((snapshot(target), snapshot(parked), snapshot(retired_duplicate)),
+                             (before, parked_before, retired_before))
+            self.assertEqual((snapshot(foreign), snapshot(held)), (foreign_before, held_before))
+        finally:
+            receipt_path.write_bytes(receipt_bytes)
+            unlink_directory(root)
+            shutil.move(str(held), str(root))
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (active, None))
+        self.assertEqual(snapshot(foreign), foreign_before)
+        self.assertFalse(current.exists())
+
+    def test_recover_rollback_rejects_receipt_duplicate_and_before_divergence(self):
+        for variant in ("omitted_duplicate", "sibling_duplicate", "changed_before"):
+            with self.subTest(variant=variant):
+                self.home = self.base / variant
+                self.home.mkdir()
+                target = self.home / ".agents" / "skills" / "github-workflow"
+                legacy = self.home / ".codex" / "skills" / "github-workflow"
+                self.v52_layout(target)
+                self.v52_layout(legacy)
+                installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                receipt_path = Path(json.loads(installed.stdout)["receipt"])
+                active = snapshot(target)
+                crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:moved-0"})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                state = self.home / ".agents" / "dev-harness-install"
+                current = state / "CURRENT"
+                current_bytes = current.read_bytes()
+                journal = state / current_bytes.decode("utf-8").strip()
+                journal_bytes = journal.read_bytes()
+                record = json.loads(journal_bytes)
+                receipt_bytes = receipt_path.read_bytes()
+                receipt = json.loads(receipt_bytes)
+                sibling = legacy.parent / "sibling" / legacy.name
+                if variant == "omitted_duplicate":
+                    receipt["duplicates"] = []
+                elif variant == "sibling_duplicate":
+                    receipt["duplicates"][0]["path"] = str(sibling)
+                    receipt["duplicates"][0]["resolved"] = os.path.realpath(str(sibling))
+                else:
+                    receipt["before"]["SKILL.md"]["sha256"] = "0" * 64
+                receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+                forged_bytes = receipt_path.read_bytes()
+                observed = (target, legacy, sibling, Path(record["parked"]),
+                            Path(json.loads(receipt_bytes)["duplicates"][0]["retired_to"]))
+                trees_before = tuple(snapshot(path) for path in observed)
+                refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual((current.read_bytes(), journal.read_bytes(), receipt_path.read_bytes()),
+                                 (current_bytes, journal_bytes, forged_bytes))
+                self.assertEqual(tuple(snapshot(path) for path in observed), trees_before)
+                receipt_path.write_bytes(receipt_bytes)
+                recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertEqual((snapshot(target), snapshot(legacy)), (active, None))
+                self.assertFalse(current.exists())
+
+    def test_recover_accepts_a_committed_rollback_receipt_with_a_retired_duplicate(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        receipt_path = Path(json.loads(installed.stdout)["receipt"])
+        rolled_back = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        journal = Path(receipt["rollback"]["journal"])
+        journal_bytes, receipt_bytes = journal.read_bytes(), receipt_path.read_bytes()
+        current = self.home / ".agents" / "dev-harness-install" / "CURRENT"
+        current.write_bytes((str(journal.relative_to(current.parent)) + "\n").encode("utf-8"))
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(json.loads(recovered.stdout)["result"], "already committed")
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+        self.assertEqual(journal.read_bytes(), journal_bytes)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8")), json.loads(receipt_bytes))
+        self.assertFalse(current.exists())
+
+    def test_recover_rollback_refuses_a_forged_duplicate_through_an_in_root_link(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        self.v52_layout(target)
+        self.v52_layout(legacy)
+        installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        receipt_path = Path(json.loads(installed.stdout)["receipt"])
+        active = snapshot(target)
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:moved-0"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        before_target = snapshot(target)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        original_journal = journal.read_bytes()
+        original_receipt = receipt_path.read_bytes()
+        foreign = self.base / "foreign-skills"
+        foreign.mkdir()
+        shutil.copytree(legacy, foreign / legacy.name, symlinks=True)
+        alias = legacy.parent / "alias"
+        link_directory(alias, foreign)
+        try:
+            forged = alias / "github-workflow"
+            receipt = json.loads(original_receipt)
+            receipt["duplicates"][0]["path"] = str(forged)
+            receipt["duplicates"][0]["resolved"] = os.path.realpath(str(forged))
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            journal_record = json.loads(original_journal)
+            journal_record["moves"][0]["to"] = str(forged)
+            journal.write_text(json.dumps(journal_record), encoding="utf-8")
+            journal_bytes, receipt_bytes = journal.read_bytes(), receipt_path.read_bytes()
+            foreign_before = snapshot(foreign)
+            refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(refused, 1)
+            self.assertEqual(current.read_bytes(), current_bytes)
+            self.assertEqual((journal.read_bytes(), receipt_path.read_bytes()), (journal_bytes, receipt_bytes))
+            self.assertEqual(snapshot(foreign), foreign_before)
+            self.assertEqual(snapshot(target), before_target)
+        finally:
+            journal.write_bytes(original_journal)
+            receipt_path.write_bytes(original_receipt)
+            unlink_directory(alias)
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (active, None))
+
+    def test_recover_refuses_a_parked_tree_without_a_recorded_origin(self):
+        crashed = self.apply(self.plan(), env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:staged"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = self.state() / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        record = json.loads(journal_bytes)
+        self.assertIsNone(record["origin"])
+        self.assertIsNone(record["origin_backup"])
+        parked = Path(record["parked"])
+        parked.mkdir(parents=True)
+        (parked / "marker").write_bytes(b"unrecorded origin\n")
+        parked_before = snapshot(parked)
+        staged_before = snapshot(Path(record["incoming_path"]))
+        refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                     "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(current.read_bytes(), current_bytes)
+        self.assertEqual(journal.read_bytes(), journal_bytes)
+        self.assertEqual(snapshot(parked), parked_before)
+        self.assertEqual(snapshot(Path(record["incoming_path"])), staged_before)
+        self.assertIsNone(snapshot(self.target))
+        shutil.rmtree(parked)
+        self.recover()
+        self.assertIsNone(snapshot(self.target))
+
+    def test_recover_refuses_a_committed_new_install_with_an_unrecorded_parked_tree(self):
+        crashed = self.apply(self.plan(), env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:committed"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = self.state() / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        record = json.loads(journal_bytes)
+        self.assertIsNone(record["origin"])
+        parked = Path(record["parked"])
+        parked.mkdir(parents=True)
+        (parked / "marker").write_bytes(b"unrecorded origin\n")
+        parked_before, active_before = snapshot(parked), snapshot(self.target)
+        receipt = journal.parent / "receipt.json"
+        receipt_bytes = receipt.read_bytes()
+        refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                     "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(current.read_bytes(), current_bytes)
+        self.assertEqual(journal.read_bytes(), journal_bytes)
+        self.assertEqual(receipt.read_bytes(), receipt_bytes)
+        self.assertEqual((snapshot(parked), snapshot(self.target)), (parked_before, active_before))
+        shutil.rmtree(parked)
+        self.assertEqual(self.recover()["result"], "already committed")
+
+    def test_recover_committed_apply_binds_receipt_to_journal(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        self.v52_layout(target)
+        self.v52_layout(legacy)
+        crashed = self.apply(self.plan("codex"), "--retire-duplicate", legacy,
+                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:committed"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        receipt_path = journal.parent / "receipt.json"
+        original = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt_bytes = receipt_path.read_bytes()
+        active, retired = snapshot(target), snapshot(Path(original["duplicates"][0]["retired_to"]))
+        changes = (
+            ("before", lambda value: value["before"]["SKILL.md"].__setitem__("sha256", "0" * 64)),
+            ("after", lambda value: value["after"]["SKILL.md"].__setitem__("sha256", "0" * 64)),
+            ("duplicate inventory", lambda value: value["duplicates"][0]["inventory"]["SKILL.md"].__setitem__("sha256", "0" * 64)),
+            ("duplicate path", lambda value: value["duplicates"][0].__setitem__("path", str(legacy.parent / "vendor" / "github-workflow"))),
+            ("duplicate resolved", lambda value: value["duplicates"][0].__setitem__("resolved", str(self.base / "foreign"))),
+            ("missing duplicate", lambda value: value.__setitem__("duplicates", [])),
+        )
+        for label, change in changes:
+            with self.subTest(field=label):
+                forged = json.loads(json.dumps(original))
+                change(forged)
+                receipt_path.write_text(json.dumps(forged), encoding="utf-8")
+                forged_bytes = receipt_path.read_bytes()
+                try:
+                    refused = self.run_installer("recover", "--runtime", "codex", "--home", self.home,
+                                                 "--maintenance-confirmed")
+                    self.assert_refused(refused, 1)
+                    self.assertEqual(current.read_bytes(), current_bytes)
+                    self.assertEqual(journal.read_bytes(), journal_bytes)
+                    self.assertEqual(receipt_path.read_bytes(), forged_bytes)
+                    self.assertEqual((snapshot(target), snapshot(Path(original["duplicates"][0]["retired_to"]))),
+                                     (active, retired))
+                finally:
+                    # Keep the same transaction and directories for every variant, even on a broken installer.
+                    if not current.exists():
+                        current.write_bytes(current_bytes)
+                    receipt_path.write_bytes(receipt_bytes)
+        self.assertEqual(self.recover("codex")["result"], "already committed")
+
+    def test_recover_committed_apply_accepts_legacy_duplicate_without_resolution(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        self.v52_layout(target)
+        self.v52_layout(legacy)
+        crashed = self.apply(self.plan("codex"), "--retire-duplicate", legacy,
+                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:committed"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        journal = state / current.read_text(encoding="utf-8").strip()
+        receipt_path = journal.parent / "receipt.json"
+        record = json.loads(journal.read_text(encoding="utf-8"))
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        del record["moves"][0]["resolved"]
+        del receipt["duplicates"][0]["resolved"]
+        journal.write_text(json.dumps(record), encoding="utf-8")
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        self.assertEqual(self.recover("codex")["result"], "already committed")
+        self.assertFalse(current.exists())
+
+    def test_recover_validates_a_precommit_apply_receipt_before_undo(self):
+        before = self.v52_layout()
+        crashed = self.apply(self.plan(), env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:committed"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = self.state() / current_bytes.decode("utf-8").strip()
+        record = json.loads(journal.read_text(encoding="utf-8"))
+        # A receipt is written immediately before the committed journal state.
+        record["state"] = "activated"
+        journal.write_text(json.dumps(record), encoding="utf-8")
+        journal_bytes = journal.read_bytes()
+        receipt_path = journal.parent / "receipt.json"
+        original = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt_bytes = receipt_path.read_bytes()
+        parked_before, active = snapshot(Path(record["parked"])), snapshot(self.target)
+        changes = (
+            ("transaction", lambda value: value.__setitem__("transaction", str(self.base / "foreign"))),
+            ("after", lambda value: value["after"]["SKILL.md"].__setitem__("sha256", "0" * 64)),
+        )
+        for label, change in changes:
+            with self.subTest(field=label):
+                forged = json.loads(json.dumps(original))
+                change(forged)
+                receipt_path.write_text(json.dumps(forged), encoding="utf-8")
+                forged_bytes = receipt_path.read_bytes()
+                try:
+                    refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                                 "--maintenance-confirmed")
+                    self.assert_refused(refused, 1)
+                    self.assertEqual(current.read_bytes(), current_bytes)
+                    self.assertEqual(journal.read_bytes(), journal_bytes)
+                    self.assertEqual(receipt_path.read_bytes(), forged_bytes)
+                    self.assertEqual((snapshot(Path(record["parked"])), snapshot(self.target)), (parked_before, active))
+                finally:
+                    if not current.exists():
+                        current.write_bytes(current_bytes)
+                    journal.write_bytes(journal_bytes)
+                    receipt_path.write_bytes(receipt_bytes)
+        self.assertEqual(self.recover()["result"], "restored")
+        self.assertEqual(snapshot(self.target), before)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"],
+                         "recovered to the before-state; not installed")
+        self.assertFalse(current.exists())
+
+    def test_recover_validates_rollback_origin_against_its_receipt_before_undo(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        active = snapshot(self.target)
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = self.state() / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        record = json.loads(journal_bytes)
+        parked_before = snapshot(Path(record["parked"]))
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["after"]["SKILL.md"]["sha256"] = "0" * 64
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        forged_bytes = receipt_path.read_bytes()
+        refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(current.read_bytes(), current_bytes)
+        self.assertEqual(journal.read_bytes(), journal_bytes)
+        self.assertEqual(receipt_path.read_bytes(), forged_bytes)
+        self.assertEqual(snapshot(Path(record["parked"])), parked_before)
+        self.assertIsNone(snapshot(self.target))
+        receipt["after"] = record["origin"]
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(snapshot(self.target), active)
+        self.assertFalse(current.exists())
+
+    def test_recover_binds_rollback_move_inventory_to_receipt_before_undo_or_finish(self):
+        for checkpoint in ("rollback:moved-0", "rollback:committed"):
+            with self.subTest(checkpoint=checkpoint):
+                self.home = self.base / checkpoint.replace(":", "-")
+                self.home.mkdir()
+                target = self.home / ".agents" / "skills" / "github-workflow"
+                legacy = self.home / ".codex" / "skills" / "github-workflow"
+                before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+                installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                receipt_path = Path(json.loads(installed.stdout)["receipt"])
+                active = snapshot(target)
+                crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": checkpoint})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                state = self.home / ".agents" / "dev-harness-install"
+                current = state / "CURRENT"
+                current_bytes = current.read_bytes()
+                journal = state / current_bytes.decode("utf-8").strip()
+                original_journal = journal.read_bytes()
+                receipt_bytes = receipt_path.read_bytes()
+                original_skill = (legacy / "SKILL.md").read_bytes()
+                changed = b"---\nname: github-workflow\n---\nDifferent duplicate bytes\n"
+                (legacy / "SKILL.md").write_bytes(changed)
+                record = json.loads(original_journal)
+                entry = record["moves"][0]["inventory"]["SKILL.md"]
+                entry.update(sha256=hashlib.sha256(changed).hexdigest(), bytes=len(changed))
+                journal.write_text(json.dumps(record), encoding="utf-8")
+                forged_bytes = journal.read_bytes()
+                target_before, legacy_changed = snapshot(target), snapshot(legacy)
+                refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(current.read_bytes(), current_bytes)
+                self.assertEqual((journal.read_bytes(), receipt_path.read_bytes()), (forged_bytes, receipt_bytes))
+                self.assertEqual((snapshot(target), snapshot(legacy)), (target_before, legacy_changed))
+                journal.write_bytes(original_journal)
+                (legacy / "SKILL.md").write_bytes(original_skill)
+                recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                expected = (before, legacy_before) if checkpoint == "rollback:committed" else (active, None)
+                self.assertEqual((snapshot(target), snapshot(legacy)), expected)
+                self.assertFalse(current.exists())
+
+    def test_recover_binds_receipt_identity_to_both_journal_kinds(self):
+        for operation in ("apply", "rollback"):
+            with self.subTest(operation=operation):
+                self.home = self.base / operation
+                self.home.mkdir()
+                self.v52_layout()
+                if operation == "apply":
+                    crashed = self.apply(self.plan(), env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:committed"})
+                else:
+                    receipt_path = self.installed()
+                    crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                                 env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:parked"})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                current = self.state() / "CURRENT"
+                current_bytes = current.read_bytes()
+                journal = self.state() / current_bytes.decode("utf-8").strip()
+                journal_bytes = journal.read_bytes()
+                record = json.loads(journal_bytes)
+                if operation == "apply":
+                    receipt_path = journal.parent / "receipt.json"
+                receipt_bytes = receipt_path.read_bytes()
+                foreign = receipt_path.parent.parent / "20000101T000000Z-deadbeef"
+                forged = relocated_transaction(json.loads(receipt_bytes), receipt_path.parent, foreign)
+                receipt_path.write_text(json.dumps(forged), encoding="utf-8")
+                forged_bytes = receipt_path.read_bytes()
+                target_before, parked_before = snapshot(self.target), snapshot(Path(record["parked"]))
+                refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                             "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(current.read_bytes(), current_bytes)
+                self.assertEqual((journal.read_bytes(), receipt_path.read_bytes()), (journal_bytes, forged_bytes))
+                self.assertEqual((snapshot(self.target), snapshot(Path(record["parked"]))),
+                                 (target_before, parked_before))
+                receipt_path.write_bytes(receipt_bytes)
+                recovered = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                               "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertFalse(current.exists())
+
+    def test_recover_rejects_an_unrecorded_rollback_move_backup(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        self.v52_layout(target)
+        self.v52_layout(legacy)
+        installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        receipt_path = Path(json.loads(installed.stdout)["receipt"])
+        active = snapshot(target)
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:moved-0"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        original_journal = journal.read_bytes()
+        receipt_bytes = receipt_path.read_bytes()
+        record = json.loads(original_journal)
+        record["moves"][0]["backup"] = str(self.base / "foreign-backup")
+        journal.write_text(json.dumps(record), encoding="utf-8")
+        forged_bytes = journal.read_bytes()
+        target_before, legacy_before = snapshot(target), snapshot(legacy)
+        refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(current.read_bytes(), current_bytes)
+        self.assertEqual((journal.read_bytes(), receipt_path.read_bytes()), (forged_bytes, receipt_bytes))
+        self.assertEqual((snapshot(target), snapshot(legacy)), (target_before, legacy_before))
+        journal.write_bytes(original_journal)
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (active, None))
+
+    def test_recover_refuses_a_missing_origin_backup_without_parked_drift(self):
+        for operation in ("apply", "rollback"):
+            with self.subTest(operation=operation):
+                self.home = self.base / operation
+                self.home.mkdir()
+                expected = self.v52_layout()
+                if operation == "apply":
+                    crashed = self.apply(self.plan(), env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+                else:
+                    receipt_path = self.installed()
+                    expected = snapshot(self.target)
+                    crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                                 env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:parked"})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                current = self.state() / "CURRENT"
+                current_bytes = current.read_bytes()
+                journal = self.state() / current_bytes.decode("utf-8").strip()
+                original_journal = journal.read_bytes()
+                record = json.loads(original_journal)
+                self.assertIsNotNone(record["origin"])
+                self.assertIsNotNone(record["origin_backup"])
+                parked_before = snapshot(Path(record["parked"]))
+                record["origin_backup"] = None
+                journal.write_text(json.dumps(record), encoding="utf-8")
+                forged_bytes = journal.read_bytes()
+                refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                             "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(current.read_bytes(), current_bytes)
+                self.assertEqual(journal.read_bytes(), forged_bytes)
+                self.assertEqual(snapshot(Path(record["parked"])), parked_before)
+                self.assertIsNone(snapshot(self.target))
+                journal.write_bytes(original_journal)
+                recovered = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                               "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertEqual(snapshot(self.target), expected)
+                self.assertFalse(current.exists())
+
+    def test_recover_accepts_a_rollback_origin_changed_after_parking(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        journal = self.state() / current.read_text(encoding="utf-8").strip()
+        record = json.loads(journal.read_text(encoding="utf-8"))
+        parked = Path(record["parked"])
+        changed = b"---\nname: github-workflow\n---\nChanged after parking\n"
+        (parked / "SKILL.md").write_bytes(changed)
+        record["planned_origin"] = record["origin"]
+        record["origin"] = json.loads(json.dumps(record["origin"]))
+        record["origin"]["SKILL.md"].update(sha256=hashlib.sha256(changed).hexdigest(), bytes=len(changed))
+        record["origin_backup"] = None
+        record["state"] = "parked-drift"
+        journal.write_text(json.dumps(record), encoding="utf-8")
+        parked_before = snapshot(parked)
+        restored = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertEqual(snapshot(self.target), parked_before)
+        self.assertFalse(parked.exists())
+        self.assertEqual((self.target / "SKILL.md").read_bytes(), changed)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+        self.assertFalse(current.exists())
+
+    def test_recover_accepts_a_rollback_receipt_already_marked_after_commit(self):
+        before = self.v52_layout()
+        receipt_path = self.installed()
+        rolled_back = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        journal = Path(receipt["rollback"]["journal"])
+        current = self.state() / "CURRENT"
+        current.write_bytes((str(journal.relative_to(self.state())) + "\n").encode("utf-8"))
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(json.loads(recovered.stdout)["result"], "already committed")
+        self.assertEqual(snapshot(self.target), before)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "rolled back")
+        self.assertFalse(current.exists())
+
+    def test_rollback_rejects_a_forged_duplicate_through_an_in_root_link(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        receipt_path = self.installed("codex")
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        active = snapshot(self.home / ".agents" / "skills" / "github-workflow")
+        root = self.home / ".codex" / "skills"
+        root.mkdir(parents=True)
+        foreign = self.base / "foreign-skills"
+        foreign.mkdir()
+        (foreign / "marker").write_bytes(b"untouched\n")
+        alias = root / "alias"
+        link_directory(alias, foreign)
+        try:
+            forged = alias / "github-workflow"
+            source = self.home / ".agents" / "skills" / "github-workflow"
+            transaction = receipt_path.parent
+            retired = transaction / "duplicates" / "0" / forged.name
+            backup = transaction / "backup" / "duplicate-0" / forged.name
+            shutil.copytree(source, retired, symlinks=True)
+            shutil.copytree(source, backup, symlinks=True)
+            # The forged metadata is schema-valid, and its retired tree is available to move.
+            receipt["duplicates"].append({"path": str(forged), "retired_to": str(retired),
+                                          "backup": str(backup), "inventory": receipt["after"],
+                                          "resolved": os.path.realpath(str(forged))})
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            receipt_bytes = receipt_path.read_bytes()
+            foreign_before = snapshot(foreign)
+            refused = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(refused, 1)
+            self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+            self.assertEqual(snapshot(foreign), foreign_before)
+            self.assertEqual(snapshot(self.home / ".agents" / "skills" / "github-workflow"), active)
+            self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+        finally:
+            unlink_directory(alias)
 
     def test_recover_restores_from_backup_when_parked_copy_drifted(self):
         before, parked = self.crash_after_parking()
