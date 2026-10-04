@@ -476,10 +476,12 @@ def load_archive(source: Path) -> Package:
     return package
 
 
-def read_checksums(path: Path) -> dict:
+def read_checksums(path: Path) -> tuple[dict, bytes]:
     entries = {}
     try:
-        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        # A path or link can change after this open; parse and record only these captured bytes.
+        data = Path(path).read_bytes()
+        lines = data.decode("utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as error:
         raise Refused(f"Cannot read checksums {path}: {error}")
     for line in lines:
@@ -492,7 +494,7 @@ def read_checksums(path: Path) -> dict:
         if name in entries:
             raise Refused(f"Checksum listed twice: {name}")
         entries[name] = match.group(1).lower()
-    return entries
+    return entries, data
 
 
 def verify_package(package: Package, checksums: Path) -> dict:
@@ -515,7 +517,7 @@ def verify_package(package: Package, checksums: Path) -> dict:
             problems.append(f"hash or size mismatch: {name}")
     for name in colliding(list(listed) + ["MANIFEST.json"]):
         problems.append(f"colliding path: {name}")
-    sums = read_checksums(checksums)
+    sums, checksum_bytes = read_checksums(checksums)
     manifest_entry = package.name + "-MANIFEST.json"
     if sums.get(manifest_entry) != digest(package.manifest_bytes):
         problems.append(f"manifest digest does not match the {manifest_entry} checksum entry")
@@ -533,7 +535,7 @@ def verify_package(package: Package, checksums: Path) -> dict:
         raise Refused("Package verification failed", problems)
     return {
         **package.identity(),
-        "checksums_sha256": digest(Path(checksums).read_bytes()),
+        "checksums_sha256": digest(checksum_bytes),
         "files_verified": len(listed),
         "archive_digest": archive,
         "scope": "Integrity against the supplied checksum file only; hash agreement is not independent provenance.",
@@ -1272,19 +1274,447 @@ class TraceBinding:
             os.close(self.validation_descriptor)
             self.validation_descriptor = None
         self.parent.close()
+# Journal and receipt paths are data until they match the locations this installer generates.
+TRANSACTION_NAME = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\Z")
+ROLLBACK_NAME = re.compile(r"rollback-[0-9a-f]{8}\Z")
+RESTORE_STALE_NAME = re.compile(r"restore-stale-[0-9a-f]{8}\Z")
 
 
+def plain_transaction_path(state: Path, candidate: Path) -> None:
+    """Reject links or junctions in generated transaction components below the selected state."""
+    try:
+        relative = candidate.relative_to(state)
+    except ValueError:
+        raise Refused("A recorded transaction path leaves the selected state") from None
+    if not relative.parts:
+        raise Refused("A recorded transaction path names the state root")
+    path = state
+    for part in relative.parts:
+        path /= part
+        if is_link(path):
+            raise Refused(f"A recorded transaction path crosses a link or junction at {path}")
+
+
+def recorded_path(value: object, expected: Path, field: str, state: Path | None = None) -> None:
+    if not isinstance(value, str) or value != str(expected):
+        raise Refused(f"The recorded {field} does not match the selected transaction")
+    if state is not None:
+        plain_transaction_path(state, expected)
+
+
+def normalized_absolute(value: object, field: str) -> Path:
+    if (not isinstance(value, str) or not value or any(ord(char) < 32 or 0xD800 <= ord(char) <= 0xDFFF for char in value)
+            or not os.path.isabs(value) or os.path.normpath(value) != value):
+        raise Refused(f"The recorded {field} is not an absolute normalized path")
+    return Path(value)
+
+
+def recorded_physical(value: object, field: str) -> None:
+    """Validate a persisted parent identity without binding it to today's pathname."""
+    if not isinstance(value, dict) or set(value) != {"path", "identity"}:
+        raise Refused(f"Invalid physical {field} binding")
+    normalized_absolute(value["path"], f"physical {field} path")
+    identity = value["identity"]
+    if (not isinstance(identity, list) or len(identity) != 2
+            or any(type(part) is not int or part < 0 for part in identity) or not identity[1]):
+        raise Refused(f"Invalid physical {field} binding")
+
+
+def recorded_move_physical(move: dict, external: str, field: str) -> None:
+    if "physical" not in move:
+        return  # Historical records are parsed, then refused at the physical move boundary.
+    bindings = move["physical"]
+    if not isinstance(bindings, dict) or set(bindings) - {"from", "to"}:
+        raise Refused(f"Invalid physical {field} bindings")
+    for side, binding in bindings.items():
+        recorded_physical(binding, f"{field} {side}")
+    if external not in bindings:
+        raise Blocked("The journal lacks the original duplicate-parent identity; automatic recovery is refused. "
+                      "Keep its backups and use manual restoration after verifying the original folder")
+
+
+def selected_locations(record: dict, locations: Locations) -> None:
+    for key, expected in (("runtime", locations.runtime), ("home", str(locations.home)),
+                          ("target", str(locations.target)), ("state_root", str(locations.state))):
+        if record.get(key) != expected:
+            raise Refused(f"The recorded {key} does not match the selected runtime")
+    if "config_root" in record and record["config_root"] != str(locations.config):
+        raise Refused("The recorded config_root does not match the selected runtime")
+    if "skill_roots" in record and record["skill_roots"] != [str(root) for root in locations.roots]:
+        raise Refused("The recorded skill_roots do not match the selected runtime")
+
+
+def locations_from_record(record: dict) -> Locations:
+    if record.get("runtime") not in ("claude", "codex"):
+        raise Refused("The selected record has no valid runtime")
+    normalized_absolute(record.get("home"), "home")
+    config = record.get("config_root")
+    if config is not None:
+        normalized_absolute(config, "config_root")
+    locations = Locations(record["runtime"], record["home"], config)
+    selected_locations(record, locations)
+    return locations
+
+
+def transaction_path(locations: Locations, value: object) -> Path:
+    candidate = normalized_absolute(value, "transaction")
+    if (candidate.parent != locations.state or not TRANSACTION_NAME.fullmatch(candidate.name)
+            or is_link(candidate)):
+        raise Refused("The recorded transaction is not a generated directory in the selected state")
+    return candidate
+
+
+def journal_kind(locations: Locations, journal: Path) -> tuple:
+    if journal.name != "journal.json" or is_link(journal):
+        raise Refused("The selected journal is not a regular generated journal path")
+    if journal.parent.parent == locations.state:
+        transaction = transaction_path(locations, str(journal.parent))
+        plain_transaction_path(locations.state, journal)
+        return transaction, "apply"
+    work = journal.parent
+    transaction = transaction_path(locations, str(work.parent))
+    if not ROLLBACK_NAME.fullmatch(work.name) or is_link(work):
+        raise Refused("The selected rollback journal is not in a generated work directory")
+    plain_transaction_path(locations.state, journal)
+    return transaction, "rollback"
+
+
+def duplicate_path(locations: Locations, value: object) -> Path:
+    candidate = normalized_absolute(value, "duplicate path")
+    if candidate == locations.target:
+        raise Refused("The recorded duplicate names the selected target")
+    for root in locations.roots:
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            continue
+        if relative.parts and candidate not in locations.target.parents and locations.target not in candidate.parents:
+            return candidate
+    raise Refused("The recorded duplicate is not a leaf below a selected skill root")
+
+
+def require_discovered_duplicate_path(locations: Locations, original: Path, recovery: bool = False) -> None:
+    """Discovery never follows a link inside a skill root, even when metadata names one."""
+    root = next(path for path in locations.roots if path in original.parents)
+    component = root
+    for part in original.relative_to(root).parts:
+        component /= part
+        try:
+            linked = is_link(component)
+        except PermissionError:
+            raise inaccessible(component.parent, "searched", "run recover again" if recovery else "run rollback again") from None
+        if linked:
+            raise Refused(f"The recorded duplicate crosses a link or junction below its skill root at {component}")
+
+
+def verify_duplicate_restoration_path(locations: Locations, original: Path, entry: dict, recovery: bool = False) -> None:
+    """Keep a retired duplicate bound to its recorded physical location across a restart."""
+    retired_from = entry.get("resolved")
+    if "resolved" in entry and not isinstance(retired_from, str):
+        source = "journal" if recovery else "receipt"
+        raise Refused(f"The {source} records no valid location for the retired duplicate {original}; "
+                      f"{'recovery' if recovery else 'rollback'} refused")
+    skill_root = next((path for path in locations.roots if path in original.parents), None)
+    if retired_from is None and skill_root is not None:
+        # Legacy records do not identify a linked root's original destination. Discovery did not
+        # follow links below the root, so the root-relative path is otherwise unambiguous.
+        linked = next((path for path in (skill_root.parent, skill_root)
+                       if os.path.isdir(str(path.parent)) and is_link(path)), None)
+        if linked is not None:
+            if recovery:
+                raise Blocked(f"{linked} is a link or junction, and this journal predates the record of where each "
+                              f"retired duplicate was, so recovery cannot confirm where {original} belongs; "
+                              f"restore the original folder, then run recover again",
+                              {"path": str(original), "link": str(linked)})
+            raise Blocked(f"{linked} is a link or junction, and this receipt predates the record of where each "
+                          f"retired duplicate was, so rollback cannot confirm that {original} would return to "
+                          f"the folder it was retired from; replace {linked} with the folder it pointed to at "
+                          "apply, then run rollback again, or, if it still points there, roll back with the "
+                          "installer that wrote this receipt", {"path": str(original), "link": str(linked)})
+        retired_from = os.path.join(os.path.realpath(str(skill_root)), os.path.relpath(str(original), str(skill_root)))
+    resolved = os.path.realpath(str(original))
+    if isinstance(retired_from, str) and os.path.normcase(resolved) != os.path.normcase(retired_from):
+        action = "recover" if recovery else "rollback"
+        raise Blocked(f"The retired duplicate {original} would be restored to {resolved}, not {retired_from} where "
+                      "it was retired from: a link or junction on the way was added or retargeted after apply; "
+                      f"restore that folder, then run {action} again",
+                      {"path": str(original), "resolves_to": resolved, "retired_from": retired_from})
+
+
+def recorded_inventory(value: object, field: str, absent: bool = True) -> None:
+    if value is None and absent:
+        return
+    if not isinstance(value, dict) or "." not in value:
+        raise Refused(f"The recorded {field} is not an inventory")
+    for name, entry in value.items():
+        if (not isinstance(name, str) or not name or name.startswith("/") or "\\" in name
+                or ".." in PurePosixPath(name).parts or PurePosixPath(name).as_posix() != name
+                or not isinstance(entry, dict) or entry.get("type") not in ("dir", "file")
+                or type(entry.get("mode")) is not int or not 0 <= entry["mode"] <= 0o7777):
+            raise Refused(f"The recorded {field} has an invalid inventory entry")
+        if name == "." and entry["type"] != "dir":
+            raise Refused(f"The recorded {field} has no directory root")
+        if entry["type"] == "dir" and set(entry) != {"type", "mode"}:
+            raise Refused(f"The recorded {field} has an invalid directory entry")
+        if entry["type"] == "file" and (set(entry) != {"type", "mode", "sha256", "bytes"}
+                                        or not isinstance(entry["sha256"], str)
+                                        or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
+                                        or type(entry["bytes"]) is not int or entry["bytes"] < 0):
+            raise Refused(f"The recorded {field} has an invalid file entry")
+
+
+def receipt_metadata(receipt: dict, locations: Locations) -> Path:
+    if type(receipt.get("receipt_format")) is not int or receipt["receipt_format"] != 1:
+        raise Refused("Unsupported receipt format")
+    if receipt.get("state") not in ("installed", "rolled back", "recovered to the before-state; not installed"):
+        raise Refused("The receipt has an unsupported state")
+    selected_locations(receipt, locations)
+    transaction = transaction_path(locations, receipt.get("transaction"))
+    plain_transaction_path(locations.state, transaction / "receipt.json")
+    recorded_path(receipt.get("journal"), transaction / "journal.json", "receipt journal", locations.state)
+    before = receipt.get("before")
+    recorded_inventory(before, "before")
+    recorded_inventory(receipt.get("after"), "after-inventory", absent=False)
+    for key, expected in (("backup", transaction / "backup" / SKILL),
+                          ("retired", transaction / "retired" / SKILL)):
+        if before is None:
+            if receipt.get(key) is not None:
+                raise Refused(f"The recorded {key} is unexpected without a before-state")
+        else:
+            recorded_path(receipt.get(key), expected, key, locations.state)
+    duplicates = receipt.get("duplicates")
+    if not isinstance(duplicates, list):
+        raise Refused("The recorded duplicates are not a list")
+    originals = set()
+    for index, duplicate in enumerate(duplicates):
+        if not isinstance(duplicate, dict):
+            raise Refused("The recorded duplicate is not an object")
+        original = duplicate_path(locations, duplicate.get("path"))
+        if str(original) in originals:
+            raise Refused("The recorded duplicate is repeated")
+        originals.add(str(original))
+        recorded_path(duplicate.get("retired_to"), transaction / "duplicates" / str(index) / original.name,
+                      "retired duplicate", locations.state)
+        recorded_path(duplicate.get("backup"), transaction / "backup" / f"duplicate-{index}" / original.name,
+                      "duplicate backup", locations.state)
+        recorded_inventory(duplicate.get("inventory"), "duplicate", absent=False)
+        if "resolved" in duplicate:
+            if not isinstance(duplicate["resolved"], str):
+                raise Refused(f"The receipt records no valid location for the retired duplicate {original}; rollback refused")
+            normalized_absolute(duplicate["resolved"], "resolved duplicate")
+        if "physical" in duplicate:
+            recorded_physical(duplicate["physical"], "duplicate")
+    retirements = receipt.get("retirements", [])
+    if not isinstance(retirements, list):
+        raise Refused("The recorded retirements are not a list")
+    for item in retirements:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise Refused("The recorded retirement is not an object with a path")
+        try:
+            name = package_path(item["path"])
+        except ValueError:
+            raise Refused("The recorded retirement path is invalid") from None
+        if before is None or item["path"] not in before:
+            raise Refused("The recorded retirement is absent from the before-state")
+        for key, base in (("retired_copy", transaction / "retired" / SKILL),
+                          ("backup", transaction / "backup" / SKILL)):
+            if key in item:
+                recorded_path(item[key], base.joinpath(*name.parts), key, locations.state)
+    installer = receipt.get("installer_copy")
+    if installer is not None:
+        if not isinstance(installer, dict):
+            raise Refused("The recorded installer copy is not an object")
+        recorded_path(installer.get("path"), transaction / "installer" / PACKAGE_INSTALLER, "installer copy",
+                      locations.state)
+    command = receipt.get("rollback_command")
+    if command is not None and (not isinstance(command, list) or len(command) != 5
+                                or not isinstance(command[0], str) or not command[0]
+                                or command[1:] != [str(transaction / "installer" / PACKAGE_INSTALLER), "rollback",
+                                                   "--receipt", str(transaction / "receipt.json")]):
+        raise Refused("The recorded rollback command is not bound to this receipt")
+    if command is not None:
+        plain_transaction_path(locations.state, transaction / "installer" / PACKAGE_INSTALLER)
+    rollback = receipt.get("rollback")
+    if rollback is not None:
+        if not isinstance(rollback, dict) or not isinstance(rollback.get("journal"), str):
+            raise Refused("The recorded rollback evidence has no journal")
+        rollback_journal = normalized_absolute(rollback["journal"], "rollback evidence journal")
+        source, kind = journal_kind(locations, rollback_journal)
+        if source != transaction or kind != "rollback":
+            raise Refused("The recorded rollback evidence belongs to another transaction")
+        recorded_path(rollback.get("parked"), rollback_journal.parent / "parked" / SKILL,
+                      "rollback evidence parked target", locations.state)
+    return transaction
+
+
+def journal_metadata(record: dict, journal: Path, locations: Locations) -> dict | None:
+    transaction, kind = journal_kind(locations, journal)
+    installed_record = None
+    if record.get("operation") != kind:
+        raise Refused("The journal operation does not match its generated path")
+    recorded_path(record.get("target"), locations.target, "journal target")
+    recorded_inventory(record.get("origin"), "origin")
+    recorded_inventory(record.get("incoming"), "incoming")
+    if kind == "apply":
+        if record.get("incoming") is None:
+            raise Refused("The apply journal has no incoming inventory")
+        expected_backup = transaction / "backup" / SKILL
+        expected_incoming = transaction / "staged" / SKILL
+        expected_parked = transaction / "retired" / SKILL
+        if record.get("moves_last") is not None and record["moves_last"] is not False:
+            raise Refused("The apply journal has an invalid move order")
+    else:
+        if record.get("origin") is None:
+            raise Refused("The rollback journal has no origin inventory")
+        work = journal.parent
+        expected_backup = work / "origin-backup" / SKILL
+        expected_incoming = None
+        expected_parked = work / "parked" / SKILL
+        recorded_path(record.get("journal"), journal, "rollback journal", locations.state)
+        recorded_path(record.get("receipt"), transaction / "receipt.json", "rollback receipt", locations.state)
+        if record.get("moves_last") is not True:
+            raise Refused("The rollback journal has an invalid move order")
+        receipt = read_json(transaction / "receipt.json", "run recover again")
+        if receipt_metadata(receipt, locations) != transaction:
+            raise Refused("The rollback receipt belongs to another transaction; CURRENT was kept")
+        if canonical(record.get("incoming")) != canonical(receipt.get("before")):
+            raise Refused("The rollback journal's incoming inventory differs from its receipt")
+        rollback_receipt_matches_journal(record, receipt)
+        terminal_receipt = record.get("state") == "committed" and receipt["state"] == "rolled back"
+        installed_record = committed_apply_record_for_receipt(
+            transaction, receipt, locations, allow_rolled_back=terminal_receipt)
+    backup = record.get("origin_backup")
+    if record.get("origin") is None:
+        if backup is not None:
+            raise Refused("The journal backup is unexpected without an origin")
+    elif backup is not None:
+        recorded_path(backup, expected_backup, "journal backup", locations.state)
+    planned = record.get("planned_origin")
+    if planned is not None:
+        recorded_inventory(planned, "planned origin", absent=False)
+        state = record.get("state")
+        if record["origin"] is None or backup is not None or not isinstance(state, str) or (
+                state not in {"parked-drift", "undoing", "restoring", "undone"}
+                and not re.fullmatch(r"(?:restoring|restored)-move-[0-9]+", state)):
+            raise Refused("The journal has an invalid parked-drift origin")
+    elif record["origin"] is not None and backup is None:
+        raise Refused("The journal has no backup for its recorded origin")
+    recorded_path(record.get("parked"), expected_parked, "parked target", locations.state)
+    incoming_path = record.get("incoming_path")
+    if kind == "apply":
+        recorded_path(incoming_path, expected_incoming, "staged target", locations.state)
+    elif record.get("incoming") is None:
+        if incoming_path is not None:
+            raise Refused("The rollback journal has an unexpected incoming path")
+    elif incoming_path not in (str(transaction / "retired" / SKILL), str(journal.parent / "restore" / SKILL)):
+        raise Refused("The rollback incoming path is outside its transaction")
+    elif incoming_path is not None:
+        plain_transaction_path(locations.state, Path(incoming_path))
+    moves = record.get("moves")
+    if not isinstance(moves, list):
+        raise Refused("The journal moves are not a list")
+    for index, move in enumerate(moves):
+        if not isinstance(move, dict):
+            raise Refused("The journal move is not an object")
+        recorded_inventory(move.get("inventory"), "move", absent=False)
+        if kind == "apply":
+            source = duplicate_path(locations, move.get("from"))
+            recorded_path(move.get("to"), transaction / "duplicates" / str(index) / source.name, "retired move",
+                          locations.state)
+            recorded_path(move.get("backup"), transaction / "backup" / f"duplicate-{index}" / source.name,
+                          "move backup", locations.state)
+            if "resolved" in move:
+                normalized_absolute(move["resolved"], "resolved move")
+            recorded_move_physical(move, "from", "apply move")
+        else:
+            if index >= len(receipt["duplicates"]):
+                raise Refused("The rollback journal has an unrecorded duplicate")
+            if set(move) not in ({"from", "to", "inventory"}, {"from", "to", "inventory", "physical"}):
+                raise Refused("The rollback journal move has unexpected fields")
+            original = duplicate_path(locations, move.get("to"))
+            recorded_path(str(original), Path(receipt["duplicates"][index]["path"]), "restored duplicate")
+            if move.get("from") not in (receipt["duplicates"][index]["retired_to"],
+                                        str(journal.parent / "restore-duplicates" / str(index) / original.name)):
+                raise Refused("The rollback duplicate source is outside its transaction")
+            plain_transaction_path(locations.state, Path(move["from"]))
+            if canonical(move["inventory"]) != canonical(receipt["duplicates"][index]["inventory"]):
+                raise Refused("The rollback journal move inventory differs from its receipt")
+            recorded_move_physical(move, "to", "rollback move")
+            authoritative = installed_record["moves"][index].get("physical", {}).get("from")
+            operative = move.get("physical", {}).get("to")
+            if authoritative is None or receipt["duplicates"][index].get("physical") is None or operative is None:
+                raise Blocked("The rollback lacks the original duplicate-parent identity; automatic recovery is "
+                              "refused. Keep its backups and use manual restoration after verifying the original folder")
+            if canonical(operative) != canonical(authoritative):
+                raise Refused("The rollback move's physical destination differs from its committed apply journal; CURRENT was kept")
+    if kind == "rollback" and len(moves) != len(receipt["duplicates"]):
+        raise Refused("The rollback journal omits a recorded duplicate")
+    # Undo creates these copies from the journal's parked and move paths before renaming them.
+    plain_transaction_path(locations.state, expected_parked.parent / "restore" / SKILL)
+    if kind == "apply":
+        for index, move in enumerate(moves):
+            destination = Path(move["to"])
+            plain_transaction_path(locations.state,
+                                   destination.parent.parent / f"restore-{index}" / Path(move["from"]).name)
+    for key, allowed in (("parked_drift", {str(expected_parked)}),
+                         ("moved_drift", {move["to"] for move in moves})):
+        if key not in record:
+            continue
+        if key == "moved_drift" and not isinstance(record[key], list):
+            raise Refused("The journal moved_drift is not a list")
+        values = [record[key]] if key == "parked_drift" else record[key]
+        if not isinstance(values, list) or any(not isinstance(item, str) or item not in allowed for item in values):
+            raise Refused(f"The journal {key} is not a generated path")
+    stale = record.get("stale_restore_copies", [])
+    stale_parents = {expected_parked.parent, transaction / "duplicates"}
+    if not isinstance(stale, list) or any(not isinstance(item, str) or Path(item).parent not in stale_parents
+                                          or not RESTORE_STALE_NAME.fullmatch(Path(item).name) for item in stale):
+        raise Refused("The journal has an invalid stale restoration path")
+    for item in stale:
+        plain_transaction_path(locations.state, Path(item))
+    state = record.get("state")
+    ordinary = {"staged", "prepared", "parking", "parked", "parked-drift", "activating", "activated", "undoing",
+                "restoring", "undone", "committed"}
+    if state is not None and (not isinstance(state, str) or (state not in ordinary and not re.fullmatch(
+            r"(?:moving|moved|restoring-move|restored-move)-[0-9]+", state))):
+        raise Refused("The journal has an invalid state")
+    return installed_record
+
+
+def current_journal(locations: Locations) -> Path:
+    current = locations.state / "CURRENT"
+    if is_link(current) or not current.is_file():
+        raise Refused("CURRENT is not a regular selector file")
+    try:
+        with open(current, "rb") as stream:
+            data = stream.read(512)
+            if stream.read(1):
+                raise Refused("CURRENT is too long for a generated journal selector")
+        selection = data.decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        raise Refused(f"Cannot read CURRENT as a UTF-8 journal selector: {error}") from None
+    if not selection.endswith("\n") or selection.count("\n") != 1:
+        raise Refused("CURRENT is not one generated journal selector line")
+    relative = Path(selection[:-1])
+    if relative.is_absolute() or any(part in (".", "..") for part in relative.parts) or str(relative) != selection[:-1]:
+        raise Refused("CURRENT is not a generated relative journal selector")
+    journal = locations.state / relative
+    journal_kind(locations, journal)
+    if not journal.parent.is_dir():
+        raise Refused("CURRENT does not select an existing transaction directory")
+    return journal
 # The swap engine. An operation moves `moves` (from -> to), parks the target and activates an
 # incoming tree. Undo decides from the filesystem, checked against recorded inventories, never
 # from the journal state alone.
 class Operation:
-    def __init__(self, journal_path: Path, record: dict) -> None:
+    def __init__(self, journal_path: Path, record: dict, locations: Locations) -> None:
+        self.installed_record = journal_metadata(record, journal_path, locations)
         self.path = journal_path
         self.record = record
         self._move_parents = {}
 
     @contextmanager
-    def bound_moves(self):
+    def bound_moves(self, create_internal: bool = True, writable: bool = True):
         if self._move_parents:
             yield
             return
@@ -1304,10 +1734,13 @@ class Operation:
                                       "is refused. Keep its backups and use manual restoration after verifying the original folder")
                     for side in ("from", "to"):
                         path = Path(move[side])
-                        if side not in physical and side != external:
+                        if side not in physical and side != external and create_internal:
                             # Internal staging parents are created before the first move and journal save.
                             path.parent.mkdir(parents=True, exist_ok=True)
-                        parent = opened.enter_context(PhysicalDirectory(path.parent, physical.get(side, _UNBOUND_DIRECTORY)))
+                        if not create_internal and not path.parent.is_dir():
+                            raise Refused("The committed move's transaction parent is missing; CURRENT was kept")
+                        parent = opened.enter_context(PhysicalDirectory(
+                            path.parent, physical.get(side, _UNBOUND_DIRECTORY), writable=writable))
                         physical[side] = parent.describe()
                         parents[index, side] = parent
                     move["physical"] = physical
@@ -1639,6 +2072,19 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         problems = staging_problems(after, package_files, before or {}, plan["classification"])
         if problems:
             raise Refused("The staged tree does not match its expected inventory", problems)
+        retired = transaction / "retired" / SKILL
+        operation = Operation(journal, {
+            "operation": "apply",
+            "target": str(locations.target),
+            "origin": before,
+            "origin_backup": str(backup) if before is not None else None,
+            "incoming": after,
+            "incoming_path": str(staged),
+            "parked": str(retired),
+            "moves": moves,
+            "state": "staged",
+        }, locations)
+        write_json(journal, operation.record)
         checkpoint("apply:staged")
     except OSError as error:
         finish(locations.state)
@@ -1646,17 +2092,6 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
     except BaseException:
         finish(locations.state)
         raise
-    retired = transaction / "retired" / SKILL
-    operation = Operation(journal, {
-        "operation": "apply",
-        "target": str(locations.target),
-        "origin": before,
-        "origin_backup": str(backup) if before is not None else None,
-        "incoming": after,
-        "incoming_path": str(staged),
-        "parked": str(retired),
-        "moves": moves,
-    })
     attempt(operation, locations.state)
     try:
         discovered, unreadable = discoverable(locations.roots), None
@@ -1767,16 +2202,16 @@ def command_rollback(options) -> dict:
     given = Path(os.path.abspath(options.receipt))
     # The receipt is read before Locations.check(), so an unsearchable directory above it is diagnosed here.
     receipt = read_json(given, "run rollback again")
+    if is_link(given):
+        raise Refused("The selected receipt is a link or junction")
     if receipt.get("receipt_format") != 1:
         raise Refused("Unsupported receipt format")
-    locations = Locations(receipt["runtime"], receipt["home"], receipt.get("config_root"))
-    if str(locations.target) != receipt["target"] or str(locations.state) != receipt["state_root"]:
-        raise Refused("The receipt target does not match its runtime locations")
+    locations = locations_from_record(receipt)
+    transaction = receipt_metadata(receipt, locations)
     # Only the receipt inside its transaction is authoritative; a copy elsewhere must be identical.
-    transaction = Path(receipt["transaction"])
     receipt_path = transaction / "receipt.json"
-    if transaction.parent != locations.state:
-        raise Refused("The receipt's transaction is not in the runtime's installer state directory")
+    if is_link(receipt_path):
+        raise Refused("The canonical receipt is a link or junction")
     if not same_path(str(given), str(receipt_path)) and canonical(read_json(receipt_path, "run rollback again")) != canonical(receipt):
         raise Refused(f"The receipt differs from the canonical receipt {receipt_path}; roll back with that one")
     if receipt.get("state") != "installed":
@@ -1789,6 +2224,7 @@ def command_rollback(options) -> dict:
     with Lock(locations.state):
         if exists(locations.state / "CURRENT"):
             raise Blocked(f"An interrupted transaction is recorded in {locations.state / 'CURRENT'}; run `recover` first")
+        installed_record = committed_apply_record_for_receipt(transaction, receipt, locations)
         # A receipt field is untrusted input: only an integer mode is quoted back in guidance.
         root = receipt["after"].get(".")
         recorded = root.get("mode") if isinstance(root, dict) else None
@@ -1798,45 +2234,21 @@ def command_rollback(options) -> dict:
         # write no longer matches and the verified backup is restored instead.
         # The parent the duplicate returns through must be searchable as well as writable.
         restoring, physical_duplicates = [], {}
-        for duplicate in receipt["duplicates"]:
+        for index, duplicate in enumerate(receipt["duplicates"]):
             original = Path(duplicate["path"])
             parent = searchable_part(original, "run rollback again")
             if parent == original:
                 parent = original.parent
             if parent is not None:
                 restoring.append((parent, f"so the retired duplicate {original} cannot be moved back into it"))
-            # The copy must go back to the directory it was retired from. A link or junction added or retargeted
-            # on the way since apply (inside the skill root, at a secondary root, at its config root or above)
-            # would send it elsewhere; a link that still resolves to the same place, as with dotfiles, is accepted.
-            retired_from = duplicate.get("resolved")
-            if "resolved" in duplicate and not isinstance(retired_from, str):
-                raise Refused(f"The receipt records no valid location for the retired duplicate {original}; rollback refused")
-            skill_root = next((path for path in locations.roots if path in original.parents), None)
-            if retired_from is None and skill_root is not None:
-                # Older receipts, such as those of installer 1.0.0, do not record where the copy was. Nothing in
-                # them shows where a link at its skill root or at the directory holding that root (the config
-                # root for <config>/skills) pointed at apply, so such a link blocks. Discovery never follows
-                # links below a root, so the copy was retired from its path below the root's resolution.
-                linked = next((path for path in (skill_root.parent, skill_root)
-                               if os.path.isdir(str(path.parent)) and is_link(path)), None)
-                if linked is not None:
-                    raise Blocked(f"{linked} is a link or junction, and this receipt predates the record of where each "
-                                  f"retired duplicate was, so rollback cannot confirm that {original} would return to "
-                                  f"the folder it was retired from; replace {linked} with the folder it pointed to at "
-                                  "apply, then run rollback again, or, if it still points there, roll back with the "
-                                  "installer that wrote this receipt", {"path": str(original), "link": str(linked)})
-                retired_from = os.path.join(os.path.realpath(str(skill_root)), os.path.relpath(str(original), str(skill_root)))
-            resolved = os.path.realpath(str(original))
-            if isinstance(retired_from, str) and os.path.normcase(resolved) != os.path.normcase(retired_from):
-                raise Blocked(f"The retired duplicate {original} would be restored to {resolved}, not {retired_from} where "
-                              "it was retired from: a link or junction on the way was added or retargeted after apply; "
-                              "restore that folder, then run rollback again",
-                              {"path": str(original), "resolves_to": resolved, "retired_from": retired_from})
-            if "physical" not in duplicate:
-                raise Blocked("The receipt lacks the original duplicate-parent identity; automatic duplicate restoration "
-                              "is refused. Keep its backups and use manual restoration after verifying the original folder")
-            with PhysicalDirectory(original.parent, duplicate["physical"], writable=False) as parent:
-                physical_duplicates[str(original)] = parent.describe()
+            # Check both the receipt and its committed apply journal. The latter is the
+            # retained authority for the physical parent from which apply moved the copy.
+            verify_duplicate_restoration_path(locations, original, duplicate)
+            verify_duplicate_restoration_path(locations, original, installed_record["moves"][index])
+            require_discovered_duplicate_path(locations, original)
+            physical = installed_record["moves"][index]["physical"]["from"]
+            with PhysicalDirectory(original.parent, physical, writable=False) as bound_parent:
+                physical_duplicates[str(original)] = bound_parent.describe()
         locations.require_movable(recorded, "run rollback again", restoring)
         active = inventory(locations.target, "run rollback again")
         origin = receipt["after"]
@@ -1912,16 +2324,17 @@ def command_rollback(options) -> dict:
             "parked": str(work / "parked" / SKILL),
             "moves": moves,
             "moves_last": True,
-        })
+        }, locations)
         attempt(operation, locations.state)
         operation.record["rollback_evidence"] = {"maintenance_boundary": boundary, "test_hooks": active_test_hooks()}
         operation.save("committed")
-        mark_rolled_back(operation.record)
+        mark_rolled_back(operation.record, locations)
         finish(locations.state)
         return {"result": "rolled back", "target": str(locations.target), "restored": "absent" if receipt["before"] is None else "before-inventory"}
 
 
-def mark_rolled_back(record: dict, tolerant: bool = False) -> bool:
+def mark_rolled_back(record: dict, locations: Locations, tolerant: bool = False) -> bool:
+    journal_metadata(record, Path(record.get("journal", "")), locations)
     receipt_path = Path(record["receipt"])
     try:
         receipt = read_json(receipt_path)
@@ -1929,17 +2342,105 @@ def mark_rolled_back(record: dict, tolerant: bool = False) -> bool:
         if tolerant:
             return False
         raise
+    receipt_metadata(receipt, locations)
     receipt["state"] = "rolled back"
     receipt["rollback"] = {"journal": record["journal"], "parked": record["parked"], **record.get("rollback_evidence", {})}
     write_json(receipt_path, receipt)
     return True
 
 
+def owner_write_only_inventory_repair(recorded: dict, actual: dict) -> bool:
+    """A legacy read-only root may have gained only owner write for rollback."""
+    root = recorded.get(".")
+    if not isinstance(root, dict) or type(root.get("mode")) is not int or root["mode"] & stat.S_IWUSR:
+        return False
+    repaired = {**recorded, ".": {**root, "mode": root["mode"] | stat.S_IWUSR}}
+    return canonical(repaired) == canonical(actual)
+
+
+def apply_receipt_matches_journal(record: dict, receipt: dict, journal: Path,
+                                  allow_rolled_back: bool = False) -> None:
+    """Bind a receipt written before apply's final journal save to that operation."""
+    if receipt["transaction"] != str(journal.parent) or receipt["journal"] != str(journal):
+        raise Refused("The apply receipt belongs to another transaction; CURRENT was kept")
+    if record["state"] == "committed":
+        valid_states = ("installed", "rolled back") if allow_rolled_back else ("installed",)
+    else:
+        valid_states = ("installed", "recovered to the before-state; not installed")
+    if receipt["state"] == "recovered to the before-state; not installed" and record["state"] != "undone":
+        raise Refused("The apply receipt state differs from its journal; CURRENT was kept")
+    if receipt["state"] not in valid_states or canonical(record["origin"]) != canonical(receipt["before"]):
+        raise Refused("The apply receipt differs from its journal before-state; CURRENT was kept")
+    if (canonical(record["incoming"]) != canonical(receipt["after"])
+            and not owner_write_only_inventory_repair(receipt["after"], record["incoming"])):
+        raise Refused("The apply receipt differs from its journal after-state; CURRENT was kept")
+    duplicates = [{"path": move["from"], "retired_to": move["to"], "backup": move["backup"],
+                   "inventory": move["inventory"],
+                   **({"resolved": move["resolved"]} if "resolved" in move else {})}
+                  for move in record["moves"]]
+    recorded = [{**{key: duplicate[key] for key in ("path", "retired_to", "backup", "inventory")},
+                 **({"resolved": duplicate["resolved"]} if "resolved" in duplicate else {})}
+                for duplicate in receipt["duplicates"]]
+    if len(duplicates) == len(recorded):
+        for expected, actual, move, duplicate in zip(duplicates, recorded, record["moves"], receipt["duplicates"]):
+            # Legacy receipts omit this optional field; their rollback still checks the journal's
+            # recorded location and applies the legacy linked-root rule to the receipt.
+            if "resolved" not in actual:
+                expected.pop("resolved", None)
+            apply_physical = move.get("physical", {}).get("from")
+            receipt_physical = duplicate.get("physical")
+            if apply_physical is None or receipt_physical is None:
+                raise Blocked("The receipt or committed apply journal lacks the original duplicate-parent identity; "
+                              "automatic duplicate restoration is refused. Keep its backups and use manual "
+                              "restoration after verifying the original folder")
+            if canonical(apply_physical) != canonical(receipt_physical):
+                raise Refused("The receipt's physical duplicate parent differs from its committed apply journal; CURRENT was kept")
+    if canonical(duplicates) != canonical(recorded):
+        raise Refused("The apply receipt differs from its journal duplicates; CURRENT was kept")
+
+
+def committed_apply_record_for_receipt(transaction: Path, receipt: dict, locations: Locations,
+                                       allow_rolled_back: bool = False) -> dict:
+    """Use the retained committed apply journal as the receipt's restoration authority."""
+    journal = transaction / "journal.json"
+    record = read_json(journal, "run rollback again")
+    journal_metadata(record, journal, locations)
+    if record.get("state") != "committed":
+        raise Refused("The installed receipt has no committed apply journal; rollback refused")
+    apply_receipt_matches_journal(record, receipt, journal, allow_rolled_back=allow_rolled_back)
+    return record
+
+
+def rollback_receipt_matches_journal(record: dict, receipt: dict) -> None:
+    """The parked rollback origin is the installed tree, including the supported owner-write repair."""
+    state = record.get("state")
+    receipt_state = receipt["state"]
+    if receipt_state != "installed" and (state != "committed" or receipt_state != "rolled back"):
+        raise Refused("The rollback receipt state differs from its journal; CURRENT was kept")
+    if receipt_state == "rolled back":
+        evidence = receipt.get("rollback")
+        if (not isinstance(evidence, dict) or evidence.get("journal") != record["journal"]
+                or evidence.get("parked") != record.get("parked")):
+            raise Refused("The rollback receipt evidence differs from its journal; CURRENT was kept")
+    planned = record.get("planned_origin")
+    origin = planned if planned is not None else record["origin"]
+    expected = receipt["after"]
+    if canonical(origin) == canonical(expected):
+        return
+    if owner_write_only_inventory_repair(expected, origin):
+        return
+    raise Refused("The rollback journal's origin inventory differs from its receipt; CURRENT was kept")
+
+
 def command_recover(options) -> dict:
     if options.plan or options.receipt:
         # The recorded config root, so recovery finds the state whatever the environment now says.
         recorded = read_json(Path(options.plan or options.receipt), "run recover again")
-        locations = Locations(recorded["runtime"], recorded["home"], recorded.get("config_root"))
+        locations = locations_from_record(recorded)
+        if options.plan and (type(recorded.get("plan_format")) is not int or recorded["plan_format"] != 1):
+            raise Refused("Unsupported plan format")
+        if options.receipt:
+            receipt_metadata(recorded, locations)
     elif options.runtime:
         locations = Locations(options.runtime, options.home)
     else:
@@ -1962,29 +2463,58 @@ def command_recover(options) -> dict:
         current = locations.state / "CURRENT"
         if not exists(current):
             return nothing
-        journal = locations.state / current.read_text(encoding="utf-8").strip()
+        journal = current_journal(locations)
         if not exists(journal):
-            # The journal is written durably before the first rename, so nothing was renamed.
-            finish(locations.state)
-            return {"result": "no rename happened; staging data kept", "transaction": str(journal.parent)}
+            raise Incomplete(f"The selected journal {journal} is missing; rename state cannot be established. "
+                             "CURRENT and staging data were kept for inspection")
         record = read_json(journal)
-        operation = Operation(journal, record)
+        operation = Operation(journal, record, locations)
+        apply_receipt_path = journal.parent / "receipt.json"
+        if record["operation"] == "apply":
+            if record["origin"] is None and exists(Path(record["parked"])):
+                raise Refused("The apply journal has a parked target without a recorded origin; CURRENT was kept")
+            for move in record["moves"]:
+                original = Path(move["from"])
+                verify_duplicate_restoration_path(locations, original, move, recovery=True)
+                require_discovered_duplicate_path(locations, original, recovery=True)
+            if record.get("state") != "committed" and exists(apply_receipt_path):
+                receipt = read_json(apply_receipt_path, "run recover again")
+                receipt_metadata(receipt, locations)
+                apply_receipt_matches_journal(record, receipt, journal)
+        else:
+            receipt = read_json(Path(record["receipt"]), "run recover again")
+            receipt_metadata(receipt, locations)
+            for index, move in enumerate(record["moves"]):
+                original = Path(move["to"])
+                verify_duplicate_restoration_path(locations, original, receipt["duplicates"][index], recovery=True)
+                verify_duplicate_restoration_path(locations, original, operation.installed_record["moves"][index],
+                                                   recovery=True)
+                require_discovered_duplicate_path(locations, original, recovery=True)
         if record.get("state") == "committed":
-            result = {"result": "already committed", "journal": str(journal)}
-            if record["operation"] == "rollback" and not mark_rolled_back(record, tolerant=True):
-                result["receipt_not_updated"] = record["receipt"]
-            if record["operation"] == "apply":
-                # The apply output may never have been printed: name the receipt and what it retired.
-                receipt = journal.parent / "receipt.json"
-                result["receipt"] = str(receipt)
-                try:
-                    value = read_json(receipt)
-                except Refused as error:
-                    result["receipt_unreadable"] = str(error)
-                else:
-                    result.update({key: value[key] for key in ("retirements", "rollback_command") if key in value})
-            finish(locations.state)
-            return result
+            with operation.bound_moves(create_internal=False, writable=False):
+                changed = differences(record["incoming"], inventory(locations.target))
+                for index, move in enumerate(record["moves"]):
+                    changed += differences(move["inventory"], operation.move_inventory(index, "to"))
+                if changed:
+                    raise Refused("The committed journal does not match the installed state; CURRENT was kept")
+                result = {"result": "already committed", "journal": str(journal)}
+                if record["operation"] == "rollback" and not mark_rolled_back(record, locations, tolerant=True):
+                    result["receipt_not_updated"] = record["receipt"]
+                if record["operation"] == "apply":
+                    # The apply output may never have been printed: name the receipt and what it retired.
+                    receipt = apply_receipt_path
+                    result["receipt"] = str(receipt)
+                    try:
+                        value = read_json(receipt)
+                    except Refused as error:
+                        raise Incomplete(f"The committed apply receipt {receipt} is unavailable: {error}; "
+                                         "CURRENT was kept for inspection") from None
+                    else:
+                        receipt_metadata(value, locations)
+                        apply_receipt_matches_journal(record, value, journal)
+                        result.update({key: value[key] for key in ("retirements", "rollback_command") if key in value})
+                finish(locations.state)
+                return result
         operation.record["recovery_boundary"] = boundary
         try:
             operation.undo()

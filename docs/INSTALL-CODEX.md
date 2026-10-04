@@ -1,6 +1,6 @@
 # Personal Codex Desktop installation on Windows — v6.5.0
 
-Use these steps from the extracted ZIP produced by `python3 scripts/build.py`. Paths below are relative to that package root, not this guide's source location in the repository.
+Obtain this guide and the release checksum file through an authenticated source outside the ZIP. Start in the download directory, outside repositories and skill discovery roots, with the ZIP and checksum file there. Do not use an existing extraction or its instructions to establish trust. The bootstrap below creates the only package root used by later steps.
 
 Apply only when **Codex is installed and the user has targeted it on this computer**. Otherwise record that Codex is not targeted and leave its files intact. Install personal instructions/skill outside repositories; this does not run project adoption, integration or cleanup. First check MANIFEST.json version, every file hash and STATUS.md. Historical checks do not qualify this computer.
 
@@ -19,33 +19,111 @@ Check Desktop version or `codex --version`, active config.toml, custom-role supp
 
 The preflight requires Git, gh, Git Bash/Bash with awk/grep/mktemp and **Python 3.8+ standard library**. Verify a real working python3, py -3 or python, in that detection order. If absent, installation remains unqualified until Python is installed from the [official Windows distribution](https://www.python.org/downloads/windows/) and checked again. No external jq is needed.
 
-Use the first working Python 3.8+ launcher in the same terminal as the installation commands below. Keep its executable and arguments separate; every command reuses this selection:
+## Authenticate and extract the package
 
+The expected SHA-256 must come from a separately authenticated release checksum file. Downloading both files from a replaceable, untrusted source establishes no provenance. Use PowerShell 5.1+ or PowerShell 7 with a trusted local Python installation; start a terminal without profiles (`powershell -NoProfile` or `pwsh -NoProfile`). Stop on any error and do not run later steps with values left by an earlier attempt.
+
+Run this block from the download directory. It captures bounded ZIP/checksum bytes once, authenticates the ZIP before running any bundled code, checks its members with the authenticated installer, and extracts into a new directory. The original ZIP may subsequently change without changing this verified snapshot. Python isolation (`-I`) excludes the current directory, user modules and Python environment variables during discovery and every installer call.
+
+<!-- package-bootstrap:start -->
 ```powershell
-$installerPython = $null
-$installerPythonArgs = @()
-$pythonCandidates = @(
-    @{ Name = 'python3'; Args = @() },
-    @{ Name = 'py'; Args = @('-3') },
-    @{ Name = 'python'; Args = @() }
-)
-foreach ($candidate in $pythonCandidates) {
-    $candidateCommand = Get-Command -Name $candidate.Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $candidateCommand) { continue }
-    $candidateArgs = $candidate.Args
-    & $candidateCommand.Source @candidateArgs -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        $installerPython = $candidateCommand.Source
-        $installerPythonArgs = $candidateArgs
-        break
+$ErrorActionPreference = 'Stop'
+$installerScript = $null
+$packageRoot = $null
+$packageName = 'dev-harness-v6.5.0'
+$archiveName = $packageName + '-codex-claude.zip'
+$checksumName = $packageName + '-SHA256SUMS.txt'
+$downloadRoot = (Get-Location).ProviderPath
+$archiveSource = (Resolve-Path -LiteralPath (Join-Path $downloadRoot $archiveName) -ErrorAction Stop).ProviderPath
+$checksumSource = (Resolve-Path -LiteralPath (Join-Path $downloadRoot $checksumName) -ErrorAction Stop).ProviderPath
+
+function Read-BootstrapBytes([string] $Path, [int] $Limit) {
+    $inputFile = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $length = $inputFile.Length
+        if ($length -gt $Limit) { throw 'Bootstrap input exceeds its size limit' }
+        $bytes = New-Object byte[] ([int] $length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $count = $inputFile.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($count -eq 0) { throw 'Bootstrap input changed during capture' }
+            $offset += $count
+        }
+        if ($inputFile.ReadByte() -ne -1) { throw 'Bootstrap input grew during capture' }
+        return ,$bytes
+    } finally {
+        $inputFile.Dispose()
     }
 }
-if (-not $installerPython) { throw 'Python 3.8+ unavailable; install Python and repeat discovery' }
+
+$checksumBytes = Read-BootstrapBytes $checksumSource 131072
+$checksumText = [Text.UTF8Encoding]::new($false, $true).GetString($checksumBytes)
+$archivePattern = '^([0-9a-fA-F]{64})  ' + [regex]::Escape($archiveName) + '$'
+$archiveHashes = @(foreach ($line in ($checksumText -split '\r?\n')) {
+    if ($line -cmatch $archivePattern) { $Matches[1].ToLowerInvariant() }
+})
+if ($archiveHashes.Count -ne 1) { throw 'Require exactly one valid checksum for the expected archive' }
+$archiveBytes = Read-BootstrapBytes $archiveSource 268435456
+$archiveStream = [IO.MemoryStream]::new($archiveBytes, $false)
+$bundle = $null
+try {
+    $actualHash = (Get-FileHash -InputStream $archiveStream -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    if ($actualHash -cne $archiveHashes[0]) { throw 'Archive checksum mismatch; no bundled code was executed' }
+
+    # Use only this authenticated snapshot, never an existing extracted installer.
+    $bootstrapRoot = Join-Path $downloadRoot ('dev-harness-verified-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $bootstrapRoot -ErrorAction Stop | Out-Null
+    $packageZip = Join-Path $bootstrapRoot $archiveName
+    $checksums = Join-Path $bootstrapRoot $checksumName
+    [IO.File]::WriteAllBytes($packageZip, $archiveBytes)
+    [IO.File]::WriteAllBytes($checksums, $checksumBytes)
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem -ErrorAction Stop
+    $archiveStream.Position = 0
+    $bundle = [IO.Compression.ZipArchive]::new($archiveStream, [IO.Compression.ZipArchiveMode]::Read, $true)
+    $installerEntries = @($bundle.Entries | Where-Object { $_.FullName -ceq ($packageName + '/install.py') })
+    if ($installerEntries.Count -ne 1 -or $installerEntries[0].Length -gt 67108864) { throw 'Invalid bootstrap installer entry' }
+    $bootstrapInstaller = Join-Path $bootstrapRoot 'bootstrap-install.py'
+    [IO.Compression.ZipFileExtensions]::ExtractToFile($installerEntries[0], $bootstrapInstaller)
+
+    $installerPython = $null
+    $installerPythonArgs = @()
+    $pythonCandidates = @(
+        @{ Name = 'python3'; Args = @('-I') },
+        @{ Name = 'py'; Args = @('-3', '-I') },
+        @{ Name = 'python'; Args = @('-I') }
+    )
+    foreach ($candidate in $pythonCandidates) {
+        $candidateCommand = Get-Command -Name $candidate.Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $candidateCommand) { continue }
+        $candidateArgs = $candidate.Args
+        & $candidateCommand.Source @candidateArgs -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $installerPython = $candidateCommand.Source
+            $installerPythonArgs = $candidateArgs
+            break
+        }
+    }
+    if (-not $installerPython) { throw 'Python 3.8+ unavailable; install Python and repeat bootstrap' }
+    & $installerPython @installerPythonArgs $bootstrapInstaller verify-package $packageZip --checksums $checksums
+    if ($LASTEXITCODE -ne 0) { throw 'Archive member verification failed; stop before full extraction' }
+    [IO.Compression.ZipFileExtensions]::ExtractToDirectory($bundle, $bootstrapRoot)
+    $packageRoot = Join-Path $bootstrapRoot $packageName
+    $installerScript = Join-Path $packageRoot 'install.py'
+    & $installerPython @installerPythonArgs $installerScript verify-package $packageRoot --checksums $checksums
+    if ($LASTEXITCODE -ne 0) { throw 'Extracted package verification failed; stop the update' }
+    Set-Location -LiteralPath $packageRoot -ErrorAction Stop
+} finally {
+    if ($bundle) { $bundle.Dispose() }
+    $archiveStream.Dispose()
+}
 ```
+<!-- package-bootstrap:end -->
+
+The current directory is now `$packageRoot`; `$installerScript`, `$packageZip` and `$checksums` are absolute paths within the new verified workspace. Keep that workspace intact for planning/apply and recovery evidence. The bootstrap creates package files only; it does not edit an installed profile. Never substitute an old extracted `install.py` in later commands. If the workspace is removed or changes, repeat authentication from the independently trusted release files.
 
 ## Update check — read-only, before any backup or edit
 
-Run this first. It answers "is this computer already current, and what must change?" and modifies nothing. Record one outcome per checkpoint, using these four words:
+After package authentication, run this check before editing the installed profile. It answers "is this computer already current, and what must change?" and modifies nothing. Record one outcome per checkpoint, using these four words:
 
 - **current** — matches the package.
 - **personalized** — matches, plus deliberate local additions or preferences.
@@ -54,20 +132,11 @@ Run this first. It answers "is this computer already current, and what must chan
 
 Report the outcome per checkpoint; do not collapse them into one verdict.
 
-Keep the original ZIP and its separately delivered `dev-harness-v6.5.0-SHA256SUMS.txt` beside the extracted package. From the extracted package root, this read-only example uses those actual sibling files; adjust their locations if necessary:
-
-```powershell
-$packageZip = (Resolve-Path '..\dev-harness-v6.5.0-codex-claude.zip' -ErrorAction Stop).Path
-$checksums = (Resolve-Path '..\dev-harness-v6.5.0-SHA256SUMS.txt' -ErrorAction Stop).Path
-& $installerPython @installerPythonArgs .\install.py verify-package $packageZip --checksums $checksums
-if ($LASTEXITCODE -ne 0) { throw 'Package verification failed; stop the update' }
-& $installerPython @installerPythonArgs .\install.py verify-package . --checksums $checksums
-if ($LASTEXITCODE -ne 0) { throw 'Extracted package verification failed; stop the update' }
-```
+Complete the authenticated bootstrap above before this check. Reuse its verified snapshot and fresh package root; a checksum supplied by the same untrusted archive is not an independent trust source.
 
 The installer is standard-library Python and declares Python 3.8+ support; interpreter versions actually exercised are listed in STATUS.md. Use the same verified package and checksum file for planning and apply. Keep private plans, receipts and backups outside repositories and every skill discovery root.
 
-1. **Package** — use the shipped `install.py verify-package` commands above with the separately supplied `dev-harness-v6.5.0-SHA256SUMS.txt`. They check the archive and the extracted files against the same manifest digest, sizes and hashes, and reject extra, missing or unsafe paths. ZIP input also checks the archive digest; extracted-directory input reports that the archive digest was not checked in that invocation. Record the package version and that distinction. Hash agreement proves integrity against the supplied expectations, not independent provenance. A mismatch is `blocked`, and no later checkpoint is trustworthy.
+1. **Package** — use the completed authenticated bootstrap and its `verify-package` results with the independently trusted `dev-harness-v6.5.0-SHA256SUMS.txt`. They check the archive and the extracted files against the same manifest digest, sizes and hashes, and reject extra, missing or unsafe paths. ZIP input also checks the archive digest; extracted-directory input reports that the archive digest was not checked in that invocation. Record the package version and that distinction. Hash agreement proves integrity against the supplied expectations, not independent provenance. A mismatch is `blocked`, and no later checkpoint is trustworthy.
 2. **Active instruction file** — establish which file Codex loads: a nonempty `$codexHome\AGENTS.override.md` takes precedence over `$codexHome\AGENTS.md`. Compare the loaded one with `configurations/codex/AGENTS.md`; compare the masked one only to keep the pair consistent. Record the loaded file as the target for any later required merge; do not edit either file during this check.
 3. **`github-workflow` skill** — resolve `$skillsHome\github-workflow`. A real directory is compared file by file with `skills/github-workflow/`. A link or junction is **not** replaced: resolve its canonical directory, record the link target and its owner, and compare there. One canonical directory can serve several applications at once and is then checked once for all of them. Also resolve `$codexHome\skills\github-workflow` as a possible older separate copy. Evidence is the file count, every SHA-256 and the three license templates.
 4. **Roles and configuration** — compare the `[agents]` keys in the active `config.toml` with `configurations/codex/agents-config.toml`, and the five role TOMLs with `configurations/codex/agents/`. Preserve other tables, providers, permissions and deliberate disablement. An unavailable model or effort is `personalized`, not `outdated`.
@@ -90,7 +159,7 @@ $backupRoot
 
 Copy every file/link that will change, preserving type/tree: active instructions, adjacent AGENTS.md, config.toml, targeted role files and the complete skill/history. Inventory paths/types/link targets/SHA-256/file counts and verify the backup by readback. The local receipt records absolute paths, before/after hashes, recognized provenance/version, created/retired files and merge diffs. Keep authentication, secrets and unrelated profile content out of the export. Preserve earlier backups.
 
-The **personal package is v6.5.0; the active repository template is v6.4**. This package includes initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill; project adoption remains a separate PR after its current task. Compare marker and actual bytes against authentic sources; a version number alone is insufficient. Preserve newer/unknown local policy and merge only compatible additions. For v6.4.0 or older with a verified base, use a three-way comparison: exact historical base / local file / package file, individually for instructions, skill and roles. Preserve local customizations, restrictions and imports. Without an authentic base, capture local files and compare manually; invent no history. Keep authentic local v5.1/v5.2 snapshots, which are not shipped here.
+The **personal package is v6.5.0; the active repository template is v6.6**. The compact template keeps required policy references explicit. This package includes initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill; project adoption remains a separate PR after its current task. Compare marker and actual bytes against authentic sources; a version number alone is insufficient. Preserve newer/unknown local policy and merge only compatible additions. For v6.4.0 or older with a verified base, use a three-way comparison: exact historical base / local file / package file, individually for instructions, skill and roles. Preserve local customizations, restrictions and imports. Without an authentic base, capture local files and compare manually; invent no history. Keep authentic local v5.1/v5.2 snapshots, which are not shipped here.
 
 ## Install targeted files
 
@@ -106,7 +175,7 @@ Use this section only when the skill checkpoint needs an update. A current or de
 
 ```powershell
 $planPath = Join-Path $backupRoot 'skill-plan.json'
-& $installerPython @installerPythonArgs .\install.py plan --runtime codex --package $packageZip --checksums $checksums --output $planPath
+& $installerPython @installerPythonArgs $installerScript plan --runtime codex --package $packageZip --checksums $checksums --output $planPath
 if ($LASTEXITCODE -ne 0) { throw 'Planning failed; do not apply' }
 ```
 
@@ -139,7 +208,7 @@ Unknown files and authentic local history remain active unless they occupy a pac
 Stop all Claude and Codex sessions that can consume the affected skills, prevent new sessions from starting, and close handles or shells whose working directory is in the target. Run the following from an independent terminal outside every skill root, keeping consumers stopped through verification. An agent running inside a consuming session must hand over the prepared plan rather than run the mutation itself. `--maintenance-confirmed` records the operator's confirmation; it does not stop applications.
 
 ```powershell
-$applyOutput = & $installerPython @installerPythonArgs .\install.py apply --plan $planPath --checksums $checksums --maintenance-confirmed
+$applyOutput = & $installerPython @installerPythonArgs $installerScript apply --plan $planPath --checksums $checksums --maintenance-confirmed
 if ($LASTEXITCODE -ne 0) { throw 'Apply failed; preserve the JSON error and recovery state' }
 $installed = $applyOutput | ConvertFrom-Json
 $receiptPath = $installed.receipt
@@ -170,7 +239,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Rollback failed; inspect the JSON error and ke
 
 Use the original receipt path reported by apply. Rollback refuses if the active tree, including its recorded modes, differs from the receipt's after-inventory; preserve and reconcile later edits before retrying. Otherwise it restores the verified before-state, including edited named files, duplicate copies and caches, or returns a previously absent target to absence. A deleted retained installer must be replaced by a separately verified matching package installer; do not reconstruct missing recovery evidence.
 
-For an interrupted apply, retain the original plan and run `& $installerPython @installerPythonArgs .\install.py recover --plan $planPath --maintenance-confirmed` from the verified package. For an interrupted rollback, use `recover --receipt $receiptPath --maintenance-confirmed` with that verified installer. Reestablish the maintenance boundary first. Prefer the exact plan or receipt over `recover --runtime codex`: the recorded directories are reused even when `CODEX_HOME` or `--home` changes. Codex state is under the selected home, independently of `CODEX_HOME`; the runtime form checks only that currently resolved state directory, and `nothing to recover` is limited to the reported root. Read the reported result: recovery may restore the before-state or acknowledge an already committed transaction. Never delete `CURRENT`, the journal or recovery copies to clear an error.
+Rollback and rollback recovery require the retained committed apply journal to agree with the receipt before any restoration. Keep that journal with the original receipt and recovery copies. Missing or inconsistent older records cause a refusal; preserve them for reconciliation instead of regenerating evidence or deleting CURRENT.
+
+For an interrupted apply, retain the original plan and run `& $installerPython @installerPythonArgs $installerScript recover --plan $planPath --maintenance-confirmed` from the verified package. For an interrupted rollback, use `recover --receipt $receiptPath --maintenance-confirmed` with that verified installer. Reestablish the maintenance boundary first. Prefer the exact plan or receipt over `recover --runtime codex`: the recorded directories are reused even when `CODEX_HOME` or `--home` changes. Codex state is under the selected home, independently of `CODEX_HOME`; the runtime form checks only that currently resolved state directory, and `nothing to recover` is limited to the reported root. Read the reported result: recovery may restore the before-state or acknowledge an already committed transaction. Never delete `CURRENT`, the journal or recovery copies to clear an error.
 
 Success is exit 0 with JSON on stdout. Refusals such as drift use exit 1; blocked preconditions such as active consumers or links use exit 2. Exit 3 can indicate an incomplete restoration or an unexpected filesystem error: inspect the JSON and retained state before deciding the recovery action. Failed commands write JSON to stderr. A nonzero result is not a completed installation.
 
@@ -183,7 +254,7 @@ If the verified current installer asks for owner write and explicitly supports t
 Add only the owner-write permission requested for the selected skill directory. The corrected installer accepts exactly the recorded root mode with owner write added; it still refuses other mode, content or inventory changes. Run it in a permission context that can perform the original directory moves and restoration. The mode exception does not supply missing operating-system permissions, and these steps do not authorize switching accounts or elevating privileges. Then run:
 
 ```powershell
-& $installerPython @installerPythonArgs .\install.py rollback --receipt $receiptPath --maintenance-confirmed
+& $installerPython @installerPythonArgs $installerScript rollback --receipt $receiptPath --maintenance-confirmed
 if ($LASTEXITCODE -ne 0) { throw 'Legacy rollback failed; inspect the JSON error and preserve recovery state' }
 ```
 

@@ -78,6 +78,11 @@ YAML_SUFFIXES = (".yml", ".yaml")
 # pip-style VCS URLs put a revision after a plain path: git+https://host/owner/repo.git@main.
 VCS_SCHEME = re.compile(r'(?<![A-Za-z0-9+.-])(?:git|hg|svn|bzr)\+[a-z]+:\Z')
 VCS_PATH = re.compile(r'//[^/?#=&]+(?:/[^/?#=&]+)+\Z')
+ACTION_PIN = re.compile(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+@[0-9a-f]{40}\Z')
+RELEASE_COMMENT = re.compile(r'v[0-9]+(?:\.[0-9]+){0,2}(?![A-Za-z0-9.])')
+CI_USES = re.compile(r'^\s*(?:-\s+)?uses\s*:\s*(.*)$')
+CI_USES_KEY = re.compile(r'(?<![A-Za-z0-9_-])["\x27]?uses["\x27]?\s*:')
+SETUP_EXAMPLE = re.compile(r'(?<![A-Za-z0-9_./])actions/setup-[A-Za-z0-9_-]+(?:@[A-Za-z0-9._-]+)?')
 
 
 def label_char(char):
@@ -215,6 +220,120 @@ def check_links(name, text, available):
         require(resolved in available or any(n.startswith(resolved.rstrip("/") + "/") for n in available), f"Broken link: {name}: {target}")
 
 
+def operative_ci_steps(lines):
+    """Return step spans from a workflow, without parsing arbitrary YAML."""
+    steps = []
+    for index, line in enumerate(lines):
+        match = re.fullmatch(r'( *)steps:\s*(?:#.*)?', line)
+        if not match:
+            continue
+        parent_indent = len(match.group(1))
+        step_indent = start = None
+        end = index + 1
+        while end < len(lines):
+            candidate = lines[end]
+            if candidate.strip() and not candidate.lstrip().startswith('#'):
+                indent = len(candidate) - len(candidate.lstrip(' '))
+                if indent <= parent_indent:
+                    break
+                item = re.match(r'( *)-\s+\S', candidate)
+                if item and (step_indent is None or len(item.group(1)) == step_indent):
+                    if start is not None:
+                        steps.append((start, end, step_indent))
+                    step_indent = len(item.group(1))
+                    start = end
+            end += 1
+        if start is not None:
+            steps.append((start, end, step_indent))
+    return steps
+
+
+def checkout_has_explicit_credentials(lines, start, end, step_indent):
+    """Only a direct `with:` input on this checkout step can disable credentials."""
+    with_blocks = []
+    property_indent = step_indent + 2
+    for index in range(start + 1, end):
+        line = lines[index]
+        if line.lstrip().startswith('#'):
+            continue
+        indent = len(line) - len(line.lstrip(' '))
+        if indent == property_indent and re.fullmatch(r'\s*with:\s*(?:#.*)?', line):
+            with_blocks.append(index)
+    if len(with_blocks) != 1:
+        return False
+    first = with_blocks[0] + 1
+    last = first
+    while last < end:
+        line = lines[last]
+        if line.strip() and not line.lstrip().startswith('#'):
+            indent = len(line) - len(line.lstrip(' '))
+            if indent <= property_indent:
+                break
+        last += 1
+    entries = [
+        (len(line) - len(line.lstrip(' ')), line.strip())
+        for line in lines[first:last]
+        if line.strip() and not line.lstrip().startswith('#')
+    ]
+    if not entries:
+        return False
+    input_indent = min(indent for indent, _ in entries)
+    credentials = []
+    for indent, entry in entries:
+        if indent == input_indent:
+            match = re.fullmatch(r'persist-credentials:\s*(.*)', entry)
+            if match:
+                credentials.append(match.group(1).partition('#')[0].strip())
+    return credentials == ['false']
+
+
+def check_ci_actions(ci_name):
+    """Guard action pins and each checkout's credential input in one workflow."""
+    lines = (ROOT / ci_name).read_text(encoding='utf-8').splitlines()
+    steps = operative_ci_steps(lines)
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith('#'):
+            continue
+        match = CI_USES.match(line)
+        if not match:
+            require(not CI_USES_KEY.search(line.partition('#')[0]),
+                    f'{ci_name}:{index + 1}: unsupported action uses syntax')
+            continue
+        value, separator, comment = match.group(1).partition('#')
+        ref = value.strip()
+        if ref.startswith(('"', "'")) and ref.endswith(ref[0]):
+            ref = ref[1:-1]
+        location = f'{ci_name}:{index + 1}'
+        if ref.startswith('./'):
+            continue
+        require(bool(ACTION_PIN.fullmatch(ref)),
+                f'{location}: non-local action requires a full lowercase 40-hex revision')
+        require(bool(separator and RELEASE_COMMENT.match(comment.strip())),
+                f'{location}: action pin needs a readable version comment')
+        if ref.partition('@')[0].lower() == 'actions/checkout':
+            step = next((step for step in steps if step[0] <= index < step[1]), None)
+            require(step is not None and checkout_has_explicit_credentials(lines, *step),
+                    f'{location}: checkout step needs its own persist-credentials: false input')
+
+
+def check_distributed_actions():
+    """Guard active CI, the exported template, and setup examples adopters copy."""
+    check_ci_actions('skills/github-workflow/templates/ci.yml')
+    workflows = ROOT / '.github/workflows'
+    for path in sorted(workflows.iterdir()):
+        if path.suffix in YAML_SUFFIXES and path.is_file():
+            check_ci_actions(path.relative_to(ROOT).as_posix())
+
+    for name in ['skills/github-workflow/templates/ci.yml', 'skills/github-workflow/SKILL.md']:
+        for number, line in enumerate((ROOT / name).read_text(encoding='utf-8').splitlines(), 1):
+            for match in SETUP_EXAMPLE.finditer(line):
+                location = f'{name}:{number}'
+                require(bool(ACTION_PIN.fullmatch(match.group())),
+                        f'{location}: setup example requires a full lowercase 40-hex revision')
+                require(bool(re.match(r'\s*#\s*' + RELEASE_COMMENT.pattern, line[match.end():])),
+                        f'{location}: setup example pin needs a readable version comment')
+
+
 def main():
     release = version()
     package = payloads()
@@ -253,8 +372,33 @@ def main():
             # The managed policy documents this exact check as an instruction.
             text = text.replace("grep -nF 'TO FILL' <pr-body-file>", "the PR placeholder check")
         require(not re.search(r"\{\{[A-Z_]+\}\}|TO FILL|\[year\]|\[fullname\]", text), f"Unresolved project field: {name}")
+    bootstrap_blocks = []
+    for name in ["docs/INSTALL-CODEX.md", "docs/INSTALL-CLAUDE.md"]:
+        text = (ROOT / name).read_text(encoding="utf-8")
+        blocks = re.findall(
+            r"<!-- package-bootstrap:start -->\n```powershell\n(.*?)```\n<!-- package-bootstrap:end -->",
+            text, re.DOTALL,
+        )
+        require(len(blocks) == 1, f"Exactly one authenticated package bootstrap required: {name}")
+        bootstrap = blocks[0]
+        require(".\\install.py" not in text, f"Unbound extracted installer command: {name}")
+        require("$packageName = 'dev-harness-v" + release + "'" in bootstrap,
+                f"Bootstrap package version mismatch: {name}")
+        authentication = bootstrap.find("if ($actualHash -cne $archiveHashes[0]) { throw")
+        execution = bootstrap.find("& $candidateCommand.Source")
+        require(authentication >= 0 and execution > authentication,
+                f"Archive authentication must precede Python discovery: {name}")
+        require("Get-FileHash -InputStream $archiveStream" in bootstrap
+                and "ZipArchive]::new($archiveStream" in bootstrap,
+                f"Hash and extraction must use the captured archive: {name}")
+        require("'dev-harness-verified-' + [guid]::NewGuid()" in bootstrap
+                and "'-I'" in bootstrap,
+                f"Fresh extraction and isolated Python required: {name}")
+        bootstrap_blocks.append(bootstrap)
+    require(bootstrap_blocks[0] == bootstrap_blocks[1], "Installation bootstrap differs between guides")
     for name in ["profiles/hermes-development.md", "docs/INSTALL-CODEX.md", "docs/INSTALL-CLAUDE.md", "docs/package-README.md"]:
         require("v" + release in (ROOT / name).read_text(encoding="utf-8"), f"Release version missing: {name}")
+    check_distributed_actions()
     module = ROOT / "skills/github-workflow/scripts/workflow-context.py"
     spec = importlib.util.spec_from_file_location("workflow_context", module)
     context = importlib.util.module_from_spec(spec)

@@ -40,6 +40,8 @@ Test fixtures run Bash through one resolved path: `HARNESS_BASH` if set and non-
 
 A running CI check must finish; a failing check blocks. Use the documented local fallback only after establishing the eligible unstarted-run condition. Never lower protections or fabricate a CI result. A ready entrusted PR satisfying all gates is merged and verified without another ritual go. Explicit holds and other irreversible boundaries retain their effect.
 
+Installation-guide tests execute the documented PowerShell bootstrap in disposable directories when `pwsh` or `powershell` is available. Set `HARNESS_POWERSHELL` to an explicit executable to require that runtime; an invalid explicit selection fails. Without either runtime, the local suite reports the missing capability as a skip. CI additionally runs the guide tests with Windows PowerShell 5.1; a local skip does not qualify that Windows path. The bootstrap authenticates captured archive bytes before discovering Python or executing bundled code, and uses a new verified workspace instead of a previous extraction.
+
 ## Handoff comment
 
 Record these facts in the issue or PR so another computer can resume without chat history:
