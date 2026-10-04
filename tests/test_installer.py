@@ -1169,16 +1169,21 @@ sys.exit(installer.main(sys.argv[5:]))
         spec.loader.exec_module(installer)
         root = Path(self.base.anchor)
         # A second native implementation observes the owner without changing volume permissions.
-        observed = subprocess.run(
+        # Python launched by PowerShell 7 inherits module paths that Windows PowerShell 5.1 cannot load.
+        observer_env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+        observer_env["HARNESS_NATIVE_VOLUME"] = str(root)
+        observation = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command",
              "$ErrorActionPreference = 'Stop'; "
              "$acl = Get-Acl -LiteralPath $env:HARNESS_NATIVE_VOLUME -ErrorAction Stop; "
              "$raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0); "
              "$raw.Owner.Value"],
             # PowerShell may initialize profile-local module metadata; only installer processes use the guard.
-            env={**os.environ, "HARNESS_NATIVE_VOLUME": str(root)},
-            check=True, capture_output=True, text=True, encoding="utf-8", timeout=30,
-        ).stdout.strip()
+            env=observer_env,
+            capture_output=True, text=True, encoding="utf-8", timeout=30,
+        )
+        self.assertEqual(observation.returncode, 0, observation.stderr + observation.stdout)
+        observed = observation.stdout.strip()
         self.assertRegex(observed, r"\AS-\d+-\d+(?:-\d+)+\Z")
         installer._windows_control_component(root, "ancestor")
         if observed == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464":

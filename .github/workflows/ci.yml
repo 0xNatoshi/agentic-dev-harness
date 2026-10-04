@@ -75,6 +75,8 @@ jobs:
             dacl_present = [bool]($raw.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclPresent)
             dacl_null = ($null -eq $raw.DiscretionaryAcl)
           } | ConvertTo-Json -Compress
+      - name: Verify native volume owner boundary
+        run: python -m unittest tests.test_installer.InstallerTests.test_windows_accepts_native_volume_root_only_as_an_ancestor -v
       - name: Verify installer transactions and junctions
         run: python -m unittest tests.test_installer -v
       - name: Prove native DACL regressions on the unfixed and fixed installers
