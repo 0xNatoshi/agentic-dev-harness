@@ -156,6 +156,56 @@ sys.exit(installer.main(sys.argv[3:]))
                                *map(str, arguments)], cwd=self.base, env=self.environment(), capture_output=True,
                               text=True, encoding="utf-8", timeout=120)
 
+    def run_with_state_drift(self, trigger, *arguments, env=None):
+        """Exercise the public command after a deterministic filesystem callback changes state permissions."""
+        runner = """import importlib.util, os, pathlib, stat, sys
+spec = importlib.util.spec_from_file_location('harness_state_drift_install', sys.argv[1])
+installer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(installer)
+trigger, state, target = sys.argv[2], pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4])
+drifted = False
+def change_state():
+    global drifted
+    if not drifted:
+        state.chmod(stat.S_IMODE(state.stat().st_mode) | stat.S_IWGRP)
+        drifted = True
+original_rename = installer.rename
+def rename(source, destination, point):
+    try:
+        result = original_rename(source, destination, point)
+    except OSError:
+        if trigger == point + ':fault':
+            change_state()
+        raise
+    if point == trigger:
+        change_state()
+    return result
+installer.rename = rename
+original_discoverable = installer.discoverable
+def discoverable(roots):
+    result = original_discoverable(roots)
+    if trigger == 'apply:post-rename-discovery' and (state / 'CURRENT').exists() and target.exists():
+        change_state()
+    return result
+installer.discoverable = discoverable
+original_write_json = installer.write_json
+def write_json(path, value, *args, **kwargs):
+    result = original_write_json(path, value, *args, **kwargs)
+    if isinstance(value, dict):
+        if trigger == 'apply:receipt' and value.get('receipt_format') == 1 and value.get('state') == 'installed':
+            change_state()
+        if trigger == 'rollback:receipt' and value.get('receipt_format') == 1 and value.get('state') == 'rolled back':
+            change_state()
+        if path.name == 'journal.json' and value.get('state') == 'committed' and trigger == value.get('operation') + ':committed':
+            change_state()
+    return result
+installer.write_json = write_json
+sys.exit(installer.main(sys.argv[5:]))
+"""
+        return subprocess.run([sys.executable, "-B", "-c", runner, str(self.installer), trigger,
+                               str(self.state()), str(self.target), *map(str, arguments)], cwd=self.base,
+                              env=self.environment(env), capture_output=True, text=True, encoding="utf-8", timeout=120)
+
     def run_recorded(self, command, *extra):
         """Run a recorded argument list as the operator would, without the test's -B or installer path."""
         return subprocess.run([*command, *extra], cwd=self.base, env=self.environment(), capture_output=True, text=True,
@@ -845,6 +895,435 @@ sys.exit(installer.main(sys.argv[3:]))
         self.assertEqual([item["path"] for item in json.loads(result.stderr)["details"]], ["SKILL.md"])
         self.assertEqual(snapshot(self.target), edited)
 
+    def test_apply_requires_integer_plan_format_before_installing(self):
+        for label, plan_format in (("boolean", True), ("float", 1.0), ("integer", 1)):
+            with self.subTest(plan_format=label):
+                self.home = self.base / label
+                self.home.mkdir()
+                before = self.v52_layout()
+                plan = self.plan()
+                value = json.loads(plan.read_text(encoding="utf-8"))
+                value["plan_format"] = plan_format
+                plan.write_text(json.dumps(value), encoding="utf-8")
+                saved_plan = plan.read_bytes()
+
+                result = self.apply(plan)
+                if label == "integer":
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    receipt = Path(json.loads(result.stdout)["receipt"])
+                    self.assertTrue(receipt.is_file())
+                    self.assertNotEqual(snapshot(self.target), before)
+                    self.assertFalse((self.state() / "CURRENT").exists())
+                else:
+                    self.assert_refused(result, 1)
+                    self.assertIn("Unsupported plan format", json.loads(result.stderr)["error"])
+                    self.assertEqual(snapshot(self.target), before)
+                    self.assertFalse(self.state().exists())
+                self.assertEqual(plan.read_bytes(), saved_plan)
+
+    def test_apply_refuses_malformed_operational_plan_as_json_before_lock(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        original = json.loads(plan.read_text(encoding="utf-8"))
+        operative = (
+            "installer_version", "runtime", "home", "config_root", "target", "skill_roots", "state_root",
+            "package", "retirement_list", "before", "classification", "retirements", "retirement_copies",
+            "duplicates", "duplicate_inventories",
+        )
+        malformed = [(f"missing {field}", field, "missing") for field in operative]
+        wrong_type = {field: [] for field in operative}
+        wrong_type.update(skill_roots={}, retirements={}, duplicates={})
+        malformed.extend((f"wrong type {field}", field, wrong_type[field]) for field in operative)
+        malformed.extend((f"null {field}", field, None) for field in operative if field != "before")
+        malformed.extend([
+            ("home has NUL", "home", str(self.home) + "\x00"),
+            ("config is not normalized", "config_root", str(self.home / ".claude" / "..")),
+            ("target has NUL", "target", str(self.target) + "\x00"),
+            ("state has NUL", "state_root", str(self.state()) + "\x00"),
+            ("skill root has NUL", "skill_roots", [str(self.roots[0]) + "\x00"]),
+            ("duplicate has NUL", "duplicates", [str(self.roots[0] / "copy") + "\x00"]),
+            ("duplicate inventory has NUL", "duplicate_inventories", {str(self.roots[0]) + "\x00": {}}),
+            ("package source has NUL", "package", {**original["package"], "source": str(self.package) + "\x00"}),
+            ("package source is not a path", "package", {**original["package"], "source": 42}),
+            ("package archive field missing", "package",
+             {key: item for key, item in original["package"].items() if key != "archive_sha256"}),
+            ("before inventory path has NUL", "before",
+             {**original["before"], "bad\x00": original["before"]["SKILL.md"]}),
+            ("classification path has NUL", "classification",
+             {**original["classification"], "bad\x00": "package"}),
+            ("retirement copy root has NUL", "retirement_copies",
+             {**original["retirement_copies"], "state_root": str(self.state()) + "\x00"}),
+            ("retirement copy transaction field missing", "retirement_copies",
+             {key: item for key, item in original["retirement_copies"].items() if key != "transaction"}),
+        ])
+        for field in original["package"]:
+            malformed.append((f"package field missing {field}", "package",
+                              {key: item for key, item in original["package"].items() if key != field}))
+            malformed.append((f"package field wrong type {field}", "package",
+                              {**original["package"], field: []}))
+            if field != "archive_sha256":
+                malformed.append((f"package field null {field}", "package",
+                                  {**original["package"], field: None}))
+        malformed.append(("package manifest hash is an integer", "package",
+                          {**original["package"], "manifest_sha256": 42}))
+        for label, field, replacement in malformed:
+            with self.subTest(label=label):
+                # Each candidate starts from the same disposable before-state, even on an unfixed installer
+                # that wrongly opened state or applied a malformed plan in an earlier candidate.
+                shutil.rmtree(self.state(), ignore_errors=True)
+                shutil.rmtree(self.target, ignore_errors=True)
+                before = self.v52_layout()
+                value = json.loads(json.dumps(original))
+                if replacement == "missing":
+                    del value[field]
+                else:
+                    value[field] = replacement
+                plan.write_text(json.dumps(value), encoding="utf-8")
+                saved = plan.read_bytes()
+                refused = self.apply(plan)
+                self.assert_refused(refused, 1)
+                self.assertIn("plan", json.loads(refused.stderr)["error"])
+                self.assertEqual(snapshot(self.target), before)
+                self.assertFalse(self.state().exists())
+                self.assertFalse((self.state() / "LOCK").exists())
+                self.assertFalse((self.state() / "CURRENT").exists())
+                self.assertEqual(plan.read_bytes(), saved)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit authority; Windows DACL cases are exercised separately")
+    def test_apply_refuses_untrusted_state_or_parent_without_creating_lock(self):
+        for unsafe in ("state", "parent"):
+            with self.subTest(unsafe=unsafe):
+                self.home = self.base / unsafe
+                self.home.mkdir()
+                before = self.v52_layout()
+                plan = self.plan()
+                path = self.state() if unsafe == "state" else self.state().parent
+                if unsafe == "state":
+                    path.mkdir()
+                path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IWGRP)
+                mode = stat.S_IMODE(path.stat().st_mode)
+                witness = self.home / "witness.txt"
+                witness.write_bytes(b"outside the installer state\n")
+                state_before = snapshot(self.state())
+                result = self.apply(plan)
+                self.assert_refused(result, 2)
+                self.assertIn("not protected", json.loads(result.stderr)["error"])
+                self.assertEqual(snapshot(self.target), before)
+                self.assertEqual(snapshot(self.state()), state_before)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), mode)
+                self.assertFalse((self.state() / "LOCK").exists())
+                self.assertFalse((self.state() / "CURRENT").exists())
+                self.assertEqual(witness.read_bytes(), b"outside the installer state\n")
+
+    @unittest.skipIf(os.name == "nt", "relative POSIX link targets; Windows junction paths have native coverage")
+    def test_apply_refuses_an_unsafe_intermediate_link_destination(self):
+        for target_style in ("absolute", "relative"):
+            with self.subTest(target_style=target_style):
+                case = self.base / target_style
+                safe, middle, real = (case / name for name in ("safe", "middle", "real"))
+                safe.mkdir(parents=True)
+                middle.mkdir()
+                middle.chmod(0o777)
+                real_home = real / "home"
+                real_home.mkdir(parents=True)
+                alias = safe / "home"
+                first = str(middle / "hop") if target_style == "absolute" else "../middle/hop"
+                second = str(real_home) if target_style == "absolute" else "../real/home"
+                os.symlink(first, alias, target_is_directory=True)
+                os.symlink(second, middle / "hop", target_is_directory=True)
+                self.home = alias
+                before = self.v52_layout()
+                plan = self.plan()
+                witness = middle / "witness.txt"
+                witness.write_bytes(b"intermediate directory witness\n")
+                state_before = snapshot(self.state())
+                refused = self.apply(plan)
+                self.assert_refused(refused, 2)
+                self.assertIn("not protected", json.loads(refused.stderr)["error"])
+                self.assertEqual(snapshot(self.target), before)
+                self.assertEqual(snapshot(self.state()), state_before)
+                self.assertFalse((self.state() / "LOCK").exists())
+                self.assertEqual(witness.read_bytes(), b"intermediate directory witness\n")
+                self.assertEqual(os.readlink(alias), first)
+                self.assertEqual(os.readlink(middle / "hop"), second)
+                middle.chmod(0o700)
+                applied = self.apply(plan)
+                self.assertEqual(applied.returncode, 0, applied.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit authority; Windows DACL cases are exercised separately")
+    def test_recover_refuses_untrusted_selector_or_journal_before_creating_lock(self):
+        for unsafe in ("CURRENT", "journal.json"):
+            with self.subTest(unsafe=unsafe):
+                self.home = self.base / ("recover-" + unsafe)
+                self.home.mkdir()
+                before = self.v52_layout()
+                plan = self.plan()
+                crashed = self.apply(plan, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                state = self.state()
+                (state / "LOCK").unlink()
+                current = state / "CURRENT"
+                journal = state / current.read_text(encoding="utf-8").strip()
+                control = current if unsafe == "CURRENT" else journal
+                control.chmod(stat.S_IMODE(control.stat().st_mode) | stat.S_IWGRP)
+                target_before, state_before = snapshot(self.target), snapshot(state)
+                witness = self.home / "witness.txt"
+                witness.write_bytes(b"outside the installer state\n")
+                result = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+                self.assert_refused(result, 2)
+                self.assertEqual(snapshot(self.target), target_before)
+                self.assertEqual(snapshot(state), state_before)
+                self.assertFalse((state / "LOCK").exists())
+                self.assertEqual(witness.read_bytes(), b"outside the installer state\n")
+                control.chmod(stat.S_IMODE(control.stat().st_mode) & ~stat.S_IWGRP)
+                recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertEqual(json.loads(recovered.stdout)["result"], "restored")
+                self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit authority; Windows DACL cases are exercised separately")
+    def test_rollback_refuses_untrusted_canonical_receipt_before_creating_lock(self):
+        before = self.v52_layout()
+        receipt = self.installed()
+        (self.state() / "LOCK").unlink()
+        receipt.chmod(stat.S_IMODE(receipt.stat().st_mode) | stat.S_IWGRP)
+        state_before, target_before = snapshot(self.state()), snapshot(self.target)
+        witness = self.home / "witness.txt"
+        witness.write_bytes(b"outside the installer state\n")
+        result = self.run_installer("rollback", "--receipt", receipt, "--maintenance-confirmed")
+        self.assert_refused(result, 2)
+        self.assertEqual(snapshot(self.state()), state_before)
+        self.assertEqual(snapshot(self.target), target_before)
+        self.assertFalse((self.state() / "LOCK").exists())
+        self.assertEqual(witness.read_bytes(), b"outside the installer state\n")
+        receipt.chmod(stat.S_IMODE(receipt.stat().st_mode) & ~stat.S_IWGRP)
+        restored = self.run_installer("rollback", "--receipt", receipt, "--maintenance-confirmed")
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires a real macOS extended ACL")
+    def test_apply_refuses_inheritable_mac_acl_before_creating_state(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        parent = self.state().parent
+        parent.chmod(0o700)
+        subprocess.run(["chmod", "+a", "everyone allow add_file,delete_child,file_inherit,directory_inherit",
+                        str(parent)], check=True, capture_output=True)
+        self.addCleanup(lambda: subprocess.run(["chmod", "-N", str(parent)], check=True, capture_output=True))
+        acl_before = subprocess.run(["ls", "-lde", str(parent)], check=True, capture_output=True).stdout
+        witness = self.home / "witness.txt"
+        witness.write_bytes(b"outside the installer state\n")
+        refused = self.apply(plan)
+        self.assert_refused(refused, 2)
+        self.assertEqual(snapshot(self.target), before)
+        self.assertFalse(self.state().exists())
+        self.assertEqual(subprocess.run(["ls", "-lde", str(parent)], check=True, capture_output=True).stdout, acl_before)
+        self.assertEqual(witness.read_bytes(), b"outside the installer state\n")
+        subprocess.run(["chmod", "-N", str(parent)], check=True, capture_output=True)
+        installed = self.apply(plan)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires a real macOS extended ACL")
+    def test_recover_refuses_mac_acl_on_journal_before_creating_lock(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        crashed = self.apply(plan, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.state()
+        (state / "LOCK").unlink()
+        journal = state / (state / "CURRENT").read_text(encoding="utf-8").strip()
+        self.assertEqual(stat.S_IMODE(journal.stat().st_mode), 0o600)
+        subprocess.run(["chmod", "+a", "everyone allow write,delete,writesecurity", str(journal)],
+                       check=True, capture_output=True)
+        self.addCleanup(lambda: subprocess.run(["chmod", "-N", str(journal)], check=True, capture_output=True))
+        acl_before = subprocess.run(["ls", "-le", str(journal)], check=True, capture_output=True).stdout
+        target_before, state_before = snapshot(self.target), snapshot(state)
+        refused = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assert_refused(refused, 2)
+        self.assertEqual(snapshot(self.target), target_before)
+        self.assertEqual(snapshot(state), state_before)
+        self.assertFalse((state / "LOCK").exists())
+        self.assertEqual(subprocess.run(["ls", "-le", str(journal)], check=True, capture_output=True).stdout, acl_before)
+        subprocess.run(["chmod", "-N", str(journal)], check=True, capture_output=True)
+        recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires a real macOS extended ACL")
+    def test_mac_inherited_read_acl_allows_private_install(self):
+        self.v52_layout()
+        plan = self.plan()
+        parent = self.state().parent
+        parent.chmod(0o700)
+        subprocess.run(["chmod", "+a", "everyone allow read,file_inherit,directory_inherit", str(parent)],
+                       check=True, capture_output=True)
+        self.addCleanup(lambda: subprocess.run(["chmod", "-N", str(parent)], check=True, capture_output=True))
+        installed = self.apply(plan)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertTrue((self.state() / "LOCK").is_file())
+
+    @unittest.skipUnless(os.name == "nt", "requires a real Windows DACL")
+    def test_windows_refuses_foreign_write_dacl_before_creating_lock(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        self.state().mkdir()
+        witness = self.home / "witness.txt"
+        witness.write_bytes(b"outside the installer state\n")
+        subprocess.run(["icacls", str(self.state()), "/grant", "*S-1-1-0:(W)"], check=True, capture_output=True)
+        acl_before = subprocess.run(["icacls", str(self.state())], check=True, capture_output=True).stdout
+        state_before = snapshot(self.state())
+        refused = self.apply(plan)
+        self.assert_refused(refused, 2)
+        self.assertEqual(snapshot(self.target), before)
+        self.assertEqual(snapshot(self.state()), state_before)
+        self.assertFalse((self.state() / "LOCK").exists())
+        self.assertEqual(witness.read_bytes(), b"outside the installer state\n")
+        self.assertEqual(subprocess.run(["icacls", str(self.state())], check=True, capture_output=True).stdout,
+                         acl_before)
+
+    @unittest.skipUnless(os.name == "nt", "requires a real Windows DACL")
+    def test_windows_recover_refuses_delete_child_or_write_dac(self):
+        for label, right in (("container", "DC"), ("CURRENT", "WDAC")):
+            with self.subTest(right=right):
+                self.home = self.base / label
+                self.home.mkdir()
+                before = self.v52_layout()
+                plan = self.plan()
+                crashed = self.apply(plan, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                state = self.state()
+                (state / "LOCK").unlink()
+                control = state if label == "container" else state / "CURRENT"
+                witness = self.home / "witness.txt"
+                witness.write_bytes(b"outside the installer state\n")
+                subprocess.run(["icacls", str(control), "/grant", f"*S-1-1-0:({right})"],
+                               check=True, capture_output=True)
+                acl_before = subprocess.run(["icacls", str(control)], check=True, capture_output=True).stdout
+                target_before, state_before = snapshot(self.target), snapshot(state)
+                refused = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+                self.assert_refused(refused, 2)
+                self.assertEqual(snapshot(self.target), target_before)
+                self.assertEqual(snapshot(state), state_before)
+                self.assertFalse((state / "LOCK").exists())
+                self.assertEqual(witness.read_bytes(), b"outside the installer state\n")
+                self.assertEqual(subprocess.run(["icacls", str(control)], check=True, capture_output=True).stdout,
+                                 acl_before)
+                self.assertIsNone(target_before)
+                self.assertIsNotNone(before)
+
+    @unittest.skipUnless(os.name == "nt", "requires real Windows junctions and DACLs")
+    def test_windows_refuses_unsafe_intermediate_junction_destination(self):
+        case = self.base / "junction-chain"
+        safe, middle, real = (case / name for name in ("safe", "middle", "real"))
+        safe.mkdir(parents=True)
+        middle.mkdir()
+        real_home = real / "home"
+        real_home.mkdir(parents=True)
+        link_directory(middle / "hop", real_home)
+        alias = safe / "home"
+        link_directory(alias, middle / "hop")
+        self.home = alias
+        before = self.v52_layout()
+        plan = self.plan()
+        witness = middle / "witness.txt"
+        witness.write_bytes(b"intermediate junction witness\n")
+        subprocess.run(["icacls", str(middle), "/grant", "*S-1-1-0:(DC)"], check=True, capture_output=True)
+        state_before = snapshot(self.state())
+        refused = self.apply(plan)
+        self.assert_refused(refused, 2)
+        self.assertEqual(snapshot(self.target), before)
+        self.assertEqual(snapshot(self.state()), state_before)
+        self.assertFalse((self.state() / "LOCK").exists())
+        self.assertEqual(witness.read_bytes(), b"intermediate junction witness\n")
+
+    @unittest.skipUnless(os.name == "nt", "requires a real Windows DACL")
+    def test_windows_safe_read_inheritance_allows_install_and_rollback(self):
+        before = self.v52_layout()
+        parent = self.state().parent
+        subprocess.run(["icacls", str(parent), "/grant", "*S-1-1-0:(OI)(CI)(RX)"],
+                       check=True, capture_output=True)
+        receipt = self.installed()
+        restored = self.run_installer("rollback", "--receipt", receipt, "--maintenance-confirmed")
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX umask does not define Windows DACL creation")
+    def test_new_control_metadata_is_private_even_with_permissive_umask(self):
+        self.v52_layout()
+        plan = self.plan()
+        launcher = ("import os, runpy, sys; os.umask(0); "
+                    "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')")
+        applied = subprocess.run([sys.executable, "-B", "-c", launcher, str(self.installer), "apply", "--plan", str(plan),
+                                  "--checksums", str(self.checksums), "--maintenance-confirmed"], cwd=self.base,
+                                 env=self.environment(), capture_output=True, text=True, encoding="utf-8", timeout=120)
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        receipt = Path(json.loads(applied.stdout)["receipt"])
+        transaction = receipt.parent
+        for directory in (self.state(), transaction, transaction / "installer"):
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700, directory)
+        for control in (self.state() / "LOCK", receipt, transaction / "journal.json",
+                        transaction / "installer" / "install.py"):
+            self.assertEqual(stat.S_IMODE(control.stat().st_mode), 0o600, control)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mkdir race; Windows CreateDirectoryW needs native DACL coverage")
+    def test_concurrent_private_state_creation_rechecks_existing_directory(self):
+        runner = """import errno, importlib.util, os, pathlib, sys
+spec = importlib.util.spec_from_file_location('harness_raced_install', sys.argv[1])
+installer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(installer)
+state, unsafe = pathlib.Path(sys.argv[2]), sys.argv[3] == 'unsafe'
+original = os.mkdir
+raced = False
+def mkdir(path, *args, **kwargs):
+    global raced
+    if not raced and os.fspath(path) == os.fspath(state):
+        raced = True
+        original(path, *args, **kwargs)
+        if unsafe:
+            os.chmod(path, 0o777)
+        raise FileExistsError(errno.EEXIST, 'created concurrently', os.fspath(path))
+    return original(path, *args, **kwargs)
+os.mkdir = mkdir
+sys.exit(installer.main(sys.argv[4:]))
+"""
+        for kind in ("safe", "unsafe"):
+            with self.subTest(kind=kind):
+                self.home = self.base / ("concurrent-" + kind)
+                self.home.mkdir()
+                before = self.v52_layout()
+                plan = self.plan()
+                witness = self.home / "witness.txt"
+                witness.write_bytes(b"outside installer state\n")
+                result = subprocess.run([sys.executable, "-B", "-c", runner, str(self.installer), str(self.state()), kind,
+                                         "apply", "--plan", str(plan), "--checksums", str(self.checksums),
+                                         "--maintenance-confirmed"], cwd=self.base, env=self.environment(),
+                                        capture_output=True, text=True, encoding="utf-8", timeout=120)
+                if kind == "safe":
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(stat.S_IMODE(self.state().stat().st_mode), 0o700)
+                    self.assertTrue((self.state() / "LOCK").is_file())
+                    self.assertNotEqual(snapshot(self.target), before)
+                else:
+                    self.assert_refused(result, 2)
+                    self.assertEqual(stat.S_IMODE(self.state().stat().st_mode), 0o777)
+                    self.assertFalse((self.state() / "LOCK").exists())
+                    self.assertFalse((self.state() / "CURRENT").exists())
+                    self.assertEqual(snapshot(self.target), before)
+                self.assertEqual(witness.read_bytes(), b"outside installer state\n")
+
+    @unittest.skipIf(os.name == "nt", "legacy POSIX modes are separate from Windows DACLs")
+    def test_legacy_public_read_control_modes_remain_usable(self):
+        before = self.v52_layout()
+        receipt = self.installed()
+        transaction = receipt.parent
+        self.state().chmod(0o755)
+        transaction.chmod(0o755)
+        for control in (self.state() / "LOCK", receipt, transaction / "journal.json"):
+            control.chmod(0o644)
+        rolled_back = self.run_installer("rollback", "--receipt", receipt, "--maintenance-confirmed")
+        self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
+        self.assertEqual(snapshot(self.target), before)
+
     def test_apply_refuses_plan_drift(self):
         self.v52_layout()
         plan = self.plan()
@@ -915,7 +1394,16 @@ sys.exit(installer.main(sys.argv[3:]))
         plan.write_text(json.dumps(value), encoding="utf-8")
         result = self.apply(plan)
         self.assert_refused(result, 1)
-        self.assertEqual(json.loads(result.stderr)["details"], ["installer_version", "retirements", "retirement_copies"])
+        self.assertEqual(json.loads(result.stderr)["details"], ["retirements", "retirement_copies"])
+        self.assertEqual(snapshot(self.target), before)
+        self.assertFalse(self.state().exists())
+        # A complete old-version plan still reaches the value-drift comparison under the lock.
+        value = json.loads(self.plan().read_text(encoding="utf-8"))
+        value["installer_version"] = "1.0.0"
+        plan.write_text(json.dumps(value), encoding="utf-8")
+        result = self.apply(plan)
+        self.assert_refused(result, 1)
+        self.assertEqual(json.loads(result.stderr)["details"], ["installer_version"])
         self.assertEqual(snapshot(self.target), before)
         self.assertFalse((self.state() / "CURRENT").exists())
 
@@ -946,6 +1434,111 @@ sys.exit(installer.main(sys.argv[3:]))
         self.assertEqual(recover.returncode, 0, recover.stderr)
         self.assertEqual(snapshot(self.target), before)
         self.assertFalse((self.state() / "CURRENT").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode drift; Windows DACL trust is qualified natively")
+    def test_apply_lost_state_protection_after_renames_reports_incomplete(self):
+        for trigger in ("apply:park", "apply:post-rename-discovery", "apply:receipt", "apply:committed"):
+            with self.subTest(trigger=trigger):
+                self.home = self.base / trigger.replace(":", "-")
+                self.home.mkdir()
+                before = self.v52_layout()
+                plan = self.plan()
+                witness = self.home / "witness.txt"
+                witness.write_bytes(b"outside recovery data\n")
+                result = self.run_with_state_drift(trigger, "apply", "--plan", plan, "--checksums", self.checksums,
+                                                   "--maintenance-confirmed")
+                self.assert_refused(result, 3)
+                report = json.loads(result.stderr)
+                self.assertIn("CURRENT", report["error"])
+                self.assertIn("recover", report["error"])
+                current = self.state() / "CURRENT"
+                self.assertTrue(current.is_file())
+                journal = self.state() / current.read_text(encoding="utf-8").strip()
+                transaction = journal.parent
+                self.assertTrue((transaction / "backup" / "github-workflow").is_dir())
+                self.assertTrue(stat.S_IMODE(self.state().stat().st_mode) & stat.S_IWGRP)
+                self.assertEqual(witness.read_bytes(), b"outside recovery data\n")
+                if trigger == "apply:park":
+                    self.assertIsNone(snapshot(self.target))
+                else:
+                    self.assertNotEqual(snapshot(self.target), before)
+                self.state().chmod(stat.S_IMODE(self.state().stat().st_mode) & ~stat.S_IWGRP)
+                recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertFalse(current.exists())
+                if trigger == "apply:committed":
+                    self.assertEqual(json.loads(recovered.stdout)["result"], "already committed")
+                    self.assertNotEqual(snapshot(self.target), before)
+                else:
+                    self.assertEqual(json.loads(recovered.stdout)["result"], "restored")
+                    self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode drift; Windows DACL trust is qualified natively")
+    def test_rollback_lost_state_protection_during_finalization_reports_incomplete(self):
+        for trigger in ("rollback:committed", "rollback:receipt"):
+            with self.subTest(trigger=trigger):
+                self.home = self.base / trigger.replace(":", "-")
+                self.home.mkdir()
+                before = self.v52_layout()
+                receipt = self.installed()
+                result = self.run_with_state_drift(trigger, "rollback", "--receipt", receipt,
+                                                   "--maintenance-confirmed")
+                self.assert_refused(result, 3)
+                self.assertIn("recover", json.loads(result.stderr)["error"])
+                current = self.state() / "CURRENT"
+                self.assertTrue(current.is_file())
+                self.assertEqual(snapshot(self.target), before)
+                self.assertTrue(stat.S_IMODE(self.state().stat().st_mode) & stat.S_IWGRP)
+                self.state().chmod(stat.S_IMODE(self.state().stat().st_mode) & ~stat.S_IWGRP)
+                recovered = self.run_installer("recover", "--receipt", receipt, "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertEqual(json.loads(recovered.stdout)["result"], "already committed")
+                self.assertFalse(current.exists())
+                self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["state"], "rolled back")
+                self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode drift; Windows DACL trust is qualified natively")
+    def test_recover_lost_state_protection_after_restoration_reports_incomplete(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        crashed = self.apply(plan, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        self.assertTrue(current.is_file())
+        result = self.run_with_state_drift("apply:undo-park", "recover", "--plan", plan,
+                                           "--maintenance-confirmed")
+        self.assert_refused(result, 3)
+        self.assertIn("recover", json.loads(result.stderr)["error"])
+        self.assertTrue(current.is_file())
+        self.assertEqual(snapshot(self.target), before)
+        self.assertTrue(stat.S_IMODE(self.state().stat().st_mode) & stat.S_IWGRP)
+        self.state().chmod(stat.S_IMODE(self.state().stat().st_mode) & ~stat.S_IWGRP)
+        recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(json.loads(recovered.stdout)["result"], "restored")
+        self.assertFalse(current.exists())
+        self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode drift; Windows DACL trust is qualified natively")
+    def test_journal_error_recording_does_not_mask_incomplete_restoration(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        result = self.run_with_state_drift("apply:undo-park:fault", "apply", "--plan", plan,
+                                           "--checksums", self.checksums, "--maintenance-confirmed",
+                                           env={"DEV_HARNESS_INSTALL_TEST_FAULT": "apply:activate,apply:undo-park"})
+        self.assert_refused(result, 3)
+        report = json.loads(result.stderr)
+        self.assertIn("journal update refused", report["error"])
+        self.assertIn("recover", report["error"])
+        current = self.state() / "CURRENT"
+        self.assertTrue(current.is_file())
+        self.assertIsNone(snapshot(self.target))
+        self.assertTrue(stat.S_IMODE(self.state().stat().st_mode) & stat.S_IWGRP)
+        self.state().chmod(stat.S_IMODE(self.state().stat().st_mode) & ~stat.S_IWGRP)
+        recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertFalse(current.exists())
+        self.assertEqual(snapshot(self.target), before)
 
     def checkpoints(self, *arguments):
         trace = self.base / "trace.txt"
@@ -1237,6 +1830,80 @@ sys.exit(installer.main(sys.argv[3:]))
         recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
         self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "rolled back")
+
+    def test_recover_refuses_malformed_journal_history_and_evidence_before_mutation(self):
+        for label in ("history-map", "history-item", "evidence-list", "evidence-authority-paths",
+                      "evidence-boundary-missing", "evidence-hooks-list"):
+            with self.subTest(label=label):
+                self.home = self.base / label
+                self.home.mkdir()
+                before = self.v52_layout()
+                if label.startswith("history-"):
+                    plan = self.plan()
+                    crashed = self.apply(plan, env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+                    receipt_path = None
+                else:
+                    receipt_path = self.installed()
+                    crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                                 env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:committed"})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                current = self.state() / "CURRENT"
+                current_bytes = current.read_bytes()
+                journal = self.state() / current_bytes.decode("utf-8").strip()
+                original = json.loads(journal.read_text(encoding="utf-8"))
+                foreign = self.base / (label + "-foreign")
+                foreign.mkdir()
+                (foreign / "witness").write_bytes(b"outside recovery state\n")
+                foreign_before = snapshot(foreign)
+                if label == "history-map":
+                    forged = {**original, "history": {}}
+                elif label == "history-item":
+                    forged = {**original, "history": [{}]}
+                elif label == "evidence-list":
+                    forged = {**original, "rollback_evidence": []}
+                elif label == "evidence-authority-paths":
+                    forged = {**original, "rollback_evidence": {
+                        "journal": str(foreign / "journal.json"), "parked": str(foreign / "parked")}}
+                elif label == "evidence-boundary-missing":
+                    forged = {**original, "rollback_evidence": {
+                        "maintenance_boundary": {}, "test_hooks": original["rollback_evidence"]["test_hooks"]}}
+                else:
+                    forged = {**original, "rollback_evidence": {
+                        "maintenance_boundary": original["rollback_evidence"]["maintenance_boundary"],
+                        "test_hooks": []}}
+                journal.write_text(json.dumps(forged), encoding="utf-8")
+                state_before = snapshot(self.state())
+                target_before = snapshot(self.target)
+                receipt_bytes = receipt_path.read_bytes() if receipt_path else None
+                refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                             "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(snapshot(self.state()), state_before)
+                self.assertEqual(snapshot(self.target), target_before)
+                self.assertEqual(current.read_bytes(), current_bytes)
+                self.assertEqual(journal.read_text(encoding="utf-8"), json.dumps(forged))
+                if receipt_path:
+                    self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+                self.assertEqual(snapshot(foreign), foreign_before)
+
+                # Missing historical audit fields remain recoverable; the current writer's evidence is retained.
+                honest = dict(original)
+                if label.startswith("history-"):
+                    honest.pop("history")
+                elif label != "evidence-authority-paths":
+                    honest.pop("rollback_evidence")
+                journal.write_text(json.dumps(honest), encoding="utf-8")
+                recovered = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                               "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertFalse(current.exists())
+                self.assertEqual(snapshot(self.target), before)
+                if receipt_path:
+                    rollback = json.loads(receipt_path.read_text(encoding="utf-8"))["rollback"]
+                    self.assertEqual(rollback["journal"], str(journal))
+                    self.assertEqual(rollback["parked"], original["parked"])
+                    self.assertEqual("maintenance_boundary" in rollback, label == "evidence-authority-paths")
+                    self.assertEqual("test_hooks" in rollback, label == "evidence-authority-paths")
 
     def test_recover_rejects_a_linked_transaction_selector(self):
         if os.name != "nt" and not symlinks_supported():

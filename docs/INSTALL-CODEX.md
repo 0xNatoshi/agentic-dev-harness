@@ -221,21 +221,20 @@ The installer verifies a full backup and staged inventory, records durable recov
 
 ## Receipt, recovery and skill rollback
 
+The ownership and recovery checks below describe the corrected source installer. Published `v6.5.0` release files predate these corrections and remain unchanged. Use an independently authenticated package containing the corrected installer; the version string alone does not identify it. Development-version and package reconciliation is tracked in [#63](https://github.com/0xNatoshi/agentic-dev-harness/issues/63).
+
 The private receipt records versions, package and instruction-file hashes, before/after inventories, modes, preserved/dropped/retired paths, duplicates, transaction state and maintenance evidence. It contains no file contents. The instruction hashes do not mean AGENTS.md, CLAUDE.md, config.toml or role files were merged or backed up by this skill installer; those edits use the separate private backups and diffs above.
 
-The receipt also records the verified installer copy retained under the transaction and an argument-array `rollback_command`, so rollback does not depend on the original extracted directory remaining available. The command intentionally omits `--maintenance-confirmed`; add it only after reestablishing the maintenance boundary. Do not interpret the array as a shell string. For a current receipt, an equivalent PowerShell invocation checks the retained script's hash before running it:
+The receipt also records a historical installer copy and an argument-array `rollback_command`. Keep both as evidence, but do not execute the receipt-directed script for secure rollback: its path and hash are both supplied by the receipt and cannot independently authenticate code. Use `$installerScript` from the separately authenticated package bootstrap above. Keep that verified workspace intact; if it changes or disappears, repeat the bootstrap from independently trusted release files before rollback or recovery. Reestablish the maintenance boundary, then run:
 
+<!-- skill-rollback:start -->
 ```powershell
-$receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$retainedInstaller = $receipt.installer_copy.path
-if (-not $retainedInstaller) { throw 'Use the verified matching package installer for this older receipt' }
-$actualHash = (Get-FileHash -LiteralPath $retainedInstaller -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
-if ($actualHash -ne $receipt.installer_copy.sha256) { throw 'Retained installer hash mismatch; stop' }
-& $installerPython @installerPythonArgs $retainedInstaller rollback --receipt $receiptPath --maintenance-confirmed
+& $installerPython @installerPythonArgs $installerScript rollback --receipt $receiptPath --maintenance-confirmed
 if ($LASTEXITCODE -ne 0) { throw 'Rollback failed; inspect the JSON error and keep recovery data' }
 ```
+<!-- skill-rollback:end -->
 
-Use the original receipt path reported by apply. Rollback refuses if the active tree, including its recorded modes, differs from the receipt's after-inventory; preserve and reconcile later edits before retrying. Otherwise it restores the verified before-state, including edited named files, duplicate copies and caches, or returns a previously absent target to absence. A deleted retained installer must be replaced by a separately verified matching package installer; do not reconstruct missing recovery evidence.
+Use the original receipt path reported by apply. The current installer checks native ownership and mutation rights along the state path and on `CURRENT`, `LOCK`, the canonical receipt and journals before trusting them, then rechecks under the lock. It admits the current account and root-owned safe ancestors on POSIX, or the current account, SYSTEM and Administrators on Windows. Unsafe or unverifiable state is refused; preserve its contents and reconcile it manually from trusted evidence, without changing its permissions to make it pass. This does not authenticate arbitrary code running as the same account or a deliberately imported same-owner receipt. Older safely owned receipts and their historical installer copies remain readable; do not rewrite or execute the copies to establish provenance. Rollback also refuses if the active tree, including its recorded modes, differs from the receipt's after-inventory; preserve and reconcile later edits before retrying. Otherwise it restores the verified before-state, including edited named files, duplicate copies and caches, or returns a previously absent target to absence.
 
 Rollback and rollback recovery require the retained committed apply journal to agree with the receipt before any restoration. Keep that journal with the original receipt and recovery copies. Missing or inconsistent older records cause a refusal; preserve them for reconciliation instead of regenerating evidence or deleting CURRENT.
 
@@ -245,7 +244,7 @@ Success is exit 0 with JSON on stdout. Refusals such as drift use exit 1; blocke
 
 ### Legacy receipt with a root lacking owner write
 
-On POSIX, an older receipt can record a selected skill directory without owner write permission. Its retained installer is frozen at installation time; the matching old package used when no installer copy was retained is also unchanged by extracting a newer package. Both historical routes expect the recorded mode. If only owner write was added to that directory, returning it to the mode recorded by the receipt allows the historical route to run in the original permission context. Preserve all later content edits and reconcile other inventory drift first; never edit the receipt or its inventories to make a check pass.
+On POSIX, an older receipt can record a selected skill directory without owner write permission. Historical installers expected the recorded mode, but their retained copies remain evidence rather than a secure execution path. The independently verified current installer supports the exact owner-write exception described below; use that path if this is the only mode change. Preserve all later content edits and reconcile other inventory drift first; never edit the receipt or its inventories to make a check pass.
 
 If the verified current installer asks for owner write and explicitly supports that single change on a legacy receipt, use that installer for this exceptional rollback. Keep consumers stopped and preserve the canonical receipt, its original retained installer and hash, backups and journals. Verify the corrected package ZIP and extracted files with the package-check commands above and its separately delivered checksums; the version number alone does not identify the corrected build. Use its extracted directory as the current directory and keep the original canonical receipt path in `$receiptPath`.
 
