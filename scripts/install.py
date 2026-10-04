@@ -384,6 +384,9 @@ def _windows_control_component(path: Path, role: str) -> None:
     try:
         ctypes, wintypes, advapi, kernel = _windows_security()
         trusted = _windows_trusted_sids(ctypes, wintypes, advapi, kernel)
+        if role == "ancestor":
+            # TrustedInstaller owns protected system ancestors; control state keeps its own owner policy.
+            trusted = trusted | {"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"}
         status = os.lstat(str(path))
         reparse = bool(getattr(status, "st_file_attributes", 0) & REPARSE_POINT)
         if role == "file" and (not stat.S_ISREG(status.st_mode) or reparse or status.st_nlink != 1):
@@ -402,8 +405,10 @@ def _windows_control_component(path: Path, role: str) -> None:
             if result:
                 raise OSError(result, "GetSecurityInfo failed")
             try:
-                if _windows_sid_text(ctypes, advapi, kernel, owner.value) not in trusted or not dacl.value:
-                    _untrusted_state(path, "its owner or DACL is not trusted")
+                if _windows_sid_text(ctypes, advapi, kernel, owner.value) not in trusted:
+                    _untrusted_state(path, "its owner SID is not trusted for this role")
+                if not dacl.value:
+                    _untrusted_state(path, "its DACL is null")
                 acl = ctypes.string_at(dacl, 8)
                 count = struct.unpack_from("<H", acl, 4)[0]
                 # Generic write/all, delete, child deletion, data/append, security, attributes and EAs.

@@ -1163,6 +1163,25 @@ sys.exit(installer.main(sys.argv[5:]))
         self.assertTrue((self.state() / "LOCK").is_file())
 
     @unittest.skipUnless(os.name == "nt", "requires a real Windows DACL")
+    def test_windows_accepts_native_volume_root_only_as_an_ancestor(self):
+        spec = importlib.util.spec_from_file_location("harness_native_volume_owner", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        root = Path(self.base.anchor)
+        # A second native implementation observes the owner without changing volume permissions.
+        observed = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "(Get-Acl -LiteralPath $env:HARNESS_NATIVE_VOLUME -ErrorAction Stop)"
+             ".GetOwner([System.Security.Principal.SecurityIdentifier]).Value"],
+            env={**self.environment(), "HARNESS_NATIVE_VOLUME": str(root)},
+            check=True, capture_output=True, text=True, encoding="utf-8", timeout=30,
+        ).stdout.strip()
+        installer._windows_control_component(root, "ancestor")
+        if observed == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464":
+            with self.assertRaisesRegex(installer.UntrustedState, "owner SID is not trusted for this role"):
+                installer._windows_control_component(root, "container")
+
+    @unittest.skipUnless(os.name == "nt", "requires a real Windows DACL")
     def test_windows_refuses_foreign_write_dacl_before_creating_lock(self):
         before = self.v52_layout()
         plan = self.plan()
