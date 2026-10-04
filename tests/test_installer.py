@@ -82,6 +82,15 @@ def unlink_directory(link: Path) -> None:
         os.unlink(link)
 
 
+def relocated_transaction(value, old: Path, new: Path):
+    """Rebind every generated receipt path while preserving its valid schema."""
+    if isinstance(value, dict):
+        return {key: relocated_transaction(item, old, new) for key, item in value.items()}
+    if isinstance(value, list):
+        return [relocated_transaction(item, old, new) for item in value]
+    return value.replace(str(old), str(new)) if isinstance(value, str) else value
+
+
 class InstallerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -782,6 +791,63 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse((self.state() / "CURRENT").exists())
                 self.assertFalse(list(self.state().glob("*/rollback-*")))
 
+    def test_rollback_binds_operative_receipt_fields_to_its_committed_apply_journal(self):
+        for variant in ("omitted_duplicate", "sibling_duplicate", "missing_before", "missing_journal", "uncommitted_journal"):
+            with self.subTest(variant=variant):
+                self.home = self.base / variant
+                self.home.mkdir()
+                duplicate = variant in ("omitted_duplicate", "sibling_duplicate")
+                if duplicate:
+                    target = self.home / ".agents" / "skills" / "github-workflow"
+                    legacy = self.home / ".codex" / "skills" / "github-workflow"
+                    self.v52_layout(target)
+                    self.v52_layout(legacy)
+                    installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+                    self.assertEqual(installed.returncode, 0, installed.stderr)
+                    receipt_path = Path(json.loads(installed.stdout)["receipt"])
+                else:
+                    target = self.target
+                    self.v52_layout()
+                    receipt_path = self.installed()
+                original = json.loads(receipt_path.read_text(encoding="utf-8"))
+                receipt = json.loads(json.dumps(original))
+                journal = Path(original["journal"])
+                journal_bytes = journal.read_bytes()
+                held_journal = journal.with_name("held-journal.json")
+                observed = [target, Path(original["retired"]), Path(original["backup"])]
+                for entry in original["duplicates"]:
+                    observed.extend(Path(entry[key]) for key in ("path", "retired_to", "backup"))
+                if variant == "omitted_duplicate":
+                    receipt["duplicates"] = []
+                elif variant == "sibling_duplicate":
+                    sibling = legacy.parent / "sibling" / legacy.name
+                    receipt["duplicates"][0]["path"] = str(sibling)
+                    receipt["duplicates"][0]["resolved"] = os.path.realpath(str(sibling))
+                    observed.append(sibling)
+                elif variant == "missing_before":
+                    receipt.update(before=None, backup=None, retired=None, retirements=[])
+                elif variant == "missing_journal":
+                    journal.rename(held_journal)
+                else:
+                    record = json.loads(journal_bytes)
+                    record["state"] = "activated"
+                    journal.write_text(json.dumps(record), encoding="utf-8")
+                journal_after = journal.read_bytes() if journal.exists() else None
+                receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+                receipt_bytes = receipt_path.read_bytes()
+                trees_before = {str(path): snapshot(path) for path in observed}
+                refused = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual({str(path): snapshot(path) for path in observed}, trees_before)
+                self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+                self.assertFalse((self.state() / "CURRENT").exists())
+                self.assertFalse(list(receipt_path.parent.glob("rollback-*")))
+                if variant == "missing_journal":
+                    self.assertFalse(journal.exists())
+                    self.assertEqual(held_journal.read_bytes(), journal_bytes)
+                else:
+                    self.assertEqual(journal.read_bytes(), journal_after)
+
     def test_recover_committed_rollback_rejects_foreign_receipt_before_marking_it(self):
         before = self.v52_layout()
         receipt_path = self.installed()
@@ -819,9 +885,8 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
         self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "rolled back")
 
-    @unittest.skipIf(os.name == "nt", "directory symlink requires Windows privileges")
     def test_recover_rejects_a_linked_transaction_selector(self):
-        if not symlinks_supported():
+        if os.name != "nt" and not symlinks_supported():
             self.skipTest("symlinks unavailable")
         before, parked = self.crash_after_parking()
         current = self.state() / "CURRENT"
@@ -829,7 +894,7 @@ class InstallerTests(unittest.TestCase):
         transaction = parked.parents[1]
         held = self.base / "held-transaction"
         transaction.rename(held)
-        os.symlink(held, transaction, target_is_directory=True)
+        link_directory(transaction, held)
         journal_before = (held / "journal.json").read_bytes()
         refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
                                      "--maintenance-confirmed")
@@ -837,14 +902,13 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(current.read_bytes(), selection)
         self.assertEqual((held / "journal.json").read_bytes(), journal_before)
         self.assertIsNone(snapshot(self.target))
-        transaction.unlink()
+        unlink_directory(transaction)
         held.rename(transaction)
         self.recover()
         self.assertEqual(snapshot(self.target), before)
 
-    @unittest.skipIf(os.name == "nt", "directory symlink requires Windows privileges")
     def test_rollback_rejects_a_linked_transaction_backup_component(self):
-        if not symlinks_supported():
+        if os.name != "nt" and not symlinks_supported():
             self.skipTest("symlinks unavailable")
         self.v52_layout()
         receipt_path = self.installed()
@@ -853,7 +917,7 @@ class InstallerTests(unittest.TestCase):
         backup_dir = Path(receipt["backup"]).parent
         held = self.base / "held-backup"
         backup_dir.rename(held)
-        os.symlink(held, backup_dir, target_is_directory=True)
+        link_directory(backup_dir, held)
         foreign_before = snapshot(held)
         recorded = receipt_path.read_bytes()
         refused = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
@@ -862,14 +926,13 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(snapshot(held), foreign_before)
         self.assertEqual(snapshot(self.target), active)
         self.assertFalse((self.state() / "CURRENT").exists())
-        backup_dir.unlink()
+        unlink_directory(backup_dir)
         held.rename(backup_dir)
         rollback = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
         self.assertEqual(rollback.returncode, 0, rollback.stderr)
 
-    @unittest.skipIf(os.name == "nt", "directory symlink requires Windows privileges")
     def test_recover_rejects_a_linked_derived_restore_directory(self):
-        if not symlinks_supported():
+        if os.name != "nt" and not symlinks_supported():
             self.skipTest("symlinks unavailable")
         before, parked = self.crash_after_parking()
         current = self.state() / "CURRENT"
@@ -881,7 +944,7 @@ class InstallerTests(unittest.TestCase):
         (foreign / "marker").write_bytes(b"untouched\n")
         foreign_before = snapshot(foreign)
         restore_dir = parked.parent / "restore"
-        os.symlink(foreign, restore_dir, target_is_directory=True)
+        link_directory(restore_dir, foreign)
         refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
                                      "--maintenance-confirmed")
         self.assert_refused(refused, 1)
@@ -889,7 +952,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(snapshot(foreign), foreign_before)
         self.assertTrue(current.exists())
         self.assertIsNone(snapshot(self.target))
-        restore_dir.unlink()
+        unlink_directory(restore_dir)
         self.recover()
         self.assertEqual(snapshot(self.target), before)
 
@@ -910,12 +973,9 @@ class InstallerTests(unittest.TestCase):
         foreign.mkdir()
         (foreign / "marker").write_bytes(b"untouched\n")
         foreign_before = snapshot(foreign)
-        pristine = self.base / "pristine-home"
-        shutil.copytree(self.home, pristine)
+        original_bytes = journal.read_bytes()
         for field in ("from", "to", "backup"):
             with self.subTest(field=field):
-                shutil.rmtree(self.home)
-                shutil.copytree(pristine, self.home)
                 forged = json.loads(json.dumps(original))
                 forged["moves"][0][field] = str(foreign / field)
                 journal.write_text(json.dumps(forged), encoding="utf-8")
@@ -926,8 +986,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(journal.read_bytes(), recorded)
                 self.assertEqual(snapshot(foreign), foreign_before)
                 self.assertEqual(current.read_text(encoding="utf-8").strip(), str(journal.relative_to(state)))
-        shutil.rmtree(self.home)
-        shutil.copytree(pristine, self.home)
+        journal.write_bytes(original_bytes)
         self.recover("codex")
 
         installed = self.apply(plan, "--retire-duplicate", legacy)
@@ -935,12 +994,9 @@ class InstallerTests(unittest.TestCase):
         receipt_path = Path(json.loads(installed.stdout)["receipt"])
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         active = snapshot(target)
-        installed_home = self.base / "installed-home"
-        shutil.copytree(self.home, installed_home)
+        receipt_bytes = receipt_path.read_bytes()
         for field in ("path", "retired_to", "backup"):
             with self.subTest(receipt_field=field):
-                shutil.rmtree(self.home)
-                shutil.copytree(installed_home, self.home)
                 forged = json.loads(json.dumps(receipt))
                 forged["duplicates"][0][field] = str(foreign / field)
                 receipt_path.write_text(json.dumps(forged), encoding="utf-8")
@@ -951,6 +1007,745 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(snapshot(target), active)
                 self.assertEqual(snapshot(foreign), foreign_before)
                 self.assertFalse((state / "CURRENT").exists())
+        receipt_path.write_bytes(receipt_bytes)
+
+    def test_recover_refuses_a_duplicate_root_retargeted_after_retirement(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        crashed = self.apply(self.plan("codex"), "--retire-duplicate", legacy,
+                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        move = json.loads(journal_bytes)["moves"][0]
+        parked = Path(json.loads(journal_bytes)["parked"])
+        parked_before, moved_before = snapshot(parked), snapshot(Path(move["to"]))
+        root = legacy.parent
+        held = self.base / "held-skills"
+        foreign = self.base / "foreign-skills"
+        foreign.mkdir()
+        (foreign / "marker").write_bytes(b"untouched\n")
+        shutil.move(str(root), str(held))
+        link_directory(root, foreign)
+        foreign_before = snapshot(foreign)
+        try:
+            refused = self.run_installer("recover", "--runtime", "codex", "--home", self.home,
+                                         "--maintenance-confirmed")
+            self.assert_refused(refused, 2)
+            self.assertEqual(current.read_bytes(), current_bytes)
+            self.assertEqual(journal.read_bytes(), journal_bytes)
+            self.assertEqual(snapshot(parked), parked_before)
+            self.assertEqual(snapshot(Path(move["to"])), moved_before)
+            self.assertEqual(snapshot(foreign), foreign_before)
+            self.assertIsNone(snapshot(target))
+        finally:
+            unlink_directory(root)
+            shutil.move(str(held), str(root))
+        self.recover("codex")
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+
+    def test_recover_accepts_an_unchanged_linked_duplicate_root(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        physical_root = self.base / "dotfiles" / "skills"
+        legacy_source = physical_root / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy_source)
+        (self.home / ".codex").mkdir()
+        link_directory(self.home / ".codex" / "skills", physical_root)
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        try:
+            crashed = self.apply(self.plan("codex"), "--retire-duplicate", legacy,
+                                 env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+            self.assertEqual(crashed.returncode, 70, crashed.stderr)
+            self.recover("codex")
+            self.assertEqual((snapshot(target), snapshot(legacy_source)), (before, legacy_before))
+        finally:
+            unlink_directory(self.home / ".codex" / "skills")
+
+    def test_recover_refuses_a_rollback_duplicate_root_retargeted_after_restoration(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        receipt_path = Path(json.loads(installed.stdout)["receipt"])
+        active = snapshot(target)
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:moved-0"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        receipt_bytes = receipt_path.read_bytes()
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+        root = legacy.parent
+        held = self.base / "held-skills"
+        foreign = self.base / "foreign-skills"
+        foreign.mkdir()
+        shutil.copytree(legacy, foreign / legacy.name, symlinks=True)
+        (foreign / "marker").write_bytes(b"untouched\n")
+        shutil.move(str(root), str(held))
+        link_directory(root, foreign)
+        foreign_before, held_before = snapshot(foreign), snapshot(held)
+        try:
+            refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(refused, 2)
+            self.assertEqual(current.read_bytes(), current_bytes)
+            self.assertEqual(journal.read_bytes(), journal_bytes)
+            self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+            self.assertEqual((snapshot(foreign), snapshot(held)), (foreign_before, held_before))
+            self.assertEqual(snapshot(target), before)
+        finally:
+            unlink_directory(root)
+            shutil.move(str(held), str(root))
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (active, None))
+
+    def test_recover_rollback_accepts_an_unchanged_linked_duplicate_root(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        physical_root = self.base / "dotfiles" / "skills"
+        legacy_source = physical_root / "github-workflow"
+        self.v52_layout(target)
+        self.v52_layout(legacy_source)
+        (self.home / ".codex").mkdir()
+        root = self.home / ".codex" / "skills"
+        link_directory(root, physical_root)
+        try:
+            legacy = root / "github-workflow"
+            installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            receipt_path = Path(json.loads(installed.stdout)["receipt"])
+            active = snapshot(target)
+            crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                         env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:moved-0"})
+            self.assertEqual(crashed.returncode, 70, crashed.stderr)
+            recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertEqual((snapshot(target), snapshot(legacy_source)), (active, None))
+        finally:
+            unlink_directory(root)
+
+    def test_recover_rollback_binds_changed_receipt_resolution_to_the_apply_journal(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        receipt_path = Path(json.loads(installed.stdout)["receipt"])
+        active = snapshot(target)
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:moved-0"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        receipt_bytes = receipt_path.read_bytes()
+        record = json.loads(journal_bytes)
+        parked = Path(record["parked"])
+        parked_before = snapshot(parked)
+        retired_duplicate = Path(json.loads(receipt_bytes)["duplicates"][0]["retired_to"])
+        retired_before = snapshot(retired_duplicate)
+        root = legacy.parent
+        held = self.base / "held-skills"
+        foreign = self.base / "foreign-skills"
+        foreign.mkdir()
+        shutil.copytree(legacy, foreign / legacy.name, symlinks=True)
+        self.assertEqual(snapshot(foreign / legacy.name), legacy_before)
+        (foreign / "marker").write_bytes(b"untouched\n")
+        shutil.move(str(root), str(held))
+        link_directory(root, foreign)
+        receipt = json.loads(receipt_bytes)
+        receipt["duplicates"][0]["resolved"] = os.path.realpath(str(legacy))
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        forged_bytes = receipt_path.read_bytes()
+        foreign_before, held_before = snapshot(foreign), snapshot(held)
+        try:
+            refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(refused, 1)
+            self.assertEqual((current.read_bytes(), journal.read_bytes(), receipt_path.read_bytes()),
+                             (current_bytes, journal_bytes, forged_bytes))
+            self.assertEqual((snapshot(target), snapshot(parked), snapshot(retired_duplicate)),
+                             (before, parked_before, retired_before))
+            self.assertEqual((snapshot(foreign), snapshot(held)), (foreign_before, held_before))
+        finally:
+            receipt_path.write_bytes(receipt_bytes)
+            unlink_directory(root)
+            shutil.move(str(held), str(root))
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (active, None))
+        self.assertEqual(snapshot(foreign), foreign_before)
+        self.assertFalse(current.exists())
+
+    def test_recover_rollback_rejects_receipt_duplicate_and_before_divergence(self):
+        for variant in ("omitted_duplicate", "sibling_duplicate", "changed_before"):
+            with self.subTest(variant=variant):
+                self.home = self.base / variant
+                self.home.mkdir()
+                target = self.home / ".agents" / "skills" / "github-workflow"
+                legacy = self.home / ".codex" / "skills" / "github-workflow"
+                self.v52_layout(target)
+                self.v52_layout(legacy)
+                installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                receipt_path = Path(json.loads(installed.stdout)["receipt"])
+                active = snapshot(target)
+                crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:moved-0"})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                state = self.home / ".agents" / "dev-harness-install"
+                current = state / "CURRENT"
+                current_bytes = current.read_bytes()
+                journal = state / current_bytes.decode("utf-8").strip()
+                journal_bytes = journal.read_bytes()
+                record = json.loads(journal_bytes)
+                receipt_bytes = receipt_path.read_bytes()
+                receipt = json.loads(receipt_bytes)
+                sibling = legacy.parent / "sibling" / legacy.name
+                if variant == "omitted_duplicate":
+                    receipt["duplicates"] = []
+                elif variant == "sibling_duplicate":
+                    receipt["duplicates"][0]["path"] = str(sibling)
+                    receipt["duplicates"][0]["resolved"] = os.path.realpath(str(sibling))
+                else:
+                    receipt["before"]["SKILL.md"]["sha256"] = "0" * 64
+                receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+                forged_bytes = receipt_path.read_bytes()
+                observed = (target, legacy, sibling, Path(record["parked"]),
+                            Path(json.loads(receipt_bytes)["duplicates"][0]["retired_to"]))
+                trees_before = tuple(snapshot(path) for path in observed)
+                refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual((current.read_bytes(), journal.read_bytes(), receipt_path.read_bytes()),
+                                 (current_bytes, journal_bytes, forged_bytes))
+                self.assertEqual(tuple(snapshot(path) for path in observed), trees_before)
+                receipt_path.write_bytes(receipt_bytes)
+                recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertEqual((snapshot(target), snapshot(legacy)), (active, None))
+                self.assertFalse(current.exists())
+
+    def test_recover_accepts_a_committed_rollback_receipt_with_a_retired_duplicate(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+        installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        receipt_path = Path(json.loads(installed.stdout)["receipt"])
+        rolled_back = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        journal = Path(receipt["rollback"]["journal"])
+        journal_bytes, receipt_bytes = journal.read_bytes(), receipt_path.read_bytes()
+        current = self.home / ".agents" / "dev-harness-install" / "CURRENT"
+        current.write_text(str(journal.relative_to(current.parent)) + "\n", encoding="utf-8")
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(json.loads(recovered.stdout)["result"], "already committed")
+        self.assertEqual((snapshot(target), snapshot(legacy)), (before, legacy_before))
+        self.assertEqual(journal.read_bytes(), journal_bytes)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8")), json.loads(receipt_bytes))
+        self.assertFalse(current.exists())
+
+    def test_recover_rollback_refuses_a_forged_duplicate_through_an_in_root_link(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        self.v52_layout(target)
+        self.v52_layout(legacy)
+        installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        receipt_path = Path(json.loads(installed.stdout)["receipt"])
+        active = snapshot(target)
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:moved-0"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        before_target = snapshot(target)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        original_journal = journal.read_bytes()
+        original_receipt = receipt_path.read_bytes()
+        foreign = self.base / "foreign-skills"
+        foreign.mkdir()
+        shutil.copytree(legacy, foreign / legacy.name, symlinks=True)
+        alias = legacy.parent / "alias"
+        link_directory(alias, foreign)
+        try:
+            forged = alias / "github-workflow"
+            receipt = json.loads(original_receipt)
+            receipt["duplicates"][0]["path"] = str(forged)
+            receipt["duplicates"][0]["resolved"] = os.path.realpath(str(forged))
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            journal_record = json.loads(original_journal)
+            journal_record["moves"][0]["to"] = str(forged)
+            journal.write_text(json.dumps(journal_record), encoding="utf-8")
+            journal_bytes, receipt_bytes = journal.read_bytes(), receipt_path.read_bytes()
+            foreign_before = snapshot(foreign)
+            refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(refused, 1)
+            self.assertEqual(current.read_bytes(), current_bytes)
+            self.assertEqual((journal.read_bytes(), receipt_path.read_bytes()), (journal_bytes, receipt_bytes))
+            self.assertEqual(snapshot(foreign), foreign_before)
+            self.assertEqual(snapshot(target), before_target)
+        finally:
+            journal.write_bytes(original_journal)
+            receipt_path.write_bytes(original_receipt)
+            unlink_directory(alias)
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (active, None))
+
+    def test_recover_refuses_a_parked_tree_without_a_recorded_origin(self):
+        crashed = self.apply(self.plan(), env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:staged"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = self.state() / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        record = json.loads(journal_bytes)
+        self.assertIsNone(record["origin"])
+        self.assertIsNone(record["origin_backup"])
+        parked = Path(record["parked"])
+        parked.mkdir(parents=True)
+        (parked / "marker").write_bytes(b"unrecorded origin\n")
+        parked_before = snapshot(parked)
+        staged_before = snapshot(Path(record["incoming_path"]))
+        refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                     "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(current.read_bytes(), current_bytes)
+        self.assertEqual(journal.read_bytes(), journal_bytes)
+        self.assertEqual(snapshot(parked), parked_before)
+        self.assertEqual(snapshot(Path(record["incoming_path"])), staged_before)
+        self.assertIsNone(snapshot(self.target))
+        shutil.rmtree(parked)
+        self.recover()
+        self.assertIsNone(snapshot(self.target))
+
+    def test_recover_refuses_a_committed_new_install_with_an_unrecorded_parked_tree(self):
+        crashed = self.apply(self.plan(), env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:committed"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = self.state() / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        record = json.loads(journal_bytes)
+        self.assertIsNone(record["origin"])
+        parked = Path(record["parked"])
+        parked.mkdir(parents=True)
+        (parked / "marker").write_bytes(b"unrecorded origin\n")
+        parked_before, active_before = snapshot(parked), snapshot(self.target)
+        receipt = journal.parent / "receipt.json"
+        receipt_bytes = receipt.read_bytes()
+        refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                     "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(current.read_bytes(), current_bytes)
+        self.assertEqual(journal.read_bytes(), journal_bytes)
+        self.assertEqual(receipt.read_bytes(), receipt_bytes)
+        self.assertEqual((snapshot(parked), snapshot(self.target)), (parked_before, active_before))
+        shutil.rmtree(parked)
+        self.assertEqual(self.recover()["result"], "already committed")
+
+    def test_recover_committed_apply_binds_receipt_to_journal(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        self.v52_layout(target)
+        self.v52_layout(legacy)
+        crashed = self.apply(self.plan("codex"), "--retire-duplicate", legacy,
+                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:committed"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        receipt_path = journal.parent / "receipt.json"
+        original = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt_bytes = receipt_path.read_bytes()
+        active, retired = snapshot(target), snapshot(Path(original["duplicates"][0]["retired_to"]))
+        changes = (
+            ("before", lambda value: value["before"]["SKILL.md"].__setitem__("sha256", "0" * 64)),
+            ("after", lambda value: value["after"]["SKILL.md"].__setitem__("sha256", "0" * 64)),
+            ("duplicate inventory", lambda value: value["duplicates"][0]["inventory"]["SKILL.md"].__setitem__("sha256", "0" * 64)),
+            ("duplicate path", lambda value: value["duplicates"][0].__setitem__("path", str(legacy.parent / "vendor" / "github-workflow"))),
+            ("duplicate resolved", lambda value: value["duplicates"][0].__setitem__("resolved", str(self.base / "foreign"))),
+            ("missing duplicate", lambda value: value.__setitem__("duplicates", [])),
+        )
+        for label, change in changes:
+            with self.subTest(field=label):
+                forged = json.loads(json.dumps(original))
+                change(forged)
+                receipt_path.write_text(json.dumps(forged), encoding="utf-8")
+                forged_bytes = receipt_path.read_bytes()
+                try:
+                    refused = self.run_installer("recover", "--runtime", "codex", "--home", self.home,
+                                                 "--maintenance-confirmed")
+                    self.assert_refused(refused, 1)
+                    self.assertEqual(current.read_bytes(), current_bytes)
+                    self.assertEqual(journal.read_bytes(), journal_bytes)
+                    self.assertEqual(receipt_path.read_bytes(), forged_bytes)
+                    self.assertEqual((snapshot(target), snapshot(Path(original["duplicates"][0]["retired_to"]))),
+                                     (active, retired))
+                finally:
+                    # Keep the same transaction and directories for every variant, even on a broken installer.
+                    if not current.exists():
+                        current.write_bytes(current_bytes)
+                    receipt_path.write_bytes(receipt_bytes)
+        self.assertEqual(self.recover("codex")["result"], "already committed")
+
+    def test_recover_committed_apply_accepts_legacy_duplicate_without_resolution(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        self.v52_layout(target)
+        self.v52_layout(legacy)
+        crashed = self.apply(self.plan("codex"), "--retire-duplicate", legacy,
+                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:committed"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        journal = state / current.read_text(encoding="utf-8").strip()
+        receipt_path = journal.parent / "receipt.json"
+        record = json.loads(journal.read_text(encoding="utf-8"))
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        del record["moves"][0]["resolved"]
+        del receipt["duplicates"][0]["resolved"]
+        journal.write_text(json.dumps(record), encoding="utf-8")
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        self.assertEqual(self.recover("codex")["result"], "already committed")
+        self.assertFalse(current.exists())
+
+    def test_recover_validates_a_precommit_apply_receipt_before_undo(self):
+        before = self.v52_layout()
+        crashed = self.apply(self.plan(), env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:committed"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = self.state() / current_bytes.decode("utf-8").strip()
+        record = json.loads(journal.read_text(encoding="utf-8"))
+        # A receipt is written immediately before the committed journal state.
+        record["state"] = "activated"
+        journal.write_text(json.dumps(record), encoding="utf-8")
+        journal_bytes = journal.read_bytes()
+        receipt_path = journal.parent / "receipt.json"
+        original = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt_bytes = receipt_path.read_bytes()
+        parked_before, active = snapshot(Path(record["parked"])), snapshot(self.target)
+        changes = (
+            ("transaction", lambda value: value.__setitem__("transaction", str(self.base / "foreign"))),
+            ("after", lambda value: value["after"]["SKILL.md"].__setitem__("sha256", "0" * 64)),
+        )
+        for label, change in changes:
+            with self.subTest(field=label):
+                forged = json.loads(json.dumps(original))
+                change(forged)
+                receipt_path.write_text(json.dumps(forged), encoding="utf-8")
+                forged_bytes = receipt_path.read_bytes()
+                try:
+                    refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                                 "--maintenance-confirmed")
+                    self.assert_refused(refused, 1)
+                    self.assertEqual(current.read_bytes(), current_bytes)
+                    self.assertEqual(journal.read_bytes(), journal_bytes)
+                    self.assertEqual(receipt_path.read_bytes(), forged_bytes)
+                    self.assertEqual((snapshot(Path(record["parked"])), snapshot(self.target)), (parked_before, active))
+                finally:
+                    if not current.exists():
+                        current.write_bytes(current_bytes)
+                    journal.write_bytes(journal_bytes)
+                    receipt_path.write_bytes(receipt_bytes)
+        self.assertEqual(self.recover()["result"], "restored")
+        self.assertEqual(snapshot(self.target), before)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"],
+                         "recovered to the before-state; not installed")
+        self.assertFalse(current.exists())
+
+    def test_recover_validates_rollback_origin_against_its_receipt_before_undo(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        active = snapshot(self.target)
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = self.state() / current_bytes.decode("utf-8").strip()
+        journal_bytes = journal.read_bytes()
+        record = json.loads(journal_bytes)
+        parked_before = snapshot(Path(record["parked"]))
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["after"]["SKILL.md"]["sha256"] = "0" * 64
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        forged_bytes = receipt_path.read_bytes()
+        refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(current.read_bytes(), current_bytes)
+        self.assertEqual(journal.read_bytes(), journal_bytes)
+        self.assertEqual(receipt_path.read_bytes(), forged_bytes)
+        self.assertEqual(snapshot(Path(record["parked"])), parked_before)
+        self.assertIsNone(snapshot(self.target))
+        receipt["after"] = record["origin"]
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(snapshot(self.target), active)
+        self.assertFalse(current.exists())
+
+    def test_recover_binds_rollback_move_inventory_to_receipt_before_undo_or_finish(self):
+        for checkpoint in ("rollback:moved-0", "rollback:committed"):
+            with self.subTest(checkpoint=checkpoint):
+                self.home = self.base / checkpoint.replace(":", "-")
+                self.home.mkdir()
+                target = self.home / ".agents" / "skills" / "github-workflow"
+                legacy = self.home / ".codex" / "skills" / "github-workflow"
+                before, legacy_before = self.v52_layout(target), self.v52_layout(legacy)
+                installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                receipt_path = Path(json.loads(installed.stdout)["receipt"])
+                active = snapshot(target)
+                crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": checkpoint})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                state = self.home / ".agents" / "dev-harness-install"
+                current = state / "CURRENT"
+                current_bytes = current.read_bytes()
+                journal = state / current_bytes.decode("utf-8").strip()
+                original_journal = journal.read_bytes()
+                receipt_bytes = receipt_path.read_bytes()
+                original_skill = (legacy / "SKILL.md").read_bytes()
+                changed = b"---\nname: github-workflow\n---\nDifferent duplicate bytes\n"
+                (legacy / "SKILL.md").write_bytes(changed)
+                record = json.loads(original_journal)
+                entry = record["moves"][0]["inventory"]["SKILL.md"]
+                entry.update(sha256=hashlib.sha256(changed).hexdigest(), bytes=len(changed))
+                journal.write_text(json.dumps(record), encoding="utf-8")
+                forged_bytes = journal.read_bytes()
+                target_before, legacy_changed = snapshot(target), snapshot(legacy)
+                refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(current.read_bytes(), current_bytes)
+                self.assertEqual((journal.read_bytes(), receipt_path.read_bytes()), (forged_bytes, receipt_bytes))
+                self.assertEqual((snapshot(target), snapshot(legacy)), (target_before, legacy_changed))
+                journal.write_bytes(original_journal)
+                (legacy / "SKILL.md").write_bytes(original_skill)
+                recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                expected = (before, legacy_before) if checkpoint == "rollback:committed" else (active, None)
+                self.assertEqual((snapshot(target), snapshot(legacy)), expected)
+                self.assertFalse(current.exists())
+
+    def test_recover_binds_receipt_identity_to_both_journal_kinds(self):
+        for operation in ("apply", "rollback"):
+            with self.subTest(operation=operation):
+                self.home = self.base / operation
+                self.home.mkdir()
+                self.v52_layout()
+                if operation == "apply":
+                    crashed = self.apply(self.plan(), env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:committed"})
+                else:
+                    receipt_path = self.installed()
+                    crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                                 env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:parked"})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                current = self.state() / "CURRENT"
+                current_bytes = current.read_bytes()
+                journal = self.state() / current_bytes.decode("utf-8").strip()
+                journal_bytes = journal.read_bytes()
+                record = json.loads(journal_bytes)
+                if operation == "apply":
+                    receipt_path = journal.parent / "receipt.json"
+                receipt_bytes = receipt_path.read_bytes()
+                foreign = receipt_path.parent.parent / "20000101T000000Z-deadbeef"
+                forged = relocated_transaction(json.loads(receipt_bytes), receipt_path.parent, foreign)
+                receipt_path.write_text(json.dumps(forged), encoding="utf-8")
+                forged_bytes = receipt_path.read_bytes()
+                target_before, parked_before = snapshot(self.target), snapshot(Path(record["parked"]))
+                refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                             "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(current.read_bytes(), current_bytes)
+                self.assertEqual((journal.read_bytes(), receipt_path.read_bytes()), (journal_bytes, forged_bytes))
+                self.assertEqual((snapshot(self.target), snapshot(Path(record["parked"]))),
+                                 (target_before, parked_before))
+                receipt_path.write_bytes(receipt_bytes)
+                recovered = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                               "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertFalse(current.exists())
+
+    def test_recover_rejects_an_unrecorded_rollback_move_backup(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        legacy = self.home / ".codex" / "skills" / "github-workflow"
+        self.v52_layout(target)
+        self.v52_layout(legacy)
+        installed = self.apply(self.plan("codex"), "--retire-duplicate", legacy)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        receipt_path = Path(json.loads(installed.stdout)["receipt"])
+        active = snapshot(target)
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:moved-0"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        original_journal = journal.read_bytes()
+        receipt_bytes = receipt_path.read_bytes()
+        record = json.loads(original_journal)
+        record["moves"][0]["backup"] = str(self.base / "foreign-backup")
+        journal.write_text(json.dumps(record), encoding="utf-8")
+        forged_bytes = journal.read_bytes()
+        target_before, legacy_before = snapshot(target), snapshot(legacy)
+        refused = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assert_refused(refused, 1)
+        self.assertEqual(current.read_bytes(), current_bytes)
+        self.assertEqual((journal.read_bytes(), receipt_path.read_bytes()), (forged_bytes, receipt_bytes))
+        self.assertEqual((snapshot(target), snapshot(legacy)), (target_before, legacy_before))
+        journal.write_bytes(original_journal)
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual((snapshot(target), snapshot(legacy)), (active, None))
+
+    def test_recover_refuses_a_missing_origin_backup_without_parked_drift(self):
+        for operation in ("apply", "rollback"):
+            with self.subTest(operation=operation):
+                self.home = self.base / operation
+                self.home.mkdir()
+                expected = self.v52_layout()
+                if operation == "apply":
+                    crashed = self.apply(self.plan(), env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:parked"})
+                else:
+                    receipt_path = self.installed()
+                    expected = snapshot(self.target)
+                    crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                                 env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:parked"})
+                self.assertEqual(crashed.returncode, 70, crashed.stderr)
+                current = self.state() / "CURRENT"
+                current_bytes = current.read_bytes()
+                journal = self.state() / current_bytes.decode("utf-8").strip()
+                original_journal = journal.read_bytes()
+                record = json.loads(original_journal)
+                self.assertIsNotNone(record["origin"])
+                self.assertIsNotNone(record["origin_backup"])
+                parked_before = snapshot(Path(record["parked"]))
+                record["origin_backup"] = None
+                journal.write_text(json.dumps(record), encoding="utf-8")
+                forged_bytes = journal.read_bytes()
+                refused = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                             "--maintenance-confirmed")
+                self.assert_refused(refused, 1)
+                self.assertEqual(current.read_bytes(), current_bytes)
+                self.assertEqual(journal.read_bytes(), forged_bytes)
+                self.assertEqual(snapshot(Path(record["parked"])), parked_before)
+                self.assertIsNone(snapshot(self.target))
+                journal.write_bytes(original_journal)
+                recovered = self.run_installer("recover", "--runtime", "claude", "--home", self.home,
+                                               "--maintenance-confirmed")
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                self.assertEqual(snapshot(self.target), expected)
+                self.assertFalse(current.exists())
+
+    def test_recover_accepts_a_rollback_origin_changed_after_parking(self):
+        self.v52_layout()
+        receipt_path = self.installed()
+        crashed = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed",
+                                     env={"DEV_HARNESS_INSTALL_TEST_CRASH": "rollback:parked"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        current = self.state() / "CURRENT"
+        journal = self.state() / current.read_text(encoding="utf-8").strip()
+        record = json.loads(journal.read_text(encoding="utf-8"))
+        parked = Path(record["parked"])
+        changed = b"---\nname: github-workflow\n---\nChanged after parking\n"
+        (parked / "SKILL.md").write_bytes(changed)
+        record["planned_origin"] = record["origin"]
+        record["origin"] = json.loads(json.dumps(record["origin"]))
+        record["origin"]["SKILL.md"].update(sha256=hashlib.sha256(changed).hexdigest(), bytes=len(changed))
+        record["origin_backup"] = None
+        record["state"] = "parked-drift"
+        journal.write_text(json.dumps(record), encoding="utf-8")
+        parked_before = snapshot(parked)
+        restored = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertEqual(snapshot(self.target), parked_before)
+        self.assertFalse(parked.exists())
+        self.assertEqual((self.target / "SKILL.md").read_bytes(), changed)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "installed")
+        self.assertFalse(current.exists())
+
+    def test_recover_accepts_a_rollback_receipt_already_marked_after_commit(self):
+        before = self.v52_layout()
+        receipt_path = self.installed()
+        rolled_back = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        journal = Path(receipt["rollback"]["journal"])
+        current = self.state() / "CURRENT"
+        current.write_text(str(journal.relative_to(self.state())) + "\n", encoding="utf-8")
+        recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(json.loads(recovered.stdout)["result"], "already committed")
+        self.assertEqual(snapshot(self.target), before)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["state"], "rolled back")
+        self.assertFalse(current.exists())
+
+    def test_rollback_rejects_a_forged_duplicate_through_an_in_root_link(self):
+        if os.name != "nt" and not symlinks_supported():
+            self.skipTest("symlinks unavailable")
+        receipt_path = self.installed("codex")
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        active = snapshot(self.home / ".agents" / "skills" / "github-workflow")
+        root = self.home / ".codex" / "skills"
+        root.mkdir(parents=True)
+        foreign = self.base / "foreign-skills"
+        foreign.mkdir()
+        (foreign / "marker").write_bytes(b"untouched\n")
+        alias = root / "alias"
+        link_directory(alias, foreign)
+        try:
+            forged = alias / "github-workflow"
+            source = self.home / ".agents" / "skills" / "github-workflow"
+            transaction = receipt_path.parent
+            retired = transaction / "duplicates" / "0" / forged.name
+            backup = transaction / "backup" / "duplicate-0" / forged.name
+            shutil.copytree(source, retired, symlinks=True)
+            shutil.copytree(source, backup, symlinks=True)
+            # The forged metadata is schema-valid, and its retired tree is available to move.
+            receipt["duplicates"].append({"path": str(forged), "retired_to": str(retired),
+                                          "backup": str(backup), "inventory": receipt["after"],
+                                          "resolved": os.path.realpath(str(forged))})
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            receipt_bytes = receipt_path.read_bytes()
+            foreign_before = snapshot(foreign)
+            refused = self.run_installer("rollback", "--receipt", receipt_path, "--maintenance-confirmed")
+            self.assert_refused(refused, 1)
+            self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+            self.assertEqual(snapshot(foreign), foreign_before)
+            self.assertEqual(snapshot(self.home / ".agents" / "skills" / "github-workflow"), active)
+            self.assertFalse((self.home / ".agents" / "dev-harness-install" / "CURRENT").exists())
+        finally:
+            unlink_directory(alias)
 
     def test_recover_restores_from_backup_when_parked_copy_drifted(self):
         before, parked = self.crash_after_parking()
