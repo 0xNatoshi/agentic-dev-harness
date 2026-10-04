@@ -1321,7 +1321,7 @@ class InstallerTests(unittest.TestCase):
         journal = Path(receipt["rollback"]["journal"])
         journal_bytes, receipt_bytes = journal.read_bytes(), receipt_path.read_bytes()
         current = self.home / ".agents" / "dev-harness-install" / "CURRENT"
-        current.write_text(str(journal.relative_to(current.parent)) + "\n", encoding="utf-8")
+        current.write_bytes((str(journal.relative_to(current.parent)) + "\n").encode("utf-8"))
         recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
         self.assertEqual(json.loads(recovered.stdout)["result"], "already committed")
@@ -1766,7 +1766,7 @@ class InstallerTests(unittest.TestCase):
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         journal = Path(receipt["rollback"]["journal"])
         current = self.state() / "CURRENT"
-        current.write_text(str(journal.relative_to(self.state())) + "\n", encoding="utf-8")
+        current.write_bytes((str(journal.relative_to(self.state())) + "\n").encode("utf-8"))
         recovered = self.run_installer("recover", "--receipt", receipt_path, "--maintenance-confirmed")
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
         self.assertEqual(json.loads(recovered.stdout)["result"], "already committed")
