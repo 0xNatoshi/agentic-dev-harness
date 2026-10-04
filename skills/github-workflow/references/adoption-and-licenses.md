@@ -150,10 +150,12 @@ Selecting/preparing the default template requires no further decision. Public gr
 Before release, verify the active template against its snapshot:
 
 ```bash
-cmp -s "<skill-root>/templates/AGENTS.md" "<skill-root>/templates/history/AGENTS-v6.4.md"
+cmp -s "<skill-root>/templates/AGENTS.md" "<skill-root>/templates/history/AGENTS-v6.6.md"
 ```
 
-Exit 0 means equal; 1 means different; >1 is a read error. Resolve differences/errors before distribution. PowerShell may compare byte arrays if `cmp` is unavailable; a preview/version label is insufficient. Keep and update the skill's **What's new** section. Package v6.5.0 adds initiative and written collaboration; its active repository template is v6.4. Preserve older snapshots unchanged.
+Exit 0 means equal; 1 means different; >1 is a read error. Resolve differences/errors before distribution. PowerShell may compare byte arrays if `cmp` is unavailable; a preview/version label is insufficient. Keep and update the skill's **What's new** section. Development package v6.5.0 uses repository template v6.6; this is not a release or destination-installation claim. Preserve older snapshots unchanged.
+
+The compact template requires its matching installed skill, including **Select one PR explicitly** and the lifecycle references. Verify those procedures load before using a migrated repository. If absent or unreadable, restore/access the compatible skill before dependent actions; a version label alone is insufficient. Compare rendered instruction bytes and inspect actual runtime loading, including the final project-specific rules, without assuming a larger global context limit. Preserve essential gates and local restrictions when shortening repeated prose. A successful local CLI probe does not qualify another runtime or Windows installation.
 
 For v5.1/v5.2 or another older repository:
 
