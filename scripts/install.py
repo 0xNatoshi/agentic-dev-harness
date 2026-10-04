@@ -1720,6 +1720,7 @@ class Operation:
             return
         with ExitStack() as opened:
             parents = {}
+            unbound = []
             try:
                 for index, move in enumerate(self.record["moves"]):
                     physical = move.get("physical", {})
@@ -1734,15 +1735,26 @@ class Operation:
                                       "is refused. Keep its backups and use manual restoration after verifying the original folder")
                     for side in ("from", "to"):
                         path = Path(move[side])
-                        if side not in physical and side != external and create_internal:
-                            # Internal staging parents are created before the first move and journal save.
-                            path.parent.mkdir(parents=True, exist_ok=True)
-                        if not create_internal and not path.parent.is_dir():
-                            raise Refused("The committed move's transaction parent is missing; CURRENT was kept")
-                        parent = opened.enter_context(PhysicalDirectory(
-                            path.parent, physical.get(side, _UNBOUND_DIRECTORY), writable=writable))
-                        physical[side] = parent.describe()
-                        parents[index, side] = parent
+                        if side not in physical:
+                            unbound.append((index, side, path))
+                            continue
+                        if not path.parent.is_dir():
+                            raise Blocked(f"The recorded duplicate-move parent {path.parent} is missing; restore it and retry")
+                        parents[index, side] = opened.enter_context(
+                            PhysicalDirectory(path.parent, physical[side], writable=writable))
+                # Every historical binding is checked while its handle stays open. In particular,
+                # a later bad binding cannot leave an earlier generated transaction parent behind.
+                for index, side, path in unbound:
+                    if create_internal:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                    elif not path.parent.is_dir():
+                        raise Refused("The committed move's transaction parent is missing; CURRENT was kept")
+                    parents[index, side] = opened.enter_context(
+                        PhysicalDirectory(path.parent, _UNBOUND_DIRECTORY, writable=writable))
+                for index, move in enumerate(self.record["moves"]):
+                    physical = move.get("physical", {})
+                    for side in ("from", "to"):
+                        physical[side] = parents[index, side].describe()
                     move["physical"] = physical
                 self._move_parents = parents
                 yield
@@ -2491,7 +2503,7 @@ def command_recover(options) -> dict:
                                                    recovery=True)
                 require_discovered_duplicate_path(locations, original, recovery=True)
         if record.get("state") == "committed":
-            with operation.bound_moves(create_internal=False, writable=False):
+            with operation.bound_moves(create_internal=False):
                 changed = differences(record["incoming"], inventory(locations.target))
                 for index, move in enumerate(record["moves"]):
                     changed += differences(move["inventory"], operation.move_inventory(index, "to"))
@@ -2515,28 +2527,29 @@ def command_recover(options) -> dict:
                         result.update({key: value[key] for key in ("retirements", "rollback_command") if key in value})
                 finish(locations.state)
                 return result
-        operation.record["recovery_boundary"] = boundary
-        try:
-            operation.undo()
-        except (Failure, OSError) as error:
-            raise Incomplete(f"Restoration incomplete: {error}{record_undo_error(operation, error)}. Recovery data kept "
-                             f"in {operation.path.parent}; fix the cause and run `recover` again",
-                             getattr(error, "details", None))
-        result = {"result": "restored", "operation": record["operation"], "journal": str(journal), "target": record["target"]}
-        for key in ("parked_drift", "moved_drift"):
-            if key in operation.record:
-                result[key] = operation.record[key]
-        # An aside path is recorded before its rename; one whose rename never happened names nothing.
-        stale = [path for path in operation.record.get("stale_restore_copies", ()) if exists(Path(path))]
-        if stale:
-            result["stale_restore_copies"] = stale
-        receipt = journal.parent / "receipt.json"
-        if record["operation"] == "apply" and exists(receipt):
-            value = read_json(receipt)
-            value["state"] = "recovered to the before-state; not installed"
-            write_json(receipt, value)
-        finish(locations.state)
-        return result
+        with operation.bound_moves():
+            operation.record["recovery_boundary"] = boundary
+            try:
+                operation.undo_bound()
+            except (Failure, OSError) as error:
+                raise Incomplete(f"Restoration incomplete: {error}{record_undo_error(operation, error)}. Recovery data kept "
+                                 f"in {operation.path.parent}; fix the cause and run `recover` again",
+                                 getattr(error, "details", None))
+            result = {"result": "restored", "operation": record["operation"], "journal": str(journal), "target": record["target"]}
+            for key in ("parked_drift", "moved_drift"):
+                if key in operation.record:
+                    result[key] = operation.record[key]
+            # An aside path is recorded before its rename; one whose rename never happened names nothing.
+            stale = [path for path in operation.record.get("stale_restore_copies", ()) if exists(Path(path))]
+            if stale:
+                result["stale_restore_copies"] = stale
+            receipt = journal.parent / "receipt.json"
+            if record["operation"] == "apply" and exists(receipt):
+                value = read_json(receipt)
+                value["state"] = "recovered to the before-state; not installed"
+                write_json(receipt, value)
+            finish(locations.state)
+            return result
 
 
 def parser() -> argparse.ArgumentParser:

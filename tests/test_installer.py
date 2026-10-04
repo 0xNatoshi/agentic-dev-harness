@@ -3472,10 +3472,12 @@ class InstallerTests(unittest.TestCase):
         source.rename(moved)
         source.mkdir()
         journal.write_text(json.dumps(record), encoding="utf-8")
+        forged_bytes = journal.read_bytes()
         recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
-        self.assert_refused(recovered, 3)
+        self.assert_refused(recovered, 2)
         self.assertIn("original duplicate-parent identity", json.loads(recovered.stderr)["error"])
         self.assertTrue(current.exists())
+        self.assertEqual(journal.read_bytes(), forged_bytes)
         self.assertEqual(list(source.iterdir()), [])
         self.assertEqual(list(moved.iterdir()), [])
         self.assertEqual(snapshot(target), before)
@@ -3488,6 +3490,86 @@ class InstallerTests(unittest.TestCase):
         recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
         self.assertEqual((snapshot(target), snapshot(duplicate)), (before, original))
+
+    def test_recover_refuses_one_invalid_parent_binding_without_changing_its_journal(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        duplicate = self.home / ".codex" / "skills" / "github-workflow"
+        before, duplicate_before = self.v52_layout(target), self.v52_layout(duplicate)
+        plan = self.plan("codex")
+        crashed = self.apply(plan, "--retire-duplicate", duplicate,
+                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:staged"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        original_record = journal.read_bytes()
+        record = json.loads(original_record)
+        self.assertEqual(len(record["moves"]), 1)
+        internal_parent = Path(record["moves"][0]["to"]).parent
+        self.assertFalse(internal_parent.exists())
+        record["moves"][0]["physical"]["from"]["identity"][1] += 1
+        journal.write_text(json.dumps(record), encoding="utf-8")
+        forged_record = journal.read_bytes()
+
+        refused = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assert_refused(refused, 2)
+        self.assertEqual((current.read_bytes(), journal.read_bytes()), (current_bytes, forged_record))
+        self.assertFalse(internal_parent.exists())
+        self.assertFalse((journal.parent / "receipt.json").exists())
+        self.assertEqual((snapshot(target), snapshot(duplicate)), (before, duplicate_before))
+
+        journal.write_bytes(original_record)
+        recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual((snapshot(target), snapshot(duplicate)), (before, duplicate_before))
+        self.assertFalse(current.exists())
+
+    def test_recover_checks_every_supplied_binding_before_creating_an_internal_parent(self):
+        target = self.home / ".agents" / "skills" / "github-workflow"
+        first = self.home / ".codex" / "skills" / "github-workflow"
+        second = self.home / ".codex" / "skills" / "vendor" / "old-copy"
+        before = self.v52_layout(target)
+        duplicate_before = {str(path): self.v52_layout(path) for path in (first, second)}
+        plan = self.plan("codex")
+        crashed = self.apply(plan, "--retire-duplicate", first, "--retire-duplicate", second,
+                             env={"DEV_HARNESS_INSTALL_TEST_CRASH": "apply:staged"})
+        self.assertEqual(crashed.returncode, 70, crashed.stderr)
+        state = self.home / ".agents" / "dev-harness-install"
+        current = state / "CURRENT"
+        current_bytes = current.read_bytes()
+        journal = state / current_bytes.decode("utf-8").strip()
+        original_record = journal.read_bytes()
+        original = json.loads(original_record)
+        self.assertEqual(len(original["moves"]), 2)
+        internal_parents = [Path(move["to"]).parent for move in original["moves"]]
+        self.assertTrue(all(not parent.exists() for parent in internal_parents))
+
+        for variant in ("later external", "later supplied internal"):
+            with self.subTest(variant=variant):
+                record = json.loads(original_record)
+                second_move = record["moves"][1]
+                if variant == "later external":
+                    second_move["physical"]["from"]["identity"][1] += 1
+                else:
+                    second_move["physical"]["to"] = {
+                        "path": str(Path(second_move["to"]).parent), "identity": [1, 1]}
+                journal.write_text(json.dumps(record), encoding="utf-8")
+                forged_record = journal.read_bytes()
+                refused = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+                self.assert_refused(refused, 2)
+                self.assertEqual((current.read_bytes(), journal.read_bytes()), (current_bytes, forged_record))
+                self.assertTrue(all(not parent.exists() for parent in internal_parents))
+                self.assertFalse((journal.parent / "receipt.json").exists())
+                self.assertEqual(snapshot(target), before)
+                self.assertEqual({str(path): snapshot(path) for path in (first, second)}, duplicate_before)
+
+        journal.write_bytes(original_record)
+        recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(snapshot(target), before)
+        self.assertEqual({str(path): snapshot(path) for path in (first, second)}, duplicate_before)
+        self.assertFalse(current.exists())
 
     def test_a_malformed_physical_binding_is_not_treated_as_legacy_metadata(self):
         target = self.home / ".agents" / "skills" / "github-workflow"
