@@ -4,6 +4,8 @@
 
 Development version: 6.5.0. These are unreleased source changes; existing release tags and assets remain immutable (next package-version delivery is tracked in #63).
 
+- Authenticate captured package ZIP bytes before any bundled code or Python discovery in both Windows installation guides. Create a fresh verified workspace, retain archive-member checks before full extraction, isolate Python startup, and exercise substituted packages and Windows PowerShell in the guide regression gate (#81).
+
 - Bind every operative push to the verified origin and intended branch refspec, pin exported CI actions with upstream provenance, disable checkout credential persistence and propagate the standing local-review policy across the active family (#82, #87, #90, #98). Add source gates and disposable execution proofs; preserve prior template snapshots.
 - Condense the active project template to v6.6 with required skill procedures, explicit command targeting, a defined instruction scan set and single template-family ownership; preserve old snapshots and repository-specific content during migration.
 - Also read list nesting in the suspension scan as CommonMark does, as an extra source of holds: an item is a child only from its parent's content column (marker width plus one to four spaces), so a list whose items shift by a space or two keeps its negated lead-in (` - Never` above `- merge PRs` now blocks with exit 2), and an item indented less than that column is a sibling. That reading only adds holds: context still comes from the marker-column nesting, so no hold read before is lost (`- No agent may` above ` - push to main` and ` - merge PRs` still exits 2).

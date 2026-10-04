@@ -26,7 +26,7 @@ python3 -m unittest discover -s tests -v
 python3 scripts/build.py
 ```
 
-The build writes a deterministic ZIP, SHA-256 manifest and checksum file to `dist/`. These generated files stay outside Git. Give the ZIP to the agent on the destination computer; the package includes separate Codex and Claude installation guides plus the Hermes adaptation. On Windows, use `py -3` for the Python build commands when needed; guard fixtures need a Bash-compatible environment and are not Windows runtime qualification.
+The build writes a deterministic ZIP, SHA-256 manifest and checksum file to `dist/`. These generated files stay outside Git. Deliver the ZIP, the separately authenticated release checksum file and the matching Codex or Claude installation guide obtained outside that ZIP. The recipient must trust the guide and checksum source before using the guide's bootstrap; a ZIP and checksum file replaced together do not establish provenance. The bootstrap authenticates captured ZIP bytes before bundled code runs and creates a fresh verified package root. The package also includes the Hermes adaptation. On Windows, use `py -3` for the Python build commands when needed; guard fixtures need a Bash-compatible environment. CI includes a dedicated Windows PowerShell job for the guide bootstrap; that scope does not cover every installer or runtime path.
 
 ## Source map
 

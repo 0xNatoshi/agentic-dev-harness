@@ -4,7 +4,7 @@ Versioned development workflow, agent profiles and safe delivery tooling for Cod
 
 ## Install
 
-Extract outside project repositories. Ask the agent in each targeted application to verify MANIFEST.json, read STATUS.md and follow its installation guide. Back up targeted instructions and skills, preserve existing preferences/authentic history, compare versions and verify actual loading in a new session. Install Codex only when present and targeted. Do not modify unrelated projects, providers, permissions or settings.
+Authenticate the ZIP before running any bundled code or using an existing extraction. Obtain the installation guide and release checksum file through an authenticated source outside the ZIP, then use the guide's bootstrap from a download directory outside repositories and skill discovery roots. It checks captured ZIP bytes, validates members and creates a fresh verified package root. Ask the agent in each targeted application to read STATUS.md and follow that guide from the new root. Back up targeted instructions and skills, preserve existing preferences/authentic history, compare versions and verify actual loading in a new session. Install Codex only when present and targeted. Do not modify unrelated projects, providers, permissions or settings.
 
 | Application | Guide and source |
 |---|---|
