@@ -1171,13 +1171,15 @@ sys.exit(installer.main(sys.argv[5:]))
         # A second native implementation observes the owner without changing volume permissions.
         observed = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "$ErrorActionPreference = 'Stop'; "
              "$acl = Get-Acl -LiteralPath $env:HARNESS_NATIVE_VOLUME -ErrorAction Stop; "
-             "$raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($acl.Sddl); "
+             "$raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0); "
              "$raw.Owner.Value"],
             # PowerShell may initialize profile-local module metadata; only installer processes use the guard.
             env={**os.environ, "HARNESS_NATIVE_VOLUME": str(root)},
             check=True, capture_output=True, text=True, encoding="utf-8", timeout=30,
         ).stdout.strip()
+        self.assertRegex(observed, r"\AS-\d+-\d+(?:-\d+)+\Z")
         installer._windows_control_component(root, "ancestor")
         if observed == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464":
             with self.assertRaisesRegex(installer.UntrustedState, "owner SID is not trusted for this role"):
