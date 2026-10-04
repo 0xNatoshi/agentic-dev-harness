@@ -7,7 +7,9 @@ Standard library only; Python 3.8+. Exit codes: 0 done, 1 refused or failed and 
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from contextlib import contextmanager, ExitStack
+import errno
 import hashlib
 import io
 import json
@@ -17,6 +19,7 @@ import re
 import shlex
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -65,6 +68,12 @@ REPARSE_POINT = 0x400
 LINK_REPARSE_TAGS = {0xA000000C, 0xA0000003}
 MEMBER_LIMIT = 64 * 1024 * 1024
 ARCHIVE_LIMIT = 256 * 1024 * 1024
+PACKAGE_ENTRY_LIMIT = 1024
+PACKAGE_NAME_BYTES_LIMIT = 128 * 1024
+CENTRAL_DIRECTORY_LIMIT = 512 * 1024
+MANIFEST_LIMIT = 1024 * 1024
+MANIFEST_ENTRY_LIMIT = 1024
+CHECKSUM_LIMIT = 128 * 1024
 
 
 class Failure(Exception):
@@ -81,6 +90,10 @@ class Refused(Failure):
 
 class Blocked(Failure):
     code = 2
+
+
+class UntrustedState(Blocked):
+    """A control path lost its native owner or mutation protection."""
 
 
 class Incomplete(Failure):
@@ -216,19 +229,436 @@ def sync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def write_durable(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _untrusted_state(path: Path, reason: str) -> None:
+    raise UntrustedState(f"Installation state at {path} is not protected: {reason}; reconcile it manually from trusted evidence")
+
+
+def _mac_acl(path: Path, future_child: bool = False) -> None:
+    """Inspect effective (or inheritable) mutation grants; POSIX mode bits do not mask macOS ACLs."""
+    if sys.platform != "darwin":
+        return
+    import ctypes
+
+    libc = ctypes.CDLL("libc.dylib", use_errno=True)
+    libc.acl_get_file.argtypes, libc.acl_get_file.restype = (ctypes.c_char_p, ctypes.c_int), ctypes.c_void_p
+    libc.acl_get_entry.argtypes, libc.acl_get_entry.restype = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p), ctypes.c_int
+    libc.acl_get_tag_type.argtypes, libc.acl_get_tag_type.restype = (ctypes.c_void_p, ctypes.c_void_p), ctypes.c_int
+    libc.acl_get_flagset_np.argtypes, libc.acl_get_flagset_np.restype = (ctypes.c_void_p, ctypes.c_void_p), ctypes.c_int
+    libc.acl_get_flag_np.argtypes, libc.acl_get_flag_np.restype = (ctypes.c_void_p, ctypes.c_int), ctypes.c_int
+    libc.acl_get_permset_mask_np.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    libc.acl_get_permset_mask_np.restype = ctypes.c_int
+    libc.acl_get_qualifier.argtypes, libc.acl_get_qualifier.restype = (ctypes.c_void_p,), ctypes.c_void_p
+    libc.acl_free.argtypes, libc.acl_free.restype = (ctypes.c_void_p,), ctypes.c_int
+    libc.mbr_uuid_to_id.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+    libc.mbr_uuid_to_id.restype = ctypes.c_int
+    try:
+        original = os.lstat(str(path))
+    except OSError:
+        _untrusted_state(path, "the ACL object's identity cannot be inspected")
+    acl = libc.acl_get_file(os.fsencode(path), 0x100)  # ACL_TYPE_EXTENDED in the macOS SDK.
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:  # No extended ACL on an existing object.
+            try:
+                current = os.lstat(str(path))
+            except OSError:
+                _untrusted_state(path, "the ACL object disappeared during inspection")
+            if (original.st_dev, original.st_ino) == (current.st_dev, current.st_ino):
+                return
+        _untrusted_state(path, "its extended ACL cannot be inspected")
+    mutation = sum(1 << bit for bit in (2, 4, 5, 6, 8, 10, 12, 13))
+    try:
+        entry = ctypes.c_void_p()
+        selector = 0  # ACL_FIRST_ENTRY; ACL_NEXT_ENTRY is -1.
+        while True:
+            found = libc.acl_get_entry(acl, selector, ctypes.byref(entry))
+            if found == -1 and selector == -1 and ctypes.get_errno() == errno.EINVAL:
+                break  # macOS reports the end of the extended ACL this way.
+            if found != 0:
+                _untrusted_state(path, "its extended ACL entries cannot be inspected")
+            selector = -1
+            tag = ctypes.c_int()
+            flags = ctypes.c_void_p()
+            mask = ctypes.c_uint64()
+            if (libc.acl_get_tag_type(entry, ctypes.byref(tag)) != 0
+                    or libc.acl_get_flagset_np(entry, ctypes.byref(flags)) != 0
+                    or libc.acl_get_permset_mask_np(entry, ctypes.byref(mask)) != 0):
+                _untrusted_state(path, "its extended ACL grant cannot be inspected")
+            if tag.value not in (1, 2):  # ACL_EXTENDED_ALLOW / ACL_EXTENDED_DENY.
+                _untrusted_state(path, "its extended ACL has an unknown grant type")
+            if tag.value == 2 or not mask.value & mutation:
+                continue
+            only_inherit = libc.acl_get_flag_np(flags, 1 << 8)
+            file_inherit = libc.acl_get_flag_np(flags, 1 << 5)
+            dir_inherit = libc.acl_get_flag_np(flags, 1 << 6)
+            if min(only_inherit, file_inherit, dir_inherit) < 0:
+                _untrusted_state(path, "its extended ACL inheritance cannot be inspected")
+            if (future_child and not (file_inherit or dir_inherit)) or (not future_child and only_inherit):
+                continue
+            qualifier = libc.acl_get_qualifier(entry)
+            if not qualifier:
+                _untrusted_state(path, "its extended ACL principal cannot be inspected")
+            try:
+                principal = ctypes.c_uint()
+                kind = ctypes.c_int()
+                if (libc.mbr_uuid_to_id(qualifier, ctypes.byref(principal), ctypes.byref(kind)) != 0
+                        or kind.value != 0 or principal.value != os.geteuid()):
+                    _untrusted_state(path, "another principal has an extended ACL mutation grant")
+            finally:
+                libc.acl_free(qualifier)
+    finally:
+        libc.acl_free(acl)
+
+
+def _control_prefixes(path: Path):
+    return reversed((path, *path.parents))
+
+
+def _posix_control_component(path: Path, role: str, status) -> None:
+    uid = os.geteuid()
+    if stat.S_ISLNK(status.st_mode):
+        if role != "ancestor" or status.st_uid not in (0, uid):
+            _untrusted_state(path, "a control component is linked or has an untrusted owner")
+        return  # The protected link's physical destination is checked separately.
+    if role == "file":
+        if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1 or status.st_uid != uid:
+            _untrusted_state(path, "a control file is not a singly linked regular file owned by this user")
+    elif not stat.S_ISDIR(status.st_mode) or status.st_uid not in ((uid,) if role == "container" else (0, uid)):
+        _untrusted_state(path, "a control directory or ancestor has an untrusted owner or type")
+    if status.st_mode & 0o022:
+        # A root-owned sticky temporary directory protects an existing current-owned child from unlink.
+        if not (role == "ancestor" and status.st_uid == 0 and status.st_mode & stat.S_ISVTX):
+            _untrusted_state(path, "group or other users can mutate it")
+    _mac_acl(path)
+
+
+def _windows_security():
+    import ctypes
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.OpenProcessToken.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE))
+    advapi.OpenProcessToken.restype = wintypes.BOOL
+    advapi.GetTokenInformation.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                            ctypes.POINTER(wintypes.DWORD))
+    advapi.GetTokenInformation.restype = wintypes.BOOL
+    advapi.GetSecurityInfo.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.DWORD, ctypes.c_void_p,
+                                       ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+    advapi.GetSecurityInfo.restype = wintypes.DWORD
+    advapi.GetAce.argtypes = (ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p))
+    advapi.GetAce.restype = wintypes.BOOL
+    advapi.ConvertSidToStringSidW.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+    advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p)
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = (wintypes.HANDLE,), wintypes.BOOL
+    kernel.LocalFree.argtypes, kernel.LocalFree.restype = (ctypes.c_void_p,), ctypes.c_void_p
+    kernel.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                   wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CreateDirectoryW.argtypes = (wintypes.LPCWSTR, ctypes.c_void_p)
+    kernel.CreateDirectoryW.restype = wintypes.BOOL
+    return ctypes, wintypes, advapi, kernel
+
+
+def _windows_sid_text(ctypes, advapi, kernel, pointer: int) -> str:
+    if not pointer:
+        raise OSError("A security descriptor has no owner SID")
+    value = ctypes.c_void_p()
+    if not advapi.ConvertSidToStringSidW(pointer, ctypes.byref(value)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.wstring_at(value)
+    finally:
+        kernel.LocalFree(value)
+
+
+def _windows_trusted_sids(ctypes, wintypes, advapi, kernel) -> set:
+    token = wintypes.HANDLE()
+    if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        privileged = {"S-1-5-18", "S-1-5-32-544"}  # SYSTEM and local Administrators.
+        principals = {}
+        for kind in (1, 4):  # TokenUser and TokenOwner; an elevated token may default to Administrators.
+            needed = wintypes.DWORD()
+            advapi.GetTokenInformation(token, kind, None, 0, ctypes.byref(needed))
+            if not needed.value or needed.value > 65536:
+                raise OSError("The current token owner cannot be inspected")
+            buffer = ctypes.create_string_buffer(needed.value)
+            if not advapi.GetTokenInformation(token, kind, buffer, needed.value, ctypes.byref(needed)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            principals[kind] = _windows_sid_text(ctypes, advapi, kernel, ctypes.c_void_p.from_buffer(buffer).value)
+        if principals[4] not in {principals[1], *privileged}:
+            raise OSError("The token's default owner is not an admitted control owner")
+        return {principals[1], *privileged}
+    finally:
+        kernel.CloseHandle(token)
+
+
+def _windows_control_component(path: Path, role: str) -> None:
+    """Inspect a native owner/DACL; create-only ancestor grants cannot replace an existing child."""
+    import ctypes
+
+    try:
+        ctypes, wintypes, advapi, kernel = _windows_security()
+        trusted = _windows_trusted_sids(ctypes, wintypes, advapi, kernel)
+        if role == "ancestor":
+            # TrustedInstaller owns protected system ancestors; control state keeps its own owner policy.
+            trusted = trusted | {"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"}
+        status = os.lstat(str(path))
+        reparse = bool(getattr(status, "st_file_attributes", 0) & REPARSE_POINT)
+        if role == "file" and (not stat.S_ISREG(status.st_mode) or reparse or status.st_nlink != 1):
+            _untrusted_state(path, "a control file is linked or not regular")
+        if role != "file" and (not (stat.S_ISDIR(status.st_mode) or
+                                    (role == "ancestor" and stat.S_ISLNK(status.st_mode)))
+                               or (role == "container" and reparse)):
+            _untrusted_state(path, "a control directory has an unsupported type or link")
+        handle = kernel.CreateFileW(str(path), 0x00020080, 0x7, None, 3, 0x02200000, None)
+        if handle == wintypes.HANDLE(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            owner, dacl, descriptor = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+            result = advapi.GetSecurityInfo(handle, 1, 0x5, ctypes.byref(owner), None,
+                                            ctypes.byref(dacl), None, ctypes.byref(descriptor))
+            if result:
+                raise OSError(result, "GetSecurityInfo failed")
+            try:
+                if _windows_sid_text(ctypes, advapi, kernel, owner.value) not in trusted:
+                    _untrusted_state(path, "its owner SID is not trusted for this role")
+                if not dacl.value:
+                    _untrusted_state(path, "its DACL is null")
+                acl = ctypes.string_at(dacl, 8)
+                count = struct.unpack_from("<H", acl, 4)[0]
+                # Generic write/all, delete, child deletion, data/append, security, attributes and EAs.
+                control_mutation = 0x50000000 | 0x000D0156
+                # Ancestors may permit creation, but may not permit replacing or changing existing children.
+                ancestor_replacement = 0x10000000 | 0x000D0040
+                if reparse:
+                    # FSCTL_SET/DELETE_REPARSE_POINT can change a link with WRITE_DATA or WRITE_ATTRIBUTES.
+                    ancestor_replacement |= 0x40000102
+                for index in range(count):
+                    ace = ctypes.c_void_p()
+                    if not advapi.GetAce(dacl, index, ctypes.byref(ace)):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    header = ctypes.string_at(ace, 4)
+                    kind, flags, length = struct.unpack("<BBH", header)
+                    if length < 8:
+                        _untrusted_state(path, "its DACL has a malformed ACE")
+                    raw = ctypes.string_at(ace, length)
+                    mask = struct.unpack_from("<I", raw, 4)[0]
+                    if kind == 1 or flags & 0x08:  # Deny, or inherit-only on this object.
+                        continue
+                    if kind != 0 and mask & (ancestor_replacement if role == "ancestor" else control_mutation):
+                        _untrusted_state(path, "its DACL has an unknown mutation grant")
+                    if kind != 0 or not mask & (ancestor_replacement if role == "ancestor" else control_mutation):
+                        continue
+                    if length < 12 or _windows_sid_text(ctypes, advapi, kernel, ace.value + 8) not in trusted:
+                        _untrusted_state(path, "another principal has a DACL mutation grant")
+            finally:
+                kernel.LocalFree(descriptor)
+        finally:
+            kernel.CloseHandle(handle)
+    except Blocked:
+        raise
+    except (OSError, ValueError):
+        _untrusted_state(path, "its native owner and DACL cannot be inspected")
+
+
+def require_trusted_state(state: Path, *controls: tuple, directories=()) -> None:
+    """Check native ownership and replacement rights before any control document becomes authority."""
+    state = Path(os.path.abspath(state))
+    requested = ((state, False, False), (state / "CURRENT", False, True),
+                 (state / "LOCK", False, True), *[(Path(path), required, True) for path, required in controls],
+                 *[(Path(path), False, False) for path in directories])
+    checked = set()
+
+    def inspect(path: Path, role: str) -> None:
+        key = (str(path), role)
+        if key in checked:
+            return
+        status = os.lstat(str(path))
+        if os.name == "nt":
+            _windows_control_component(path, role)
+        else:
+            _posix_control_component(path, role, status)
+        checked.add(key)
+
+    for candidate, required, is_file in requested:
+        candidate = Path(os.path.abspath(candidate))
+        if candidate != state and state not in candidate.parents:
+            _untrusted_state(candidate, "a control path leaves the selected state")
+        # Follow each link's raw target component by component. realpath(candidate) alone hides
+        # writable directories crossed by intermediate links or by a relative target's '..'.
+        original = candidate.parts
+        root_depth = len(state.parts) - 1
+        pending = deque((part, "file" if is_file and index == len(original) - 1 else
+                         "container" if index >= root_depth else "ancestor", False)
+                        for index, part in enumerate(original[1:], 1))
+        current = Path(candidate.anchor)
+        try:
+            inspect(current, "ancestor")
+        except OSError:
+            _untrusted_state(current, "its owner and permissions cannot be inspected")
+        expanded_links = 0
+        visited = 0
+        while pending:
+            visited += 1
+            if visited > 4096:
+                _untrusted_state(current, "a control path has too many components or link expansions")
+            part, role, expanded = pending.popleft()
+            if part in ("", "."):
+                continue
+            if part == "..":
+                current = current.parent
+                continue
+            selected = current / part
+            try:
+                status = os.lstat(str(selected))
+            except (FileNotFoundError, NotADirectoryError):
+                if expanded:
+                    _untrusted_state(selected, "a linked ancestor has no inspectable destination")
+                if required and not pending:
+                    _untrusted_state(selected, "the required control file is missing")
+                if os.name != "nt" and exists(current):
+                    _mac_acl(current, future_child=True)
+                current = selected
+                continue
+            except OSError:
+                _untrusted_state(selected, "its owner and permissions cannot be inspected")
+            try:
+                inspect(selected, role)
+            except OSError:
+                _untrusted_state(selected, "its owner and permissions cannot be inspected")
+            linked = stat.S_ISLNK(status.st_mode) or bool(getattr(status, "st_file_attributes", 0) & REPARSE_POINT)
+            if not linked:
+                current = selected
+                continue
+            if role != "ancestor":
+                _untrusted_state(selected, "a control file or directory is linked")
+            expanded_links += 1
+            if expanded_links > 40:
+                _untrusted_state(selected, "a control path has too many linked ancestors")
+            try:
+                target = Path(os.readlink(str(selected)))
+            except OSError:
+                _untrusted_state(selected, "a linked ancestor's destination cannot be inspected")
+            if target.is_absolute():
+                current = Path(target.anchor)
+                try:
+                    inspect(current, "ancestor")
+                except OSError:
+                    _untrusted_state(current, "its owner and permissions cannot be inspected")
+                components = target.parts[1:]
+            elif target.anchor or target.drive:
+                _untrusted_state(selected, "a linked ancestor has an ambiguous destination")
+            else:
+                current = selected.parent
+                components = target.parts
+            pending.extendleft((component, "ancestor", True) for component in reversed(components))
+
+
+def _windows_private_attributes():
+    ctypes, wintypes, advapi, kernel = _windows_security()
+    try:
+        principals = _windows_trusted_sids(ctypes, wintypes, advapi, kernel)
+    except OSError:
+        _untrusted_state(Path("."), "the current Windows token cannot be inspected")
+    sddl = "D:P" + "".join(f"(A;OICI;FA;;;{sid})" for sid in sorted(principals))
+    descriptor = ctypes.c_void_p()
+    if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None):
+        _untrusted_state(Path("."), "a private Windows security descriptor cannot be created")
+
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = (("nLength", wintypes.DWORD), ("lpSecurityDescriptor", ctypes.c_void_p),
+                    ("bInheritHandle", wintypes.BOOL))
+
+    attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+    return ctypes, kernel, descriptor, attributes
+
+
+def _private_mkdir(path: Path) -> None:
+    if os.name == "nt":
+        ctypes, kernel, descriptor, attributes = _windows_private_attributes()
+        try:
+            if not kernel.CreateDirectoryW(str(path), ctypes.byref(attributes)):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            kernel.LocalFree(descriptor)
+    else:
+        old_umask = os.umask(0o077)
+        try:
+            os.mkdir(str(path), 0o700)
+        finally:
+            os.umask(old_umask)
+
+
+def private_mkdirs(path: Path, state: Path) -> None:
+    missing = [part for part in _control_prefixes(path) if not exists(part)]
+    for part in missing:
+        internal = part == state or state in part.parents
+        require_trusted_state(state, directories=(part,) if internal else ())
+        if os.name != "nt":
+            _mac_acl(part.parent, future_child=True)
+        try:
+            _private_mkdir(part)
+        except OSError as error:
+            if not isinstance(error, FileExistsError) and getattr(error, "winerror", None) not in (80, 183):
+                raise
+            # A concurrent installer may have created the directory first. Accept only its
+            # freshly inspected protected directory; the normal Lock still serializes the work.
+        require_trusted_state(state, directories=(part,) if internal else ())
+
+
+def _private_file(path: Path):
+    if os.name == "nt":
+        import msvcrt
+
+        ctypes, kernel, descriptor, attributes = _windows_private_attributes()
+        try:
+            handle = kernel.CreateFileW(str(path), 0x40000000, 0, ctypes.byref(attributes), 1, 0x80, None)
+            if handle == ctypes.c_void_p(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                descriptor_number = msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
+            except BaseException:
+                kernel.CloseHandle(handle)
+                raise
+            return os.fdopen(descriptor_number, "wb")
+        finally:
+            kernel.LocalFree(descriptor)
+    old_umask = os.umask(0o077)
+    try:
+        descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    finally:
+        os.umask(old_umask)
+    return os.fdopen(descriptor, "wb")
+
+
+def write_durable(path: Path, data: bytes, state: Path | None = None) -> None:
+    if state is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        require_trusted_state(state, (path, False))
+        private_mkdirs(path.parent, state)
+        _mac_acl(path.parent, future_child=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    with open(temporary, "wb") as stream:
+    with (_private_file(temporary) if state is not None else open(temporary, "wb")) as stream:
         stream.write(data)
         stream.flush()
         os.fsync(stream.fileno())
+    if state is not None:
+        require_trusted_state(state, (temporary, True))
     os.replace(temporary, path)
     sync_directory(path.parent)
+    if state is not None:
+        require_trusted_state(state, (path, True))
 
 
-def write_json(path: Path, value: object) -> None:
-    write_durable(path, (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8"))
+def write_json(path: Path, value: object, state: Path | None = None) -> None:
+    write_durable(path, (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8"), state)
 
 
 def read_json(path: Path, retry: str | None = None) -> dict:
@@ -244,6 +674,11 @@ def read_json(path: Path, retry: str | None = None) -> dict:
     if not isinstance(value, dict):
         raise Refused(f"{path} does not hold a JSON object")
     return value
+
+
+def read_control_json(path: Path, state: Path, retry: str | None = None) -> dict:
+    require_trusted_state(state, (path, False))
+    return read_json(path, retry)
 
 
 # Filesystem inventory.
@@ -373,16 +808,25 @@ def is_cache(name: str) -> bool:
 # Package loading and verification.
 class Package:
     def __init__(self, source: Path, files: dict, manifest_bytes: bytes, archive: bytes | None) -> None:
+        if len(manifest_bytes) > MANIFEST_LIMIT:
+            raise Refused(f"MANIFEST.json exceeds {MANIFEST_LIMIT} bytes")
         self.source = source
         self.files = files
         self.manifest_bytes = manifest_bytes
         self.archive_sha256 = digest(archive) if archive is not None else None
         try:
             self.manifest = json.loads(manifest_bytes.decode("utf-8"))
-        except ValueError as error:
+        except (ValueError, RecursionError) as error:
             raise Refused(f"MANIFEST.json is not valid JSON: {error}")
         if not isinstance(self.manifest, dict) or self.manifest.get("format_version") != 2 or not isinstance(self.manifest.get("files"), dict):
             raise Refused("MANIFEST.json is not a format 2 dev-harness manifest")
+        if len(self.manifest["files"]) > MANIFEST_ENTRY_LIMIT:
+            raise Refused(f"MANIFEST.json file count exceeds {MANIFEST_ENTRY_LIMIT}")
+        # Manifest-only paths also need a budget before collision checks expand their parents.
+        try:
+            check_package_paths(("MANIFEST.json", *self.manifest["files"]), "MANIFEST.json")
+        except ValueError as error:
+            raise Refused("Package verification failed", [str(error)]) from None
         name = self.manifest.get("package")
         if not isinstance(name, str) or not re.fullmatch(r"dev-harness-v\d+\.\d+\.\d+", name) or name != "dev-harness-v" + str(self.manifest.get("version")):
             raise Refused("MANIFEST.json names no valid package version")
@@ -410,33 +854,154 @@ def load_package(source: Path) -> Package:
         return load_archive(source)
     if not source.is_dir():
         raise Refused(f"Package not found: {source}")
-    files = {}
-    for name, entry in (inventory_unchecked(source)).items():
-        if entry is not None:
-            files[name] = (source / Path(*PurePosixPath(name).parts)).read_bytes()
+    files = load_directory_files(source)
     if "MANIFEST.json" not in files:
         raise Refused(f"No MANIFEST.json in {source}")
     manifest = files.pop("MANIFEST.json")
     return Package(source, files, manifest, None)
 
 
-def inventory_unchecked(source: Path) -> dict:
-    """Package directory listing: regular files only; links and special files refuse."""
-    try:
-        entries = inventory(source)
-    except Blocked as error:
-        raise Refused(f"Package directory: {error}")
-    return {name: entry for name, entry in entries.items() if entry["type"] == "file"}
+def check_package_entries(count: int, name_bytes: int, context: str) -> None:
+    if count > PACKAGE_ENTRY_LIMIT:
+        raise Refused(f"{context} entry count exceeds {PACKAGE_ENTRY_LIMIT}")
+    if name_bytes > PACKAGE_NAME_BYTES_LIMIT:
+        raise Refused(f"{context} filename bytes exceed {PACKAGE_NAME_BYTES_LIMIT}")
+
+
+def check_package_paths(names, context: str) -> None:
+    """Apply entry and pathname budgets to files and their implied folders."""
+    directories = set()
+    count = name_bytes = 0
+    for name in names:
+        path = package_path(name)
+        if len(path.parts) > PACKAGE_ENTRY_LIMIT:
+            raise Refused(f"{context} entry count exceeds {PACKAGE_ENTRY_LIMIT}")
+        count += 1
+        try:
+            name_bytes += len(name.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise ValueError("Package paths must be UTF-8") from None
+        check_package_entries(count, name_bytes, context)
+        for parent in path.parents:
+            if parent == PurePosixPath("."):
+                continue
+            directory = parent.as_posix()
+            if directory not in directories:
+                directories.add(directory)
+                count += 1
+                name_bytes += len(directory.encode("utf-8"))
+                check_package_entries(count, name_bytes, context)
+
+
+def load_directory_files(source: Path) -> dict:
+    """Read a package directory once, checking each entry before retaining its bytes."""
+    files = {}
+    pending = [(source, "")]
+    count = name_bytes = total = 0
+    while pending:
+        directory, prefix = pending.pop()
+        with os.scandir(str(directory)) as listing:
+            for item in listing:
+                name = prefix + item.name
+                path = directory / item.name
+                count += 1
+                try:
+                    name_bytes += len(name.encode("utf-8"))
+                except UnicodeEncodeError:
+                    raise Refused("Package directory path is not UTF-8") from None
+                check_package_entries(count, name_bytes, "package directory")
+                if is_link(path):
+                    raise Refused(f"Package directory: Link or junction inside the tree: {path}")
+                status = os.lstat(str(path))
+                if stat.S_ISDIR(status.st_mode):
+                    pending.append((path, name + "/"))
+                    continue
+                if not stat.S_ISREG(status.st_mode):
+                    raise Refused(f"Package directory: Special file inside the tree: {path}")
+                try:
+                    package_path(name)
+                except ValueError as error:
+                    raise Refused(str(error))
+                if name == "MANIFEST.json" and status.st_size > MANIFEST_LIMIT:
+                    raise Refused(f"MANIFEST.json exceeds {MANIFEST_LIMIT} bytes")
+                if status.st_size > MEMBER_LIMIT:
+                    raise Refused(f"package directory member exceeds {MEMBER_LIMIT} bytes: {name}")
+                if total + status.st_size > ARCHIVE_LIMIT:
+                    raise Refused(f"package directory expands beyond {ARCHIVE_LIMIT} bytes")
+                remaining = ARCHIVE_LIMIT - total
+                bound = min(MEMBER_LIMIT, remaining, MANIFEST_LIMIT if name == "MANIFEST.json" else MEMBER_LIMIT)
+                with path.open("rb") as stream:
+                    data = stream.read(bound + 1)
+                if name == "MANIFEST.json" and len(data) > MANIFEST_LIMIT:
+                    raise Refused(f"MANIFEST.json exceeds {MANIFEST_LIMIT} bytes")
+                if len(data) > MEMBER_LIMIT:
+                    raise Refused(f"package directory member exceeds {MEMBER_LIMIT} bytes: {name}")
+                total += len(data)
+                if total > ARCHIVE_LIMIT:
+                    raise Refused(f"package directory expands beyond {ARCHIVE_LIMIT} bytes")
+                files[name] = data
+    return files
+
+
+def preflight_archive_metadata(archive: bytes) -> int:
+    """Bound the raw central directory before ZipFile allocates ZipInfo objects."""
+    eocd = archive.rfind(b"PK\x05\x06", max(0, len(archive) - 65557))
+    if eocd < 0 or eocd + 22 > len(archive):
+        raise Refused("Not a valid ZIP archive: missing end record")
+    _, disk, directory_disk, disk_entries, declared, size, offset, comment_size = struct.unpack_from(
+        "<4s4H2LH", archive, eocd)
+    if eocd + 22 + comment_size != len(archive):
+        raise Refused("Not a valid ZIP archive: invalid end record length")
+    # ZipFile honors this locator even when the classic record advertises zero members.
+    if eocd >= 20 and archive[eocd - 20:eocd - 16] == b"PK\x06\x07":
+        raise Refused("ZIP64 central directory is outside package limits")
+    if disk or directory_disk or disk_entries != declared:
+        raise Refused("Unsupported multi-disk ZIP archive")
+    if declared == 0xffff or size == 0xffffffff or offset == 0xffffffff:
+        raise Refused("ZIP64 central directory is outside package limits")
+    check_package_entries(declared, 0, "archive")
+    if size > CENTRAL_DIRECTORY_LIMIT:
+        raise Refused(f"archive central directory exceeds {CENTRAL_DIRECTORY_LIMIT} bytes")
+    start = eocd - size
+    if start < 0 or offset > start:
+        raise Refused("Not a valid ZIP archive: invalid central directory offset")
+    position = start
+    count = 0
+    while position < eocd:
+        if position + 46 > eocd or archive[position:position + 4] != b"PK\x01\x02":
+            raise Refused("Not a valid ZIP archive: invalid central directory entry")
+        method = struct.unpack_from("<H", archive, position + 10)[0]
+        if method not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            raise Refused(f"Unsupported ZIP compression method: {method}")
+        filename_size, extra_size, entry_comment_size = struct.unpack_from("<3H", archive, position + 28)
+        position += 46 + filename_size + extra_size + entry_comment_size
+        if position > eocd:
+            raise Refused("Not a valid ZIP archive: truncated central directory entry")
+        count += 1
+        # All raw filename bytes are already inside the capped central-directory region.
+        check_package_entries(count, 0, "archive")
+    if count != declared:
+        raise Refused("archive central directory count differs from its end record")
+    return count
 
 
 def load_archive(source: Path) -> Package:
-    if source.stat().st_size > ARCHIVE_LIMIT:
-        raise Refused(f"The archive exceeds {ARCHIVE_LIMIT} bytes")
-    archive = source.read_bytes()
+    with source.open("rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened.st_mode):
+            raise Refused(f"The archive is not a regular file: {source}")
+        if opened.st_size > ARCHIVE_LIMIT:
+            raise Refused(f"The archive exceeds {ARCHIVE_LIMIT} bytes")
+        archive = stream.read(opened.st_size + 1)
+        if len(archive) != opened.st_size or stream.read(1):
+            raise Refused("The archive changed while being read")
+    expected_members = preflight_archive_metadata(archive)
     total = 0
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
             members = bundle.infolist()
+            if len(members) != expected_members:
+                raise Refused("archive central directory count differs after ZIP parsing")
             names = [member.filename for member in members]
             if len(set(names)) != len(names):
                 raise Refused("The archive repeats a member name")
@@ -451,14 +1016,23 @@ def load_archive(source: Path) -> Package:
                 kind = (member.external_attr >> 16) & 0o170000
                 if kind not in (0, stat.S_IFREG):
                     raise Refused(f"Archive entry is not a regular file: {member.filename}")
+            try:
+                check_package_paths((member.filename.split("/", 1)[1] for member in members), "archive")
+            except ValueError as error:
+                raise Refused(str(error)) from None
+            for member in members:
                 name = member.filename.split("/", 1)[1]
-                try:
-                    package_path(name)
-                except ValueError as error:
-                    raise Refused(str(error))
+                if name == "MANIFEST.json" and member.file_size > MANIFEST_LIMIT:
+                    raise Refused(f"MANIFEST.json exceeds {MANIFEST_LIMIT} bytes")
+                if member.file_size > MEMBER_LIMIT or total + member.file_size > ARCHIVE_LIMIT:
+                    raise Refused(f"The archive expands beyond the size limits at {member.filename}")
                 # Bounded reads: the declared size of a member is not trusted.
+                remaining = ARCHIVE_LIMIT - total
+                bound = min(MEMBER_LIMIT, remaining, MANIFEST_LIMIT if name == "MANIFEST.json" else MEMBER_LIMIT)
                 with bundle.open(member) as stream:
-                    data = stream.read(MEMBER_LIMIT + 1)
+                    data = stream.read(bound + 1)
+                if name == "MANIFEST.json" and len(data) > MANIFEST_LIMIT:
+                    raise Refused(f"MANIFEST.json exceeds {MANIFEST_LIMIT} bytes")
                 total += len(data)
                 if len(data) > MEMBER_LIMIT or total > ARCHIVE_LIMIT:
                     raise Refused(f"The archive expands beyond the size limits at {member.filename}")
@@ -480,7 +1054,10 @@ def read_checksums(path: Path) -> tuple[dict, bytes]:
     entries = {}
     try:
         # A path or link can change after this open; parse and record only these captured bytes.
-        data = Path(path).read_bytes()
+        with Path(path).open("rb") as stream:
+            data = stream.read(CHECKSUM_LIMIT + 1)
+        if len(data) > CHECKSUM_LIMIT:
+            raise Refused(f"Checksums exceed {CHECKSUM_LIMIT} bytes: {path}")
         lines = data.decode("utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as error:
         raise Refused(f"Cannot read checksums {path}: {error}")
@@ -824,8 +1401,9 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
         "retirements": retirements(classification, before),
         "retirement_copies": {"state_root": str(locations.state), "transaction": None,
                               "note": "The transaction directory is allocated at apply; the apply output and receipt "
-                                      "give each retired file's retired_copy and backup location, and a rollback_command "
-                                      "that runs the package installer's verified copy kept in that directory"},
+                                      "give each retired file's retired_copy and backup location. The historical "
+                                      "rollback_command names a retained installer copy; use independently verified "
+                                      "installer code for rollback."},
         "duplicates": duplicates,
         "duplicate_inventories": duplicate_inventories,
         "duplicate_physical": duplicate_physical,
@@ -927,8 +1505,21 @@ class Lock:
     """Exclusive installer lock, released by the operating system if the process dies."""
 
     def __init__(self, state: Path) -> None:
-        state.mkdir(parents=True, exist_ok=True)
-        self.stream = open(state / "LOCK", "a+b")
+        require_trusted_state(state)
+        private_mkdirs(state, state)
+        lock = state / "LOCK"
+        require_trusted_state(state)
+        if not exists(lock):
+            _mac_acl(state, future_child=True)
+            try:
+                with _private_file(lock):
+                    pass
+            except OSError as error:
+                if not isinstance(error, FileExistsError) and getattr(error, "winerror", None) not in (80, 183):
+                    raise
+        require_trusted_state(state, (lock, True))
+        self.state = state
+        self.stream = open(lock, "r+b")
         try:
             if os.name == "nt":
                 import msvcrt
@@ -942,6 +1533,11 @@ class Lock:
             raise Blocked(f"Another installer holds {state / 'LOCK'}")
 
     def __enter__(self) -> "Lock":
+        try:
+            require_trusted_state(self.state, (self.state / "LOCK", True))
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -1463,6 +2059,129 @@ def recorded_inventory(value: object, field: str, absent: bool = True) -> None:
             raise Refused(f"The recorded {field} has an invalid file entry")
 
 
+def plan_metadata(plan: dict) -> tuple[Locations, Path]:
+    """Check the saved plan's operative shape before opening the state lock.
+
+    A fresh plan under the lock still owns value drift. This check only prevents an incomplete or
+    malformed saved plan from creating state before its values can be compared with that fresh plan.
+    """
+    if type(plan.get("plan_format")) is not int or plan["plan_format"] != 1:
+        raise Refused("Unsupported plan format")
+    missing = [key for key in DRIFT_KEYS if key not in plan]
+    if missing:
+        raise Refused("The plan is missing operative fields; plan again", missing)
+
+    def invalid(field: str) -> None:
+        raise Refused(f"The plan has an invalid {field}; plan again", [field])
+
+    def text_field(value: object, field: str) -> str:
+        if (not isinstance(value, str) or not value
+                or any(ord(char) < 32 or 0xD800 <= ord(char) <= 0xDFFF for char in value)):
+            invalid(field)
+        return value
+
+    runtime, home, config = plan["runtime"], plan["home"], plan["config_root"]
+    if runtime not in ("claude", "codex"):
+        invalid("runtime")
+    text_field(plan["installer_version"], "installer_version")
+    for field in ("home", "config_root", "target", "state_root"):
+        normalized_absolute(plan[field], f"plan {field}")
+    roots = plan["skill_roots"]
+    if not isinstance(roots, list) or not roots:
+        invalid("skill_roots")
+    for root in roots:
+        normalized_absolute(root, "plan skill_roots")
+    locations = Locations(runtime, home, config)
+
+    package = plan["package"]
+    if not isinstance(package, dict):
+        invalid("package")
+    if "archive_sha256" not in package:
+        invalid("package.archive_sha256")
+    source = normalized_absolute(package.get("source"), "plan package source")
+    for field in ("package", "version", "manifest_sha256", "checksums_sha256", "archive_digest", "scope"):
+        text_field(package.get(field), f"package.{field}")
+    for field in ("manifest_sha256", "checksums_sha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", package[field]):
+            invalid(f"package.{field}")
+    archive_hash = package.get("archive_sha256")
+    if archive_hash is not None and (not isinstance(archive_hash, str)
+                                     or not re.fullmatch(r"[0-9a-f]{64}", archive_hash)):
+        invalid("package.archive_sha256")
+    if type(package.get("files_verified")) is not int or package["files_verified"] < 0:
+        invalid("package.files_verified")
+
+    retirement_list = plan["retirement_list"]
+    if (not isinstance(retirement_list, dict) or type(retirement_list.get("version")) is not int
+            or not isinstance(retirement_list.get("paths"), dict)):
+        invalid("retirement_list")
+    for name, version in retirement_list["paths"].items():
+        try:
+            package_path(name)
+        except ValueError:
+            invalid("retirement_list")
+        text_field(version, "retirement_list")
+
+    try:
+        recorded_inventory(plan["before"], "plan before")
+    except Refused:
+        invalid("before")
+    if plan["before"] is not None and any("\x00" in name for name in plan["before"]):
+        invalid("before")
+    classification = plan["classification"]
+    if not isinstance(classification, dict) or any(
+            not isinstance(name, str) or "\x00" in name or not isinstance(kind, str)
+            for name, kind in classification.items()):
+        invalid("classification")
+    retirements = plan["retirements"]
+    if not isinstance(retirements, list):
+        invalid("retirements")
+    for item in retirements:
+        if not isinstance(item, dict):
+            invalid("retirements")
+        try:
+            package_path(item.get("path"))
+        except ValueError:
+            invalid("retirements")
+        text_field(item.get("listed_as"), "retirements")
+        if (not isinstance(item.get("sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+                or type(item.get("bytes")) is not int or item["bytes"] < 0):
+            invalid("retirements")
+    copies = plan["retirement_copies"]
+    if not isinstance(copies, dict):
+        invalid("retirement_copies")
+    normalized_absolute(copies.get("state_root"), "plan retirement_copies.state_root")
+    if "transaction" not in copies or copies["transaction"] is not None:
+        invalid("retirement_copies")
+    text_field(copies.get("note"), "retirement_copies")
+
+    duplicates = plan["duplicates"]
+    duplicate_inventories = plan["duplicate_inventories"]
+    duplicate_physical = plan["duplicate_physical"]
+    if not isinstance(duplicates, list) or not isinstance(duplicate_inventories, dict):
+        invalid("duplicates" if not isinstance(duplicates, list) else "duplicate_inventories")
+    for duplicate in duplicates:
+        normalized_absolute(duplicate, "plan duplicates")
+    if not isinstance(duplicate_physical, dict) or set(duplicate_physical) != set(duplicates):
+        invalid("duplicate_physical")
+    for duplicate, listed in duplicate_inventories.items():
+        normalized_absolute(duplicate, "plan duplicate_inventories")
+        try:
+            recorded_inventory(listed, "plan duplicate", absent=False)
+        except Refused:
+            invalid("duplicate_inventories")
+        if any("\x00" in name for name in listed):
+            invalid("duplicate_inventories")
+    for duplicate, physical in duplicate_physical.items():
+        normalized_absolute(duplicate, "plan duplicate_physical")
+        try:
+            recorded_physical(physical, "plan duplicate")
+        except Refused:
+            invalid("duplicate_physical")
+    return locations, source
+
+
 def receipt_metadata(receipt: dict, locations: Locations) -> Path:
     if type(receipt.get("receipt_format")) is not int or receipt["receipt_format"] != 1:
         raise Refused("Unsupported receipt format")
@@ -1552,6 +2271,28 @@ def journal_metadata(record: dict, journal: Path, locations: Locations) -> dict 
     installed_record = None
     if record.get("operation") != kind:
         raise Refused("The journal operation does not match its generated path")
+    if "history" in record:
+        history = record["history"]
+        if (not isinstance(history, list) or any(
+                not isinstance(entry, dict) or not isinstance(entry.get("state"), str) or not entry["state"]
+                or not isinstance(entry.get("time"), str) or not entry["time"] for entry in history)):
+            raise Refused("The journal history is not a list of recorded states")
+    if "rollback_evidence" in record:
+        evidence = record["rollback_evidence"]
+        if (kind != "rollback" or not isinstance(evidence, dict)
+                or set(evidence) != {"maintenance_boundary", "test_hooks"}
+                or not isinstance(evidence["maintenance_boundary"], dict)
+                or not isinstance(evidence["test_hooks"], dict)
+                or any(key not in (TEST_FAULT, TEST_CRASH, TEST_TRACE, TEST_PROCESSES)
+                       or not isinstance(value, str) or not value for key, value in evidence["test_hooks"].items())):
+            raise Refused("The rollback journal has invalid evidence")
+        boundary = evidence["maintenance_boundary"]
+        if (set(boundary) != {"confirmed_by_operator", "probe", "active_consumers", "limitations"}
+                or boundary["confirmed_by_operator"] is not True
+                or not isinstance(boundary["probe"], str) or not boundary["probe"]
+                or boundary["active_consumers"] != []
+                or not isinstance(boundary["limitations"], str)):
+            raise Refused("The rollback journal has invalid maintenance evidence")
     recorded_path(record.get("target"), locations.target, "journal target")
     recorded_inventory(record.get("origin"), "origin")
     recorded_inventory(record.get("incoming"), "incoming")
@@ -1574,7 +2315,7 @@ def journal_metadata(record: dict, journal: Path, locations: Locations) -> dict 
         recorded_path(record.get("receipt"), transaction / "receipt.json", "rollback receipt", locations.state)
         if record.get("moves_last") is not True:
             raise Refused("The rollback journal has an invalid move order")
-        receipt = read_json(transaction / "receipt.json", "run recover again")
+        receipt = read_control_json(transaction / "receipt.json", locations.state, "run recover again")
         if receipt_metadata(receipt, locations) != transaction:
             raise Refused("The rollback receipt belongs to another transaction; CURRENT was kept")
         if canonical(record.get("incoming")) != canonical(receipt.get("before")):
@@ -1683,6 +2424,7 @@ def journal_metadata(record: dict, journal: Path, locations: Locations) -> dict 
 
 def current_journal(locations: Locations) -> Path:
     current = locations.state / "CURRENT"
+    require_trusted_state(locations.state, (current, True))
     if is_link(current) or not current.is_file():
         raise Refused("CURRENT is not a regular selector file")
     try:
@@ -1703,12 +2445,33 @@ def current_journal(locations: Locations) -> Path:
     if not journal.parent.is_dir():
         raise Refused("CURRENT does not select an existing transaction directory")
     return journal
+
+
+def require_trusted_selection(locations: Locations) -> None:
+    """Preflight the existing CURRENT authority before Lock can create or open its control file."""
+    state = locations.state
+    require_trusted_state(state)
+    if not exists(state / "CURRENT"):
+        return
+    journal = current_journal(locations)
+    if not exists(journal):
+        raise Incomplete(f"The selected journal {journal} is missing; rename state cannot be established. "
+                         "CURRENT and staging data were kept for inspection")
+    require_trusted_state(state, (journal, True))
+    transaction, kind = journal_kind(locations, journal)
+    if kind == "rollback":
+        require_trusted_state(state, (transaction / "receipt.json", True), (transaction / "journal.json", True))
+    elif exists(journal.parent / "receipt.json"):
+        require_trusted_state(state, (journal.parent / "receipt.json", True))
+
+
 # The swap engine. An operation moves `moves` (from -> to), parks the target and activates an
 # incoming tree. Undo decides from the filesystem, checked against recorded inventories, never
 # from the journal state alone.
 class Operation:
     def __init__(self, journal_path: Path, record: dict, locations: Locations) -> None:
         self.installed_record = journal_metadata(record, journal_path, locations)
+        self.locations = locations
         self.path = journal_path
         self.record = record
         self._move_parents = {}
@@ -1746,7 +2509,7 @@ class Operation:
                 # a later bad binding cannot leave an earlier generated transaction parent behind.
                 for index, side, path in unbound:
                     if create_internal:
-                        path.parent.mkdir(parents=True, exist_ok=True)
+                        private_mkdirs(path.parent, self.locations.state)
                     elif not path.parent.is_dir():
                         raise Refused("The committed move's transaction parent is missing; CURRENT was kept")
                     parents[index, side] = opened.enter_context(
@@ -1775,7 +2538,7 @@ class Operation:
     def save(self, state: str) -> None:
         self.record["state"] = state
         self.record.setdefault("history", []).append({"state": state, "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
-        write_json(self.path, self.record)
+        write_json(self.path, self.record, self.locations.state)
         checkpoint(self.record["operation"] + ":" + state)
 
     @property
@@ -1906,7 +2669,7 @@ class Operation:
             # path before the rename, so a kill right after the rename still leaves it in the final report.
             stale = copy.parent.parent / ("restore-stale-" + uuid.uuid4().hex[:8])
             self.record.setdefault("stale_restore_copies", []).append(str(stale))
-            write_json(self.path, self.record)
+            write_json(self.path, self.record, self.locations.state)
             rename(copy.parent, stale, label + ":set-aside")
         copy_tree(backup, copy)
         fsync_tree(copy)
@@ -1938,13 +2701,35 @@ def fsync_tree(root: Path) -> None:
 
 def begin(state: Path, journal: Path) -> None:
     current = state / "CURRENT"
+    require_trusted_state(state)
     if exists(current):
         raise Blocked(f"An interrupted transaction is recorded in {current}; run `recover` first")
-    write_durable(current, (str(journal.relative_to(state)) + "\n").encode("utf-8"))
+    write_durable(current, (str(journal.relative_to(state)) + "\n").encode("utf-8"), state)
+
+
+def incomplete_state(error: object, state: Path, data: Path) -> Incomplete:
+    return Incomplete(f"State protection or finalization failed during an active transaction: {error}. "
+                      f"CURRENT at {state / 'CURRENT'} and recovery data at {data} were kept; reconcile the state "
+                      "from trusted evidence, then run `recover` with the original --plan or --receipt")
+
+
+@contextmanager
+def active_recovery(state: Path):
+    try:
+        yield
+    except UntrustedState as error:
+        raise incomplete_state(error, state, state) from None
 
 
 def finish(state: Path) -> None:
-    (state / "CURRENT").unlink()
+    try:
+        require_trusted_state(state)
+    except UntrustedState as error:
+        raise incomplete_state(error, state, state) from None
+    try:
+        (state / "CURRENT").unlink()
+    except OSError as error:
+        raise incomplete_state(error, state, state) from None
     sync_directory(state)
 
 
@@ -1955,7 +2740,7 @@ def record_undo_error(operation: Operation, error: Exception) -> str:
     name the original failure and `recover` (#54)."""
     operation.record["undo_error"] = str(error)
     try:
-        write_json(operation.path, operation.record)
+        write_json(operation.path, operation.record, operation.locations.state)
     except OSError as unrecorded:
         return f" (the journal could not record it: {unrecorded})"
     return ""
@@ -1965,8 +2750,16 @@ def undo_or_report(operation: Operation, failure: object) -> None:
     """Restore the origin state after failure, or record why not and report an incomplete restoration."""
     try:
         operation.undo()
+    except UntrustedState as error:
+        raise incomplete_state(f"{failure}; restoration could not safely proceed: {error}", operation.locations.state,
+                               operation.path.parent) from None
     except (Failure, OSError) as error:
-        raise Incomplete(f"{failure}; restoration incomplete: {error}{record_undo_error(operation, error)}. Recovery "
+        try:
+            note = record_undo_error(operation, error)
+        except UntrustedState as trust:
+            raise incomplete_state(f"{failure}; restoration incomplete: {error}; journal update refused: {trust}",
+                                   operation.locations.state, operation.path.parent) from None
+        raise Incomplete(f"{failure}; restoration incomplete: {error}{note}. Recovery "
                          f"data kept in {operation.path.parent}; run `recover` with the same --plan or --receipt before "
                          "any other step", getattr(error, "details", None))
 
@@ -1975,6 +2768,8 @@ def attempt(operation: Operation, state: Path) -> None:
     """Run an operation; on failure restore the origin state or report an incomplete restoration."""
     try:
         operation.run()
+    except UntrustedState as error:
+        raise incomplete_state(error, state, operation.path.parent) from None
     except Failure as error:
         failure = error
     except OSError as error:
@@ -2002,14 +2797,14 @@ def command_plan(options) -> dict:
 
 def command_apply(options) -> dict:
     plan = read_json(Path(options.plan), "run apply again")
-    if plan.get("plan_format") != 1:
-        raise Refused("Unsupported plan format")
-    locations = Locations(plan["runtime"], plan["home"], plan.get("config_root"))
+    locations, package_source = plan_metadata(plan)
+    runtime, home, config = plan["runtime"], plan["home"], plan["config_root"]
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check()
+    require_trusted_selection(locations)
     with Lock(locations.state):
-        fresh, package = make_plan(plan["runtime"], plan["home"], plan.get("config_root"), Path(plan["package"]["source"]),
+        fresh, package = make_plan(runtime, home, config, package_source,
                                    Path(options.checksums))
         changed = drift(plan, fresh)
         if changed:
@@ -2028,16 +2823,18 @@ def command_apply(options) -> dict:
         return install(fresh, package, locations, boundary)
 
 
-def keep_installer(package: Package, transaction: Path) -> dict:
-    """Keep the verified package's installer in the transaction, so the receipt's rollback command does
-    not depend on the extracted package, which the operator may delete or replace with another build."""
+def keep_installer(package: Package, transaction: Path, state: Path) -> dict:
+    """Preserve the package's installer as historical evidence for existing receipt contracts.
+
+    Its receipt-supplied path and hash do not establish code provenance for a later rollback.
+    """
     listed = package.manifest["files"].get(PACKAGE_INSTALLER)
     data = package.files.get(PACKAGE_INSTALLER)
     if data is None or not isinstance(listed, dict) or listed.get("sha256") != digest(data):
         raise Refused(f"The verified package holds no {PACKAGE_INSTALLER} matching its manifest")
     # Named like the original: the maintenance boundary recognizes this installer's launchers by that name.
     path = transaction / "installer" / PACKAGE_INSTALLER
-    write_durable(path, data)
+    write_durable(path, data, state)
     if digest(path.read_bytes()) != listed["sha256"]:
         raise Refused(f"The installer copy {path} does not match the package manifest")
     return {"path": str(path), "sha256": listed["sha256"]}
@@ -2049,10 +2846,10 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
     before = plan["before"]
     transaction = locations.state / (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8])
     journal = transaction / "journal.json"
-    transaction.mkdir(parents=True)
+    private_mkdirs(transaction, locations.state)
     begin(locations.state, journal)
     try:
-        installer = keep_installer(package, transaction)
+        installer = keep_installer(package, transaction, locations.state)
         backup = transaction / "backup" / SKILL
         if before is not None:
             copy_tree(locations.target, backup)
@@ -2096,8 +2893,10 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
             "moves": moves,
             "state": "staged",
         }, locations)
-        write_json(journal, operation.record)
+        write_json(journal, operation.record, locations.state)
         checkpoint("apply:staged")
+    except UntrustedState as error:
+        raise incomplete_state(error, locations.state, transaction) from None
     except OSError as error:
         finish(locations.state)
         raise Refused(f"Backup or staging failed before any rename: {error}; the target is unchanged")
@@ -2150,12 +2949,20 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         "installer_copy": installer,
         # An argument list, not a shell string: quoting differs between PowerShell, cmd and sh. It omits
         # --maintenance-confirmed, which the operator appends once every consuming session is stopped. It
-        # runs the installer copy kept with the receipt, so it outlives the extracted package.
+        # names the historical installer copy for compatibility; secure execution requires an
+        # independently authenticated installer, as the guides explain.
         "rollback_command": [sys.executable, installer["path"], "rollback", "--receipt", str(receipt_path)],
     }
-    write_json(receipt_path, receipt)
-    operation.save("committed")
-    finish(locations.state)
+    try:
+        write_json(receipt_path, receipt, locations.state)
+        operation.save("committed")
+        finish(locations.state)
+    except UntrustedState as error:
+        raise incomplete_state(error, locations.state, transaction) from None
+    except (Failure, OSError) as error:
+        if isinstance(error, Incomplete):
+            raise
+        raise incomplete_state(error, locations.state, transaction) from None
     return {"result": "installed", "receipt": str(receipt_path), "target": str(locations.target),
             "retired_paths": receipt["retired_paths"], "retirements": receipt["retirements"],
             "dropped_paths": receipt["dropped_paths"], "preserved_paths": receipt["preserved_paths"],
@@ -2222,9 +3029,9 @@ def command_rollback(options) -> dict:
     transaction = receipt_metadata(receipt, locations)
     # Only the receipt inside its transaction is authoritative; a copy elsewhere must be identical.
     receipt_path = transaction / "receipt.json"
-    if is_link(receipt_path):
-        raise Refused("The canonical receipt is a link or junction")
-    if not same_path(str(given), str(receipt_path)) and canonical(read_json(receipt_path, "run rollback again")) != canonical(receipt):
+    require_trusted_state(locations.state, (receipt_path, False), (transaction / "journal.json", False))
+    if not same_path(str(given), str(receipt_path)) and canonical(read_control_json(receipt_path, locations.state,
+                                                                                  "run rollback again")) != canonical(receipt):
         raise Refused(f"The receipt differs from the canonical receipt {receipt_path}; roll back with that one")
     if receipt.get("state") != "installed":
         raise Refused(f"The receipt state is {receipt.get('state')!r}; only an installed receipt can be rolled back")
@@ -2233,7 +3040,14 @@ def command_rollback(options) -> dict:
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check("run rollback again")
+    require_trusted_selection(locations)
     with Lock(locations.state):
+        require_trusted_state(locations.state, (receipt_path, False), (transaction / "journal.json", False))
+        current_receipt = read_control_json(receipt_path, locations.state, "run rollback again")
+        if canonical(current_receipt) != canonical(receipt):
+            raise Refused("The canonical receipt changed before rollback; retry with its current contents")
+        receipt = current_receipt
+        receipt_metadata(receipt, locations)
         if exists(locations.state / "CURRENT"):
             raise Blocked(f"An interrupted transaction is recorded in {locations.state / 'CURRENT'}; run `recover` first")
         installed_record = committed_apply_record_for_receipt(transaction, receipt, locations)
@@ -2280,7 +3094,7 @@ def command_rollback(options) -> dict:
             raise Refused(message, changed)
         work = transaction / ("rollback-" + uuid.uuid4().hex[:8])
         journal = work / "journal.json"
-        work.mkdir(parents=True)
+        private_mkdirs(work, locations.state)
         begin(locations.state, journal)
         try:
             # A verified copy of the installed tree, so an interrupted rollback can restore it.
@@ -2318,6 +3132,8 @@ def command_rollback(options) -> dict:
                     physical = parent.describe()
                 moves.append({"from": str(source), "to": str(original), "inventory": expected,
                               "physical": {"to": physical}})
+        except UntrustedState as error:
+            raise incomplete_state(error, locations.state, work) from None
         except OSError as error:
             finish(locations.state)
             raise Refused(f"Preparing the rollback failed before any rename: {error}; the target is unchanged")
@@ -2338,26 +3154,37 @@ def command_rollback(options) -> dict:
             "moves_last": True,
         }, locations)
         attempt(operation, locations.state)
-        operation.record["rollback_evidence"] = {"maintenance_boundary": boundary, "test_hooks": active_test_hooks()}
-        operation.save("committed")
-        mark_rolled_back(operation.record, locations)
-        finish(locations.state)
+        try:
+            operation.record["rollback_evidence"] = {"maintenance_boundary": boundary, "test_hooks": active_test_hooks()}
+            operation.save("committed")
+            mark_rolled_back(operation.record, locations)
+            finish(locations.state)
+        except UntrustedState as error:
+            raise incomplete_state(error, locations.state, work) from None
+        except (Failure, OSError) as error:
+            if isinstance(error, Incomplete):
+                raise
+            raise incomplete_state(error, locations.state, work) from None
         return {"result": "rolled back", "target": str(locations.target), "restored": "absent" if receipt["before"] is None else "before-inventory"}
 
 
 def mark_rolled_back(record: dict, locations: Locations, tolerant: bool = False) -> bool:
     journal_metadata(record, Path(record.get("journal", "")), locations)
     receipt_path = Path(record["receipt"])
+    require_trusted_state(locations.state, (receipt_path, False))
     try:
-        receipt = read_json(receipt_path)
+        receipt = read_control_json(receipt_path, locations.state)
     except Refused:
         if tolerant:
             return False
         raise
     receipt_metadata(receipt, locations)
     receipt["state"] = "rolled back"
-    receipt["rollback"] = {"journal": record["journal"], "parked": record["parked"], **record.get("rollback_evidence", {})}
-    write_json(receipt_path, receipt)
+    receipt["rollback"] = {"journal": record["journal"], "parked": record["parked"]}
+    if "rollback_evidence" in record:
+        receipt["rollback"].update({key: record["rollback_evidence"][key]
+                                    for key in ("maintenance_boundary", "test_hooks")})
+    write_json(receipt_path, receipt, locations.state)
     return True
 
 
@@ -2415,7 +3242,7 @@ def committed_apply_record_for_receipt(transaction: Path, receipt: dict, locatio
                                        allow_rolled_back: bool = False) -> dict:
     """Use the retained committed apply journal as the receipt's restoration authority."""
     journal = transaction / "journal.json"
-    record = read_json(journal, "run rollback again")
+    record = read_control_json(journal, locations.state, "run rollback again")
     journal_metadata(record, journal, locations)
     if record.get("state") != "committed":
         raise Refused("The installed receipt has no committed apply journal; rollback refused")
@@ -2445,6 +3272,7 @@ def rollback_receipt_matches_journal(record: dict, receipt: dict) -> None:
 
 
 def command_recover(options) -> dict:
+    canonical_receipt = None
     if options.plan or options.receipt:
         # The recorded config root, so recovery finds the state whatever the environment now says.
         recorded = read_json(Path(options.plan or options.receipt), "run recover again")
@@ -2452,7 +3280,8 @@ def command_recover(options) -> dict:
         if options.plan and (type(recorded.get("plan_format")) is not int or recorded["plan_format"] != 1):
             raise Refused("Unsupported plan format")
         if options.receipt:
-            receipt_metadata(recorded, locations)
+            transaction = receipt_metadata(recorded, locations)
+            canonical_receipt = transaction / "receipt.json"
     elif options.runtime:
         locations = Locations(options.runtime, options.home)
     else:
@@ -2460,6 +3289,11 @@ def command_recover(options) -> dict:
     require_test_home(locations)
     boundary = maintenance_boundary(options.maintenance_confirmed)
     locations.check("run recover again")
+    controls = ((canonical_receipt, True), (canonical_receipt.parent / "journal.json", True)) if canonical_receipt else ()
+    require_trusted_selection(locations)
+    require_trusted_state(locations.state, *controls)
+    if canonical_receipt and canonical(read_control_json(canonical_receipt, locations.state, "run recover again")) != canonical(recorded):
+        raise Refused("The selected receipt differs from the protected canonical receipt")
     nothing = {"result": "nothing to recover", "config_root": str(locations.config), "state_root": str(locations.state)}
     if not (options.plan or options.receipt):
         # --runtime resolves the config root from this invocation only; a transaction planned under
@@ -2471,7 +3305,10 @@ def command_recover(options) -> dict:
                            "`recover --plan <plan>` or `recover --receipt <receipt>`, which reuse the recorded directories.")
     if not exists(locations.state):
         return nothing
-    with Lock(locations.state):
+    with Lock(locations.state), active_recovery(locations.state):
+        require_trusted_state(locations.state, *controls)
+        if canonical_receipt and canonical(read_control_json(canonical_receipt, locations.state, "run recover again")) != canonical(recorded):
+            raise Refused("The selected receipt differs from the protected canonical receipt")
         current = locations.state / "CURRENT"
         if not exists(current):
             return nothing
@@ -2479,7 +3316,7 @@ def command_recover(options) -> dict:
         if not exists(journal):
             raise Incomplete(f"The selected journal {journal} is missing; rename state cannot be established. "
                              "CURRENT and staging data were kept for inspection")
-        record = read_json(journal)
+        record = read_control_json(journal, locations.state)
         operation = Operation(journal, record, locations)
         apply_receipt_path = journal.parent / "receipt.json"
         if record["operation"] == "apply":
@@ -2490,11 +3327,11 @@ def command_recover(options) -> dict:
                 verify_duplicate_restoration_path(locations, original, move, recovery=True)
                 require_discovered_duplicate_path(locations, original, recovery=True)
             if record.get("state") != "committed" and exists(apply_receipt_path):
-                receipt = read_json(apply_receipt_path, "run recover again")
+                receipt = read_control_json(apply_receipt_path, locations.state, "run recover again")
                 receipt_metadata(receipt, locations)
                 apply_receipt_matches_journal(record, receipt, journal)
         else:
-            receipt = read_json(Path(record["receipt"]), "run recover again")
+            receipt = read_control_json(Path(record["receipt"]), locations.state, "run recover again")
             receipt_metadata(receipt, locations)
             for index, move in enumerate(record["moves"]):
                 original = Path(move["to"])
@@ -2517,7 +3354,7 @@ def command_recover(options) -> dict:
                     receipt = apply_receipt_path
                     result["receipt"] = str(receipt)
                     try:
-                        value = read_json(receipt)
+                        value = read_control_json(receipt, locations.state)
                     except Refused as error:
                         raise Incomplete(f"The committed apply receipt {receipt} is unavailable: {error}; "
                                          "CURRENT was kept for inspection") from None
@@ -2545,9 +3382,9 @@ def command_recover(options) -> dict:
                 result["stale_restore_copies"] = stale
             receipt = journal.parent / "receipt.json"
             if record["operation"] == "apply" and exists(receipt):
-                value = read_json(receipt)
+                value = read_control_json(receipt, locations.state)
                 value["state"] = "recovered to the before-state; not installed"
-                write_json(receipt, value)
+                write_json(receipt, value, locations.state)
             finish(locations.state)
             return result
 
