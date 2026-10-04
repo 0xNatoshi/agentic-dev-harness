@@ -10,10 +10,12 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+import tracemalloc
 import unittest
 from unittest import mock
 import warnings
@@ -140,6 +142,20 @@ class InstallerTests(unittest.TestCase):
         return subprocess.run([sys.executable, "-B", str(installer or self.installer), *map(str, arguments)], cwd=self.base,
                               env=self.environment(env, processes), capture_output=True, text=True, encoding="utf-8", timeout=120)
 
+    def run_limited_installer(self, limits, *arguments):
+        # Exercise the same CLI with smaller budgets, so resource-limit cases stay small and deterministic.
+        runner = """import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('harness_limited_install', sys.argv[1])
+installer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(installer)
+for name, value in json.loads(sys.argv[2]).items():
+    setattr(installer, name, value)
+sys.exit(installer.main(sys.argv[3:]))
+"""
+        return subprocess.run([sys.executable, "-B", "-c", runner, str(self.installer), json.dumps(limits),
+                               *map(str, arguments)], cwd=self.base, env=self.environment(), capture_output=True,
+                              text=True, encoding="utf-8", timeout=120)
+
     def run_recorded(self, command, *extra):
         """Run a recorded argument list as the operator would, without the test's -B or installer path."""
         return subprocess.run([*command, *extra], cwd=self.base, env=self.environment(), capture_output=True, text=True,
@@ -205,6 +221,31 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(archive.returncode, 0, archive.stderr)
         self.assertEqual(json.loads(archive.stdout)["archive_digest"], "verified")
 
+    def test_stored_and_deflated_archives_verify_like_the_directory(self):
+        manifest = (self.package / "MANIFEST.json").read_bytes()
+        for label, method in (("stored", zipfile.ZIP_STORED), ("deflated", zipfile.ZIP_DEFLATED)):
+            with self.subTest(label):
+                archive = self.base / f"{label}.zip"
+                with zipfile.ZipFile(archive, "w") as bundle:
+                    for path in sorted(self.package.rglob("*")):
+                        if path.is_file():
+                            name = self.package.name + "/" + path.relative_to(self.package).as_posix()
+                            bundle.write(path, name, compress_type=method)
+                checksums = self.base / f"{label}-SHA256SUMS.txt"
+                checksums.write_text(
+                    f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {self.package.name}-codex-claude.zip\n"
+                    f"{hashlib.sha256(manifest).hexdigest()}  {self.package.name}-MANIFEST.json\n",
+                    encoding="utf-8")
+                verified = self.run_installer("verify-package", archive, "--checksums", checksums)
+                directory = self.run_installer("verify-package", self.package, "--checksums", checksums)
+                self.assertEqual(verified.returncode, 0, verified.stderr)
+                self.assertEqual(directory.returncode, 0, directory.stderr)
+                zip_report, directory_report = json.loads(verified.stdout), json.loads(directory.stdout)
+                self.assertEqual(zip_report["archive_digest"], "verified")
+                self.assertEqual(zip_report["files_verified"], directory_report["files_verified"])
+                self.assertEqual(zip_report["manifest_sha256"], directory_report["manifest_sha256"])
+                self.assertEqual(zip_report["checksums_sha256"], directory_report["checksums_sha256"])
+
     def test_verify_package_hashes_the_parsed_checksum_snapshot(self):
         spec = importlib.util.spec_from_file_location("harness_installer_for_snapshot", ROOT / "scripts/install.py")
         installer = importlib.util.module_from_spec(spec)
@@ -236,6 +277,27 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(report["checksums_sha256"], hashlib.sha256(original).hexdigest())
         self.assertEqual(checksums.read_bytes(), original + b"\n")
         self.assertEqual(len(opens), 1)
+
+    def test_checksum_capture_accepts_exact_budget_and_refuses_oversize_before_plan(self):
+        limit = 128 * 1024
+        original = self.checksums.read_bytes()
+        self.assertLess(len(original), limit)
+        checksums = self.base / "bounded-SHA256SUMS.txt"
+        exact = original + b"\n" * (limit - len(original))
+        checksums.write_bytes(exact)
+        verified = self.run_installer("verify-package", self.package, "--checksums", checksums)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        self.assertEqual(json.loads(verified.stdout)["checksums_sha256"], hashlib.sha256(exact).hexdigest())
+
+        checksums.write_bytes(exact + b"\xff")
+        plan = self.base / "oversized-checksums-plan.json"
+        refused = self.run_installer("plan", "--runtime", "claude", "--home", self.home,
+                                     "--package", self.package, "--checksums", checksums, "--output", plan)
+        self.assert_refused(refused, 1)
+        self.assertIn("Checksums exceed", json.loads(refused.stderr)["error"])
+        self.assertFalse(plan.exists())
+        self.assertFalse(self.state().exists())
+        self.assertFalse(self.target.exists())
 
     def test_verify_package_rejects_tampering(self):
         copy = self.base / "package"
@@ -311,6 +373,233 @@ class InstallerTests(unittest.TestCase):
                 result = self.run_installer("verify-package", archive, "--checksums", self.checksums)
                 self.assert_refused(result, 1)
                 self.assertIn(problem, json.loads(result.stderr)["error"])
+
+    def test_archive_metadata_limits_reject_empty_members_and_long_names(self):
+        archive = self.base / "many-empty.zip"
+        prefix = self.package.name
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr(prefix + "/MANIFEST.json", (self.package / "MANIFEST.json").read_bytes())
+            for index in range(6):
+                bundle.writestr(prefix + f"/empty-{index:02d}.txt", b"")
+        for limits, phrase in (({"PACKAGE_ENTRY_LIMIT": 6}, "archive entry count exceeds"),
+                               ({"PACKAGE_NAME_BYTES_LIMIT": 80}, "archive filename bytes exceed"),
+                               ({"CENTRAL_DIRECTORY_LIMIT": 100}, "archive central directory exceeds")):
+            with self.subTest(phrase):
+                result = self.run_limited_installer(limits, "verify-package", archive, "--checksums", self.checksums)
+                self.assert_refused(result, 1)
+                self.assertIn(phrase, json.loads(result.stderr)["error"])
+
+    def test_archive_preflight_rejects_lying_directory_metadata(self):
+        archive = self.base / "metadata.zip"
+        prefix = self.package.name
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr(prefix + "/MANIFEST.json", (self.package / "MANIFEST.json").read_bytes())
+            bundle.writestr(prefix + "/extra.txt", b"")
+        original = bytearray(archive.read_bytes())
+        eocd = original.rfind(b"PK\x05\x06")
+        self.assertGreaterEqual(eocd, 0)
+        cases = (
+            ("count", 10, "<H", 1, "archive central directory count differs"),
+            ("size", 12, "<L", 1024 * 1024, "archive central directory exceeds"),
+        )
+        for label, offset, format_code, value, phrase in cases:
+            with self.subTest(label):
+                changed = bytearray(original)
+                struct.pack_into(format_code, changed, eocd + offset, value)
+                if label == "count":
+                    struct.pack_into("<H", changed, eocd + 8, value)
+                altered = self.base / f"metadata-{label}.zip"
+                altered.write_bytes(changed)
+                result = self.run_installer("verify-package", altered, "--checksums", self.checksums)
+                self.assert_refused(result, 1)
+                self.assertIn(phrase, json.loads(result.stderr)["error"])
+
+    def test_zip64_locator_is_refused_before_zipfile_constructs_members(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as bundle:
+            for index in range(1200):
+                bundle.writestr(self.package.name + f"/empty-{index:04d}.txt", b"")
+        normal = buffer.getvalue()
+        eocd = normal.rfind(b"PK\x05\x06")
+        self.assertGreaterEqual(eocd, 0)
+        size, offset = struct.unpack_from("<2L", normal, eocd + 12)
+        zip64_end = struct.pack("<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, 1200, 1200, size, offset)
+        locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, eocd, 1)
+        classic_end = struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 0, 0, 0, 0, 0)
+        source = self.base / "many-empty-zip64.zip"
+        source.write_bytes(normal[:eocd] + zip64_end + locator + classic_end)
+        with zipfile.ZipFile(source) as bundle:
+            self.assertEqual(len(bundle.infolist()), 1200)
+        spec = importlib.util.spec_from_file_location("harness_zip64_preflight", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        with mock.patch.object(zipfile, "ZipFile", side_effect=AssertionError("ZipFile constructed")):
+            with self.assertRaisesRegex(installer.Refused, "ZIP64 central directory"):
+                installer.load_archive(source)
+
+    def test_archive_and_directory_share_entry_and_name_budgets(self):
+        cases = (
+            ("entries", (f"extra-{index:04d}/item.txt" for index in range(600)), "entry count exceeds"),
+            ("names", (f"extra-{index:04d}-{'x' * 128}/item.txt" for index in range(470)),
+             "filename bytes exceed"),
+        )
+        for label, names, phrase in cases:
+            with self.subTest(label):
+                directory = self.base / label / self.package.name
+                shutil.copytree(self.package, directory)
+                manifest = json.loads((directory / "MANIFEST.json").read_text(encoding="utf-8"))
+                for name in names:
+                    path = directory / name
+                    path.parent.mkdir(parents=True)
+                    path.write_bytes(b"x")
+                    manifest["files"][name] = {"sha256": hashlib.sha256(b"x").hexdigest(), "bytes": 1}
+                manifest_bytes = (json.dumps(manifest, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+                (directory / "MANIFEST.json").write_bytes(manifest_bytes)
+                archive = self.base / f"parity-{label}.zip"
+                with zipfile.ZipFile(archive, "w") as bundle:
+                    for path in sorted(directory.rglob("*")):
+                        if path.is_file():
+                            bundle.writestr(self.package.name + "/" + path.relative_to(directory).as_posix(),
+                                            path.read_bytes())
+                checksums = self.base / f"parity-{label}-SHA256SUMS.txt"
+                checksums.write_text(
+                    f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {self.package.name}-codex-claude.zip\n"
+                    f"{hashlib.sha256(manifest_bytes).hexdigest()}  {self.package.name}-MANIFEST.json\n",
+                    encoding="utf-8")
+                for package in (archive, directory):
+                    result = self.run_installer("verify-package", package, "--checksums", checksums)
+                    self.assert_refused(result, 1)
+                    self.assertIn(phrase, json.loads(result.stderr)["error"])
+
+    def test_small_archive_and_deep_path_reject_without_large_allocations(self):
+        spec = importlib.util.spec_from_file_location("harness_allocation_limits", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        cases = (
+            ("small", "file.txt", 64 * 1024 * 1024, "No MANIFEST.json"),
+            ("deep", "a/" * 8000 + "file.txt", 1024 * 1024, "archive entry count exceeds"),
+        )
+        for label, name, limit, phrase in cases:
+            with self.subTest(label):
+                archive = self.base / f"{label}-allocation.zip"
+                with zipfile.ZipFile(archive, "w") as bundle:
+                    bundle.writestr(self.package.name + "/" + name, b"")
+                with mock.patch.object(installer, "ARCHIVE_LIMIT", limit):
+                    tracemalloc.start()
+                    try:
+                        with self.assertRaises(installer.Refused) as refusal:
+                            installer.load_archive(archive)
+                    finally:
+                        _, peak = tracemalloc.get_traced_memory()
+                        tracemalloc.stop()
+                self.assertIn(phrase, str(refusal.exception))
+                self.assertLess(peak, 16 * 1024 * 1024)
+
+    def test_unsupported_zip_codecs_refuse_before_zipfile_and_large_allocations(self):
+        spec = importlib.util.spec_from_file_location("harness_codec_preflight", ROOT / "scripts/install.py")
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        for label, method in (("bzip2", zipfile.ZIP_BZIP2), ("lzma", zipfile.ZIP_LZMA)):
+            archive = self.base / f"{label}-oversized.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr(self.package.name + "/first.txt", b"small", compress_type=zipfile.ZIP_STORED)
+                bundle.writestr(self.package.name + "/large.txt", b"x" * (8 * 1024 * 1024),
+                                compress_type=method)
+            # The central directory understates expansion. A bounded ZipExtFile.read() is not
+            # enough for codecs that decompress the entire compressed block before slicing it.
+            altered = bytearray(archive.read_bytes())
+            second = altered.rfind(b"PK\x01\x02")
+            self.assertGreaterEqual(second, 0)
+            struct.pack_into("<L", altered, second + 24, 1024)
+            archive.write_bytes(altered)
+            with self.subTest(codec=label, phase="allocation"):
+                with mock.patch.object(installer, "MEMBER_LIMIT", 1024), \
+                     mock.patch.object(installer, "ARCHIVE_LIMIT", 1024 * 1024):
+                    tracemalloc.start()
+                    try:
+                        with self.assertRaises(installer.Refused) as refusal:
+                            installer.load_archive(archive)
+                    finally:
+                        _, peak = tracemalloc.get_traced_memory()
+                        tracemalloc.stop()
+                self.assertLess(peak, 4 * 1024 * 1024)
+                self.assertIn("Unsupported ZIP compression method", str(refusal.exception))
+            with self.subTest(codec=label, phase="preflight"):
+                with mock.patch.object(zipfile, "ZipFile", side_effect=AssertionError("ZipFile constructed")):
+                    with self.assertRaisesRegex(installer.Refused, "Unsupported ZIP compression method"):
+                        installer.load_archive(archive)
+
+    def test_manifest_only_deep_paths_refuse_before_collision_expansion(self):
+        spec = importlib.util.spec_from_file_location("harness_manifest_limits", self.installer)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        package_name_bytes = sum(len(path.relative_to(self.package).as_posix().encode("utf-8"))
+                                 for path in self.package.rglob("*"))
+        cases = (
+            ("valid", "a/" * 4000 + "missing.txt", "MANIFEST.json entry count exceeds", None),
+            ("invalid", "a/" * 4000 + "bad?.txt", "Package paths must be portable relative POSIX paths", None),
+            ("name-bytes", "missing-" + "n" * 80 + ".txt", "MANIFEST.json filename bytes exceed", package_name_bytes),
+        )
+        for label, name, phrase, name_budget in cases:
+            with self.subTest(label):
+                directory = self.base / f"manifest-{label}" / self.package.name
+                shutil.copytree(self.package, directory)
+                manifest = json.loads((directory / "MANIFEST.json").read_text(encoding="utf-8"))
+                manifest["files"][name] = {"sha256": "0" * 64, "bytes": 0}
+                (directory / "MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
+                archive = self.base / f"manifest-{label}.zip"
+                with zipfile.ZipFile(archive, "w") as bundle:
+                    for path in sorted(directory.rglob("*")):
+                        if path.is_file():
+                            bundle.writestr(self.package.name + "/" + path.relative_to(directory).as_posix(),
+                                            path.read_bytes())
+                for package in (directory, archive):
+                    with self.subTest(package="archive" if package == archive else "directory"):
+                        with mock.patch.object(installer, "PACKAGE_NAME_BYTES_LIMIT",
+                                               name_budget or installer.PACKAGE_NAME_BYTES_LIMIT):
+                            with mock.patch.object(installer, "colliding", side_effect=AssertionError("collision expanded")):
+                                with self.assertRaises(installer.Refused) as refusal:
+                                    installer.verify_package(installer.load_package(package), self.checksums)
+                        self.assertIn(phrase, str(refusal.exception) + str(refusal.exception.details))
+
+    def test_manifest_size_and_file_count_are_bounded(self):
+        manifest = (self.package / "MANIFEST.json").read_bytes()
+        count = len(json.loads(manifest)["files"])
+        for limits, phrase in (({"MANIFEST_LIMIT": len(manifest) - 1}, "MANIFEST.json exceeds"),
+                               ({"MANIFEST_ENTRY_LIMIT": count - 1}, "MANIFEST.json file count exceeds")):
+            with self.subTest(phrase):
+                for package in (self.package, self.archive):
+                    result = self.run_limited_installer(limits, "verify-package", package,
+                                                        "--checksums", self.checksums)
+                    self.assert_refused(result, 1)
+                    self.assertIn(phrase, json.loads(result.stderr)["error"])
+
+    def test_directory_limits_reject_empty_entries_names_and_aggregate_bytes_before_plan(self):
+        copy = self.base / "many-empty-directory"
+        shutil.copytree(self.package, copy)
+        count = sum(1 for _ in copy.rglob("*"))
+        for index in range(6):
+            (copy / f"empty-{index:02d}.txt").write_bytes(b"")
+        name_bytes = sum(len(path.relative_to(copy).as_posix().encode("utf-8")) for path in copy.rglob("*"))
+        payloads = [path.stat().st_size for path in copy.rglob("*") if path.is_file()]
+        aggregate = sum(payloads)
+        self.assertGreater(aggregate, max(payloads))
+        cases = (
+            ({"PACKAGE_ENTRY_LIMIT": count + 2}, "package directory entry count exceeds"),
+            ({"PACKAGE_NAME_BYTES_LIMIT": name_bytes - 1}, "package directory filename bytes exceed"),
+            ({"ARCHIVE_LIMIT": aggregate - 1}, "package directory expands beyond"),
+            ({"MEMBER_LIMIT": max(payloads) - 1}, "package directory member exceeds"),
+        )
+        for limits, phrase in cases:
+            with self.subTest(phrase):
+                plan = self.base / "rejected-plan.json"
+                result = self.run_limited_installer(limits, "plan", "--runtime", "claude", "--home", self.home,
+                                                    "--package", copy, "--checksums", self.checksums,
+                                                    "--output", plan)
+                self.assert_refused(result, 1)
+                self.assertIn(phrase, json.loads(result.stderr)["error"])
+                self.assertFalse(plan.exists())
+                self.assertFalse(self.target.exists())
 
     # Planning.
     def test_plan_is_read_only_and_classifies_v52(self):

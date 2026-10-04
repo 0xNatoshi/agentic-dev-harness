@@ -9,7 +9,7 @@ import subprocess
 import sys
 import unicodedata
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 
 class EvidenceError(Exception):
@@ -1674,15 +1674,30 @@ def scan_text(text):
     return 1 if 1 in results else 0
 
 
-def published_instructions(branch):
+def published_instructions(host, full, branch):
+    # A successful fetch does not imply that origin/<default> was updated: a
+    # changed fetch refspec may write a different tracking ref instead.
+    response = json.loads(command('gh', 'api', '--hostname', host,
+                                  'repos/' + full + '/branches/' + quote(branch, safe='')))
+    if not isinstance(response, dict) or response.get('name') != branch:
+        raise EvidenceError('Remote default branch identity is incomplete or mismatched')
+    commit = response.get('commit')
+    oid = commit.get('sha') if isinstance(commit, dict) else None
+    if not isinstance(oid, str) or not re.fullmatch(r'[0-9a-f]{40}', oid):
+        raise EvidenceError('Remote default branch object ID is incomplete or invalid')
     ref = 'refs/remotes/origin/' + branch
-    command('git', 'rev-parse', '--verify', ref + '^{tree}')
-    entry = command('git', 'ls-tree', '-z', ref, '--', 'AGENTS.md')
+    git = ('git', '--no-replace-objects')
+    if command(*git, 'rev-parse', '--verify', ref).strip() != oid:
+        raise EvidenceError('Published default branch differs from remote; fetch and retry')
+    if command(*git, 'cat-file', '-t', oid).strip() != 'commit':
+        raise EvidenceError('Remote default branch object is not a commit')
+    command(*git, 'rev-parse', '--verify', oid + '^{tree}')
+    entry = command(*git, 'ls-tree', '-z', oid, '--', 'AGENTS.md')
     if not entry:
         return None  # Confirmed absent in an existing, readable tree.
     if not re.fullmatch(r'100(?:644|755) blob [0-9a-f]+\tAGENTS\.md\x00', entry):
         raise EvidenceError('Published AGENTS.md is not a regular readable blob')
-    return command('git', 'show', ref + ':AGENTS.md')
+    return command(*git, 'show', oid + ':AGENTS.md')
 
 
 def main():
@@ -1694,11 +1709,11 @@ def main():
         return 0
     if mode != 'suspension' or not args:
         raise EvidenceError('Expected origin or suspension <all applicable instruction files>')
-    _, _, branch = origin_context()
+    host, full, branch = origin_context()
     inputs = []
     for name in args:
         inputs.append((name, Path(name).read_text(encoding='utf-8-sig')))
-    published = published_instructions(branch)
+    published = published_instructions(host, full, branch)
     if published is not None:
         inputs.append(('origin/' + branch + ':AGENTS.md', published))
     results = []
