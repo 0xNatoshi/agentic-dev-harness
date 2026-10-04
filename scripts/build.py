@@ -2,16 +2,25 @@
 """Build a deterministic portable archive from explicit, repository-owned sources."""
 import argparse
 import hashlib
+import importlib.util
 import io
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import sys
 import tempfile
-import unicodedata
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+# The installer verifies packages with the same path rules; load it by path so neither script
+# depends on sys.path.
+_SPEC = importlib.util.spec_from_file_location("harness_install", Path(__file__).resolve().with_name("install.py"))
+_INSTALL = importlib.util.module_from_spec(_SPEC)
+sys.modules.setdefault(_SPEC.name, _INSTALL)
+_SPEC.loader.exec_module(_INSTALL)
+package_path = _INSTALL.package_path
+destination_key = _INSTALL.destination_key
 
 
 def digest(data):
@@ -23,25 +32,6 @@ def version(root=ROOT):
     if not re.fullmatch(r"\d+\.\d+\.\d+", value):
         raise ValueError("VERSION must contain a numeric major.minor.patch version")
     return value
-
-
-def package_path(name):
-    if not isinstance(name, str) or not name or re.search(r'[<>:"\\|?*\x00-\x1f]', name):
-        raise ValueError("Package paths must be portable relative POSIX paths")
-    path = PurePosixPath(name)
-    if path.is_absolute() or ".." in path.parts or path.as_posix() != name or name == ".":
-        raise ValueError(f"Unsafe package path: {name}")
-    for component in path.parts:
-        device = component.split(".", 1)[0].rstrip(" ").upper()
-        if component.endswith((".", " ")) or re.fullmatch(r"CON|CONIN\$|CONOUT\$|PRN|AUX|NUL|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3]", device):
-            raise ValueError(f"Windows-reserved package path: {name}")
-    return path
-
-
-def destination_key(name):
-    # Casefold alone keeps dotless i distinct; include uppercase aliases too.
-    # These conservative comparison keys never change the spelling in the ZIP.
-    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", name).upper().casefold())
 
 
 def payloads(root=ROOT):
@@ -67,14 +57,14 @@ def payloads(root=ROOT):
         if base.is_symlink() or not base.is_dir():
             raise ValueError(f"Expected a real source directory: {directory}")
         for source in sorted(base.rglob("*")):
+            relative = source.relative_to(root).as_posix()
             if source.is_symlink():
-                raise ValueError(f"Symlink cannot enter the package: {source.relative_to(root)}")
+                raise ValueError(f"Symlink cannot enter the package: {relative}")
             if "__pycache__" in source.parts or source.suffix == ".pyc" or source.name == ".DS_Store":
                 continue
             if source.is_file():
                 if source.suffix not in {".md", ".txt", ".py", ".sh", ".toml", ".yaml", ".yml"}:
-                    raise ValueError(f"Unexpected source file: {source.relative_to(root)}")
-                relative = source.relative_to(root).as_posix()
+                    raise ValueError(f"Unexpected source file: {relative}")
                 if relative not in mapping:
                     raise ValueError(f"Undeclared source file: {relative}")
     result = {}

@@ -8,6 +8,8 @@ import tempfile
 import unittest
 import zipfile
 
+from tests._fixture_support import symlinks_supported
+
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("harness_build", ROOT / "scripts/build.py")
 BUILD = importlib.util.module_from_spec(SPEC)
@@ -108,13 +110,14 @@ class PackageTests(unittest.TestCase):
                     data = archive.read(prefix + name)
                     self.assertEqual(hashlib.sha256(data).hexdigest(), manifest["files"][name]["sha256"])
 
+    @unittest.skipUnless(symlinks_supported(), "creating symlinks needs Developer Mode or elevation on Windows")
     def test_rejects_symlinked_payload(self):
         with tempfile.TemporaryDirectory(prefix="harness-link-") as directory:
             source = self.copied_source(directory)
             outside = Path(directory) / "outside.txt"
             outside.write_text("Private fixture content", encoding="utf-8")
             (source / "skills/github-workflow/references/external.md").symlink_to(outside)
-            with self.assertRaisesRegex(ValueError, "Symlink"):
+            with self.assertRaisesRegex(ValueError, r"^Symlink cannot enter the package: skills/github-workflow/references/external\.md$"):
                 BUILD.build(Path(directory) / "output", root=source)
             self.assertFalse((Path(directory) / "output").exists())
 
@@ -122,7 +125,7 @@ class PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="harness-extra-") as directory:
             source = self.copied_source(directory)
             (source / "skills/github-workflow/private.bak").write_text("Private fixture content", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "Unexpected source file"):
+            with self.assertRaisesRegex(ValueError, r"^Unexpected source file: skills/github-workflow/private\.bak$"):
                 BUILD.build(Path(directory) / "output", root=source)
 
     def test_rejects_unlisted_runtime_configuration(self):

@@ -226,9 +226,10 @@ def main():
     snapshot = model.parent / "history" / ("AGENTS-v" + project["repository_template_version"] + ".md")
     require(model.read_bytes() == snapshot.read_bytes(), "Active template differs from its declared historical snapshot")
     for path in ROOT.rglob("*"):
-        relative = path.relative_to(ROOT)
-        if any(part in {".git", "dist", "__pycache__"} for part in relative.parts) or path.name == "TASKS.md":
+        relative_path = path.relative_to(ROOT)
+        if any(part in {".git", "dist", "__pycache__"} for part in relative_path.parts) or path.name == "TASKS.md":
             continue
+        relative = relative_path.as_posix()
         require(not path.is_symlink(), f"Unexpected repository symlink: {relative}")
         if not path.is_file():
             continue
@@ -238,7 +239,7 @@ def main():
         check_emails(relative, python_text(text) if path.suffix == ".py" else text)
         require(not re.search(r"(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{24,}|-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----)", text), f"Possible credential: {relative}")
         if path.suffix == ".py":
-            ast.parse(text, filename=str(relative))
+            ast.parse(text, filename=relative)
         elif path.suffix == ".toml":
             tomllib.loads(text)
         elif path.suffix == ".json":
