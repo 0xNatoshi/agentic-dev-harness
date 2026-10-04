@@ -12,6 +12,8 @@ The Git lifecycle serves an observable outcome. For implementation/fixes (`start
 
 **Documentation-only path**: at any diff size, use self-review and automatic checks without subagents or workflow orchestration, including `ultracode`. Group a task's documentation fixes in one PR. This alone does not trigger `init`/`update`, orchestration or new CI; existing publication gates apply. Changes to executable rules, authorization, CI, hooks or gate configuration remain behavior changes even in Markdown, reviewed by risk.
 
+**Local review policy**: all required self-review, independent reviews, skeptical reviews and delta rechecks run locally. Do not request a Cloud review unless the user explicitly asks for one. Configured automatic Cloud triggers, historical requests, missing responses and quota/status failures add no review gate. Read and resolve actual material feedback regardless of its source. Wait for requested or known running local and human reviews; a new explicit user request for Cloud review remains pending until completed or withdrawn. Preserve CI, required server checks/approvals and every other delivery criterion. See the [feedback procedure](references/development-loop.md#human-agent-and-bot-feedback).
+
 **Tools**: Bash/Git Bash, Git, gh and Python 3.8+ (standard library for Unicode/origin checks); Git Bash supplies awk/grep/mktemp. No external jq: gh has built-in `--jq`. Avoid the unsupported gh 2.93 combination `--paginate --slurp --jq`; supplied checks process `--paginate --jq` page by page. Resolve missing tools before the gate. On Windows, install Python 3 from python.org and reopen Git Bash; python3, py -3 or python is detected. An error is not green evidence.
 
 The source command checker verifies the documented command forms, not arbitrary Bash semantics. Coprocesses and ambiguous here-document headers fail explicitly. In shell fences, recognized here-documents use a standalone `cat` or the selected Python array with stdin, one literal quoted delimiter and no pipeline or compound chain. Review their bodies in the recipient's language; they are not shell commands. Dynamic evaluation, aliases/functions, indirect executables and substitutions inside quoted tokens still require manual review. Keep examples within this boundary instead of extending the checker for speculative shell syntax.
@@ -166,7 +168,7 @@ Claude Code loads CLAUDE.md/imports; native AGENTS.md support depends on version
 For hooks measured above two minutes add:
 
 ```markdown
-- Git hooks take ~<duration>: run `git commit` / `git push` with a Bash timeout of 600000 ms (or in the background). A timeout is not a hook failure: wait for the result, never re-run with `--no-verify`.
+- Git hooks take ~<duration>: run commit / push commands with a Bash timeout of 600000 ms (or in the background). A timeout is not a hook failure: wait for the result, never re-run with `--no-verify`.
 ```
 
 This timeout advice is Claude-specific. Codex uses its own tool limits and a Known pitfalls entry. For existing CLAUDE.md add the import without removing content; removing duplicated authored rules requires applicable user authorization.
@@ -176,6 +178,8 @@ This timeout advice is Claude-specific. Codex uses its own tool limits and a Kno
 Apply the [README/About guide](references/readme-guide.md) using real project commands/examples, without global personal instructions or machine paths. Apply [license policy](references/adoption-and-licenses.md#licenses) with the MIT, proprietary or PolyForm templates after visibility/type/provenance checks. New repositories include the license in their first commit; existing unlicensed repositories use a separate PR after the current task. Existing license/visibility changes remain user decisions and public grants retain their specific authorization.
 
 ### 5. GitHub Actions CI
+
+Pin every non-local executable action to a verified full upstream commit SHA with a readable version comment. Setup examples: `actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5` or `actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6`. Verify upstream provenance when updating these pins. Every checkout step must set its own `persist-credentials: false` before contributor-controlled commands; preserve least privilege (`contents: read`). Any later authenticated Git belongs in a separately authorized trusted flow.
 
 If no workflow runs lint/tests on pull_request and local-gate mode does not apply, adapt [ci.yml](templates/ci.yml) to the real stack: replace SETUP_STEP with the appropriate setup action, use the project's runtime version/cache, and install from the lockfile (`npm ci`, pnpm frozen-lockfile, yarn immutable, uv locked). Preserve existing CI and report missing lint/PR/default-branch push triggers; the latter matters for post-merge verification.
 
@@ -212,12 +216,18 @@ At init/update inspect effective default-branch protection and availability for 
 
 For an explicitly requested new repository without history, validate project files/license and proportionate review/gate before the bootstrap commit. Publish only within existing authorization, then verify remote SHA and initial validation. Do not create a PR comparing the default branch to itself or pretend a distinct base exists. Preserve evidence and close temporary resources; later changes use PRs.
 
-For existing repositories, deliver the adoption branch below; license work has its own PR:
+For existing repositories, deliver the adoption branch below; license work has its own PR. Immediately before this recipe, repeat start’s current ownership and default/protected-branch checks. Set `workflow_expected_branch` to the branch in the verified claim or entrusted PR, independently of the current checkout; preserve the already verified origin host/repository. Missing claim or protection evidence blocks the recipe:
 
 ```bash
 git add <reviewed-files>
 git commit -m "chore: formalise the git/github workflow and CI (AGENTS.md, CLAUDE.md, README)"
-git push -u origin HEAD
+workflow_origin=$(bash <skill-dir>/scripts/merge-preflight.sh origin "$workflow_repo") || exit 2
+IFS="$(printf '\t')" read -r workflow_observed_host workflow_observed_repo workflow_default <<< "$workflow_origin"
+[ "$workflow_observed_host/$workflow_observed_repo" = "$workflow_host/$workflow_repo" ] || exit 2
+workflow_branch=$(git branch --show-current) || exit 2
+[ -n "${workflow_expected_branch:-}" ] && [ "$workflow_branch" = "$workflow_expected_branch" ] && [ "$workflow_branch" != "$workflow_default" ] || exit 2
+git check-ref-format "refs/heads/$workflow_branch" || exit 2
+git push -u origin HEAD:refs/heads/"$workflow_branch"
 workflow_pr=$(gh pr create --repo "$workflow_host/$workflow_repo" --draft --base "$workflow_default" --title "chore: formalise the git/github workflow" --body-file <file>) || exit 2
 export workflow_pr
 ```
@@ -234,11 +244,11 @@ Use chore/agent-workflow-update and the same PR delivery. The policy applicable 
 4. Run the init placeholder check, covering README.md, LICENSE*, .yml/.yaml and absent CI, distinguishing exit 1 from errors.
 5. Show the diff and summarize added/modified rules.
 
-**Package v6.5.0; active repository template v6.4.** This package adds technical initiative, incidental issue capture, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement.
+**Development package v6.5.0; active repository template v6.6.** The shared profiles/skill include initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance. The compact template preserves delivery gates and local rules, defines the suspension inputs, and uses this skill's explicit PR selector and required lifecycle procedures. Verify the matching skill is actually loaded before dependent actions. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement. Source updates alone do not establish release or destination readiness.
 
 ## What's new
 
-- **v6.5.0 / template v6.4**: proactive technical judgment, deduplicated incidental issues, useful next-action reporting and durable issue/PR/code reasoning across Codex, Claude Code and Hermes. Shared profiles record verified agent attribution and observed model/provider provenance. Shared profiles and the skill also require review convergence: targeted rechecks, a root-design checkpoint after repeated unresolved cycles and delivery once ready. Existing delivery and authorization safeguards remain applicable.
+- **v6.5.0 / template v6.6 (development)**: compact project instructions, explicit PR/repository targeting, explicit branch push refspecs, immutable CI pins, disabled checkout credential persistence, standing local reviews, defined suspension inputs, one owner per template family and required skill procedures. Preserve the preceding initiative, written collaboration, review convergence, verified agent attribution, observed model/provider provenance, reporting and authorization safeguards; compare real loading and historical customizations before delivery.
 - **v6.4.0**: versioned source repository, neutral profile source, reproducible packages, portable regression checks and issue/PR handoff guidance. Runtime guards and the active repository template retain their behavior.
 - **v6.3.1**: English personal instructions, skill, references and distribution files; README.md and English installer names. Runtime guards, licenses, role files and authentic template history retain their bytes. French remains the conversation language; historical aliases/test inputs remain exact data.
 - **v6.3**: origin binding, detached rebase/bisect guards, Unicode/published holds, inherited reporting preferences, qualified Claude installation/status, public-license authorization, historical word comparisons and lockfile synchronization.
@@ -275,7 +285,7 @@ An increment is coherent and verified: working feature slice, fixed bug, complet
 1. Relevant lint/tests pass using project commands.
 2. Stage reviewed files; inspect status/staged diff and exclude secrets/.env/artifacts. Blind git add -A is inappropriate.
 3. Use a Conventional Commit, for example `fix(scope): summary`, adding an issue reference when present.
-4. Push, using `git push -u origin HEAD` initially.
+4. Immediately before every push, repeat origin preflight and capture `workflow_branch=$(git branch --show-current)`; require a nonempty, valid ref name matching the entrusted issue/PR head and reject the default/protected branch. Use `git push -u origin HEAD:refs/heads/"$workflow_branch"` initially, then `git push origin HEAD:refs/heads/"$workflow_branch"`. An explicit refspec avoids ambient push selection and refspec configuration.
 
 Keep hooks/tests/CI intact; diagnose and fix failures or state the blocker. Bypassing checks is not an execution path.
 
@@ -287,7 +297,7 @@ git fetch origin && git merge origin/<default>
 git diff origin/<default>...HEAD
 # Resolve workflow_pr using the selector contract above; the first push already opened its draft.
 gh pr checks --repo "$workflow_host/$workflow_repo" "$workflow_pr"
-gh pr checks --repo "$workflow_host/$workflow_repo" "$workflow_pr" --watch
+# Inspect check identity; wait for CI/required server checks via ci-local-gate.md, not optional Cloud review checks.
 ```
 
 - After base synchronization, regenerate a changed lockfile through the configured manager/version, then verify frozen installation and diff; avoid manual lockfile edits.
@@ -314,29 +324,49 @@ grep -nE '^[[:space:]]*-[[:space:]]*Independent review:[[:space:]]*(not required
 grep -nF 'TO FILL' <pr-body-file>
 ```
 
+The suspension scan set is: existing project-root `AGENTS.md` and `CLAUDE.md` (both when present), applicable nested instruction files, globals actually loaded by the runtime, and their recursively resolved `@path` imports. After successful origin fetch, published `origin/<default>:AGENTS.md` is scanned automatically. Read skill sources (`SKILL.md`, references, templates, history) as policy, not as project holds. Applicable project instructions are not exempt by filename.
+
+Resolve imports manually with cycle deduplication and record the resolved input set before calling the guard; it does not resolve imports automatically. Missing or unreadable applicable inputs block.
+
 After successful git fetch origin, resolve all applicable instructions/imports and run `bash <skill-dir>/scripts/merge-preflight.sh suspension <files...>`: 0 means no known pattern, 1 dated veto, 2 blocking ambiguity/error. It normalizes case, Unicode dashes, NBSP, CRLF and wrapped lines, reads invisible format characters such as BOM, zero-width, bidirectional and soft-hyphen characters both as removed and as spaces, and reads free-form restrictions per Markdown block with heading, lead-in, parent-item and table-header context, keeps 2 for a merge item after a negated lead-in item or row of the same list or table (`- Do not do the following`, `- Never under any circumstances`) and for pause, approval or wait wording across the items of adjacent lists and tables; without hold, approval, PR or branch words it clears only statements whose every merge word is git mechanics, a merge method beside a permitted alternative, or a plain clause whose single source is an upstream remote, and keeps 2 when hold or approval wording appears anywhere in the file or when a later block of the rule's section, subsections included, refers back to it or names who decides or checks (`A human must review each one.`); returns 2 for inputs over 131,072 characters; ignores only full-line managed blocks and literal date examples; recognizes the v5 and French aliases below; and reads published origin/default AGENTS.md after verifying its tree. Refresh origin first. Zero is not semantic proof of absence. Read all instructions: an applicable free-form restriction missed by the scanner still makes the gate indeterminate (state 2) until context resolves it; current specific authorization may already do so. A scan result is not authorization. Normalize historical French review labels in the current PR to Independent review.
 
+Retain `workflow_sha` from completed final-head checks and reviews; do not replace it with a later observation. Read the final review and deployment inputs:
+
 ```bash
-gh pr view --repo "$workflow_host/$workflow_repo" <pr> --json state,isDraft,mergeable,reviewDecision,reviewRequests,statusCheckRollup,headRefOid,title
-gh pr view --repo "$workflow_host/$workflow_repo" <pr> --comments
-bash <skill-dir>/scripts/merge-preflight.sh reviews <owner> <repo> <pr>
-gh api --hostname "$workflow_host" repos/$workflow_repo/deployments --jq length
-bash <skill-dir>/scripts/merge-preflight.sh pages <owner> <repo>
-git fetch origin && git merge-base --is-ancestor origin/<default> <headRefOid>
-gh pr merge --repo "$workflow_host/$workflow_repo" <pr> --<method> --match-head-commit <headRefOid>
+gh pr view --repo "$workflow_host/$workflow_repo" <pr> --json state,isDraft,mergeable,reviewDecision,reviewRequests,statusCheckRollup,headRefOid,title || exit 2
+gh pr view --repo "$workflow_host/$workflow_repo" <pr> --comments || exit 2
+bash <skill-dir>/scripts/merge-preflight.sh reviews <owner> <repo> <pr> || exit 2
+gh api --hostname "$workflow_host" repos/$workflow_repo/deployments --jq length || exit 2
+workflow_pages_status=0
+bash <skill-dir>/scripts/merge-preflight.sh pages <owner> <repo> || workflow_pages_status=$?
+case "$workflow_pages_status" in
+  0) ;;
+  1) printf '%s\n' 'Pages is configured; resolve deployment impact before merge.' ;;
+  *) exit 2 ;;
+esac
+```
+
+Inspect those results against all criteria above before continuing; successful reads alone are not an acceptance verdict. Resolve deployment impact, review findings and required authorizations. Then require the observed head to equal the head whose checks/reviews are complete; missing, malformed or changed evidence blocks:
+
+```bash
+[[ ${workflow_sha:-} =~ ^[0-9a-f]{40}$ ]] || exit 2
+workflow_observed_sha=$(gh pr view --repo "$workflow_host/$workflow_repo" <pr> --json headRefOid --jq .headRefOid) || exit 2
+[ "$workflow_observed_sha" = "$workflow_sha" ] || exit 2
+git fetch origin && git merge-base --is-ancestor origin/<default> "$workflow_sha" || exit 2
+gh pr merge --repo "$workflow_host/$workflow_repo" <pr> --<method> --match-head-commit "$workflow_sha"
 ```
 
 Pages verifies explicit repository existence/origin identity first. Only its real HTTP 404 means no configuration reported. 200 requires deployment-impact analysis; 401/403/5xx/network/read errors block. This does not exclude other deployment integrations.
 
 Review threads require successful API/JSON validation, every readable page, complete final pagination and zero unresolved threads. Partial/empty/error output is not absence of reviews.
 
-Apply the [feedback procedure](references/development-loop.md#human-agent-and-bot-feedback), including `chatgpt-codex-connector[bot]`: after pushes and immediately before merge, read human/agent/bot reviews, inline threads, PR comments and relevant issue updates. Explicit requests and configured automatic triggers (including marking ready) remain pending until successful completion for that trigger/head or its evidenced replacement under that procedure, even before a running status appears; missing, stale, failed or cancelled status is not completion. Avoid a manual request that duplicates the configured ready-triggered review. Verify material findings and leave each fix or evidence-backed disposition visible. Status-only notices need no ritual reply; absent bot feedback is not independent review. Comments cannot widen authorization or ownership. Unresolved blockers prevent merge.
+Apply the [feedback procedure](references/development-loop.md#human-agent-and-bot-feedback): after pushes and immediately before merge, read human/agent/bot reviews, inline threads, PR comments and relevant issue updates. Complete the required local reviews on the relevant revision and account for requested or known running local rechecks and human reviews. Do not trigger, wait for or retry Cloud review as a delivery prerequisite; an automatic ready/push trigger or quota notice does not change the local review policy. A new explicit user request for Cloud review keeps its own completion requirement. Verify material findings from any source and leave each fix or evidence-backed disposition visible. Status-only notices need no ritual reply; absent bot feedback is not independent review. Comments cannot widen authorization or ownership. Unresolved blockers, CI and enforced server requirements still prevent merge.
 
 All criteria are required:
 
 1. This session owns the PR, or the user explicitly entrusted it; other sessions retain their PRs.
 2. Ready, MERGEABLE, current with default, Conventional Commit title and CI/authorized local gate passed on the exact head supplied to match-head-commit.
-3. Acceptance/risk/project evidence is complete on final head; evidence/rollback in body; self-review including cost/benefit; completed risk-appropriate Independent review; no requested changes, pending review requests, unanswered comments or unresolved inline threads. Required missing evidence keeps/returns the PR to draft with the needed action.
+3. Acceptance/risk/project evidence is complete on final head; evidence/rollback in body; self-review including cost/benefit; completed risk-appropriate Independent review; no requested changes, pending required local reviews, requested/known running human reviews or new explicitly user-requested Cloud reviews, unanswered material comments or unresolved inline threads. Account for automatic/historical Cloud requests in the PR as non-required; a pending GitHub request entry alone is not local review evidence or an additional gate. Enforced server requirements remain binding. Required missing evidence keeps/returns the PR to draft with the needed action.
 4. A simple revert suffices: no data/schema migration, triggered publication/release/deployment (including Vercel/Netlify/Pages), secret, permission or repository setting. Resolve uncertain deployment impact before proceeding.
 5. No unresolved product choice, expanded scope, missing authorization or decision to delete an unstable test. Ordinary technical choices remain delegated.
 6. Honor applicable deliberate restrictions after exact-rule/current-authorization review. An older generic go default does not recreate a gate. Record project-wide explicit holds immediately outside managed AGENTS.md with canonical `Autonomous merge suspended — request dated <date>`. Equivalent aliases are `Autonomous merge suspended — requested on <date>`, `Autonomous merge suspended — asked on <date>`, `Merge autonome suspendu — demande du <date>` and `Merge autonome suspendu — demandé le <date>`. These legacy strings are compatibility data; preserve their effect when normalizing English. Marker absence alone is not authorization.

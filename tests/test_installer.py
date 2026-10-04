@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -204,6 +205,38 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(archive.returncode, 0, archive.stderr)
         self.assertEqual(json.loads(archive.stdout)["archive_digest"], "verified")
 
+    def test_verify_package_hashes_the_parsed_checksum_snapshot(self):
+        spec = importlib.util.spec_from_file_location("harness_installer_for_snapshot", ROOT / "scripts/install.py")
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        package = installer.load_package(self.package)
+        checksums = self.base / "SHA256SUMS.txt"
+        original = self.checksums.read_bytes()
+        checksums.write_bytes(original)
+        replacement = self.base / "replacement-SHA256SUMS.txt"
+        replacement.write_bytes(original + b"\n")  # Same entries, different file identity and bytes.
+        original_open = Path.open
+        opens = []
+
+        def replace_after_first_open(path, *args, **kwargs):
+            if path == checksums:
+                mode = kwargs.get("mode", args[0] if args else "r")
+                opens.append(mode)
+                if len(opens) == 1:
+                    # Keep the first stream's bytes available while replacing its pathname. This
+                    # models a replacement exactly between opens without a timing race or OS lock.
+                    with original_open(path, "rb") as stream:
+                        captured = stream.read()
+                    replacement.replace(checksums)
+                    return io.BytesIO(captured) if "b" in mode else io.StringIO(captured.decode("utf-8"))
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", replace_after_first_open):
+            report = installer.verify_package(package, checksums)
+        self.assertEqual(report["checksums_sha256"], hashlib.sha256(original).hexdigest())
+        self.assertEqual(checksums.read_bytes(), original + b"\n")
+        self.assertEqual(len(opens), 1)
+
     def test_verify_package_rejects_tampering(self):
         copy = self.base / "package"
         shutil.copytree(self.package, copy)
@@ -221,6 +254,18 @@ class InstallerTests(unittest.TestCase):
         archive = self.base / "tampered.zip"
         archive.write_bytes(self.archive.read_bytes() + b"\x00")
         self.assert_refused(self.run_installer("verify-package", archive, "--checksums", self.checksums), 1)
+
+    def test_verify_package_rejects_malformed_checksum_bytes(self):
+        first_line = self.checksums.read_bytes().splitlines(keepends=True)[0]
+        for data, message in ((b"\xff", "Cannot read checksums"),
+                              (b"not a checksum\n", "Malformed checksum line"),
+                              (first_line + first_line, "Checksum listed twice")):
+            with self.subTest(message=message):
+                checksums = self.base / "invalid-SHA256SUMS.txt"
+                checksums.write_bytes(data)
+                result = self.run_installer("verify-package", self.package, "--checksums", checksums)
+                self.assert_refused(result, 1)
+                self.assertIn(message, json.loads(result.stderr)["error"])
 
     def test_verify_package_rejects_same_size_edit_and_bad_manifest_paths(self):
         copy = self.base / "package"
@@ -520,6 +565,25 @@ class InstallerTests(unittest.TestCase):
         self.assert_refused(result, 1)
         self.assertIn("before", json.loads(result.stderr)["details"])
         self.assertEqual(snapshot(self.target), changed)
+        self.assertFalse((self.state() / "CURRENT").exists())
+
+    def test_apply_refuses_checksum_byte_drift_with_unchanged_entries(self):
+        self.v52_layout()
+        checksums = self.base / "SHA256SUMS.txt"
+        original = self.checksums.read_bytes()
+        checksums.write_bytes(original)
+        plan = self.base / "plan.json"
+        planned = self.run_installer("plan", "--runtime", "claude", "--home", self.home, "--checksums", checksums,
+                                     "--package", self.package, "--output", plan)
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        self.assertEqual(json.loads(plan.read_text(encoding="utf-8"))["package"]["checksums_sha256"],
+                         hashlib.sha256(original).hexdigest())
+        before = snapshot(self.target)
+        checksums.write_bytes(original + b"\n")
+        applied = self.run_installer("apply", "--plan", plan, "--checksums", checksums, "--maintenance-confirmed")
+        self.assert_refused(applied, 1)
+        self.assertIn("package", json.loads(applied.stderr)["details"])
+        self.assertEqual(snapshot(self.target), before)
         self.assertFalse((self.state() / "CURRENT").exists())
 
     def test_apply_refuses_a_changed_retirement_preview(self):
