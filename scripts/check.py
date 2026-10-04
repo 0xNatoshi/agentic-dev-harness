@@ -310,7 +310,7 @@ def check_ci_actions(ci_name):
                 f'{location}: non-local action requires a full lowercase 40-hex revision')
         require(bool(separator and RELEASE_COMMENT.match(comment.strip())),
                 f'{location}: action pin needs a readable version comment')
-        if ref.partition('@')[0] == 'actions/checkout':
+        if ref.partition('@')[0].lower() == 'actions/checkout':
             step = next((step for step in steps if step[0] <= index < step[1]), None)
             require(step is not None and checkout_has_explicit_credentials(lines, *step),
                     f'{location}: checkout step needs its own persist-credentials: false input')

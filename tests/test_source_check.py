@@ -153,6 +153,32 @@ class SourceCheckTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn(f"{relative}:4: non-local action requires a full lowercase 40-hex revision", result.stderr)
 
+    def test_checkout_credentials_guard_recognizes_case_insensitive_action_names(self):
+        for relative in [".github/workflows/ci.yml", "skills/github-workflow/templates/ci.yml"]:
+            for action in ["Actions/Checkout", "ACTIONS/CHECKOUT"]:
+                for credentials in ["false", "true", "missing"]:
+                    with self.subTest(relative=relative, action=action, credentials=credentials), tempfile.TemporaryDirectory(prefix="harness-checkout-case-") as directory:
+                        root = Path(directory)
+                        source = self.copy_source(root)
+                        path = source / relative
+                        text = path.read_text(encoding="utf-8")
+                        checkout = re.search(r"actions/checkout@[0-9a-f]{40} # v[0-9]+(?:\.[0-9]+){0,2}", text)
+                        self.assertIsNotNone(checkout, "The workflow must contain a pinned checkout")
+                        step = "      - uses: " + checkout.group() + "\n        with:\n          persist-credentials: false\n"
+                        self.assertIn(step, text)
+                        replacement = step.replace("actions/checkout@", action + "@")
+                        if credentials == "missing":
+                            replacement = replacement.replace("persist-credentials: false", "fetch-depth: 0")
+                        else:
+                            replacement = replacement.replace("persist-credentials: false", "persist-credentials: " + credentials)
+                        path.write_text(text.replace(step, replacement, 1), encoding="utf-8")
+                        environment, _ = fixture_environment(root)
+                        result = run([sys.executable, "scripts/check.py"], source, environment)
+                        expected = 0 if credentials == "false" else 1
+                        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                        if expected:
+                            self.assertIn("checkout step needs its own persist-credentials: false input", result.stderr)
+
     def test_active_checkout_steps_need_separate_false_credentials_inputs(self):
         relative = ".github/workflows/ci.yml"
         for case in ["missing_first", "true_first", "missing_second", "true_second"]:
