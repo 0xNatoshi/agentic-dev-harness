@@ -4,6 +4,8 @@ Use this shared procedure for discovery, `finish`, integration and post-merge ch
 
 ## Decide from current state
 
+Classify checks by their actual workflow/provider and effective server requirements before using this table. Applicable checks are project CI and enforced server checks/approvals. An optional automatically triggered Cloud review check is review feedback, not CI: its pending, failed, cancelled or quota state adds no gate under the [local review policy](development-loop.md#human-agent-and-bot-feedback). Retain its real status and process actual material findings; never report it as passed. A new explicit user request for Cloud review has its own completion requirement. If the server requires that check or approval, keep the requirement and report the precise obstacle; this policy authorizes no settings change or bypass.
+
 | Observation on the relevant head | Action |
 |---|---|
 | All applicable checks succeeded, or skipped/neutral is justified by project rules | Continue through readiness criteria; an unjustifiably skipped required step proves nothing. |
