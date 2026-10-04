@@ -316,6 +316,9 @@ class SourceCheckTests(unittest.TestCase):
             ]:
                 result = run(["git", *args], source, environment)
                 self.assertEqual(result.returncode, 0, result.stderr)
+            published = run(["git", "rev-parse", "HEAD"], source, environment)
+            self.assertEqual(published.returncode, 0, published.stderr)
+            environment["FIXTURE_REMOTE_OID"] = published.stdout.strip()
             preflight = run(
                 ["bash", "skills/github-workflow/scripts/merge-preflight.sh", "suspension", "AGENTS.md"],
                 source,
