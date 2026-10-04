@@ -596,10 +596,12 @@ def load_archive(source: Path) -> Package:
     return package
 
 
-def read_checksums(path: Path) -> dict:
+def read_checksums(path: Path) -> tuple[dict, bytes]:
     entries = {}
     try:
-        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        # A path or link can change after this open; parse and record only these captured bytes.
+        data = Path(path).read_bytes()
+        lines = data.decode("utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as error:
         raise Refused(f"Cannot read checksums {path}: {error}")
     for line in lines:
@@ -612,7 +614,7 @@ def read_checksums(path: Path) -> dict:
         if name in entries:
             raise Refused(f"Checksum listed twice: {name}")
         entries[name] = match.group(1).lower()
-    return entries
+    return entries, data
 
 
 def verify_package(package: Package, checksums: Path) -> dict:
@@ -635,7 +637,7 @@ def verify_package(package: Package, checksums: Path) -> dict:
             problems.append(f"hash or size mismatch: {name}")
     for name in colliding(list(listed) + ["MANIFEST.json"]):
         problems.append(f"colliding path: {name}")
-    sums = read_checksums(checksums)
+    sums, checksum_bytes = read_checksums(checksums)
     manifest_entry = package.name + "-MANIFEST.json"
     if sums.get(manifest_entry) != digest(package.manifest_bytes):
         problems.append(f"manifest digest does not match the {manifest_entry} checksum entry")
@@ -653,7 +655,7 @@ def verify_package(package: Package, checksums: Path) -> dict:
         raise Refused("Package verification failed", problems)
     return {
         **package.identity(),
-        "checksums_sha256": digest(Path(checksums).read_bytes()),
+        "checksums_sha256": digest(checksum_bytes),
         "files_verified": len(listed),
         "archive_digest": archive,
         "scope": "Integrity against the supplied checksum file only; hash agreement is not independent provenance.",

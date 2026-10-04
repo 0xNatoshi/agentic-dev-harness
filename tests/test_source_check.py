@@ -1,5 +1,6 @@
 """Keep project merge authorization separate from distributable profile checks."""
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -34,6 +35,176 @@ class SourceCheckTests(unittest.TestCase):
             result = run([sys.executable, "scripts/check.py"], source, environment)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('"source_checks": "passed"', result.stdout)
+
+    def test_exported_ci_rejects_mutable_actions_and_missing_release_comments(self):
+        relative = "skills/github-workflow/templates/ci.yml"
+        cases = [
+            ("actions/checkout@v5 # v5", "full lowercase 40-hex revision"),
+            ("actions/checkout@" + "A" * 40 + " # v5", "full lowercase 40-hex revision"),
+            ("actions/checkout@" + "a" * 39 + " # v5", "full lowercase 40-hex revision"),
+            ("actions/checkout@" + "a" * 40, "readable version comment"),
+            ("actions/checkout@" + "a" * 40 + " # pinned", "readable version comment"),
+            ("other/verify@v1 # v1", "full lowercase 40-hex revision"),
+            ("{uses: other/verify@v1}", "unsupported action uses syntax"),
+        ]
+        for reference, message in cases:
+            with self.subTest(reference=reference), tempfile.TemporaryDirectory(prefix="harness-ci-pin-") as directory:
+                root = Path(directory)
+                source = self.copy_source(root)
+                path = source / relative
+                lines = path.read_text(encoding="utf-8").splitlines()
+                index = next(index for index, line in enumerate(lines) if re.match(r"\s*- uses: actions/checkout@", line))
+                lines[index] = "      - " + reference if reference.startswith("{") else "      - uses: " + reference
+                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                environment, _ = fixture_environment(root)
+                result = run([sys.executable, "scripts/check.py"], source, environment)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"{relative}:{index + 1}: ", result.stderr)
+                self.assertIn(message, result.stderr)
+
+    def test_exported_ci_allows_local_actions_without_remote_pin(self):
+        with tempfile.TemporaryDirectory(prefix="harness-ci-local-action-") as directory:
+            root = Path(directory)
+            source = self.copy_source(root)
+            path = source / "skills/github-workflow/templates/ci.yml"
+            text = path.read_text(encoding="utf-8")
+            path.write_text(text + "\n      - uses: ./.github/actions/local-check\n", encoding="utf-8")
+            environment, _ = fixture_environment(root)
+            result = run([sys.executable, "scripts/check.py"], source, environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_setup_examples_reject_mutable_or_unexplained_pins(self):
+        cases = [
+            ("actions/setup-node@v5 # v5", "full lowercase 40-hex revision"),
+            ("actions/setup-node # v5", "full lowercase 40-hex revision"),
+            ("actions/setup-node@" + "b" * 40, "readable version comment"),
+            ("actions/setup-node@" + "b" * 40 + " # stable", "readable version comment"),
+        ]
+        for relative in ["skills/github-workflow/SKILL.md", "skills/github-workflow/templates/ci.yml"]:
+            for reference, message in cases:
+                with self.subTest(relative=relative, reference=reference), tempfile.TemporaryDirectory(prefix="harness-setup-pin-") as directory:
+                    root = Path(directory)
+                    source = self.copy_source(root)
+                    path = source / relative
+                    lines = path.read_text(encoding="utf-8").splitlines()
+                    index = next(index for index, line in enumerate(lines) if "actions/setup-node@" in line)
+                    lines[index] = re.sub(r"actions/setup-node@[A-Za-z0-9._-]+(?:\s*#\s*v[0-9]+(?:\.[0-9]+){0,2})?", reference, lines[index], count=1)
+                    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                    environment, _ = fixture_environment(root)
+                    result = run([sys.executable, "scripts/check.py"], source, environment)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(f"{relative}:{index + 1}: ", result.stderr)
+                    self.assertIn(message, result.stderr)
+
+    def test_each_checkout_step_requires_its_own_false_credentials_input(self):
+        relative = "skills/github-workflow/templates/ci.yml"
+        for name in ["missing", "true", "commented", "env", "next_step"]:
+            with self.subTest(case=name), tempfile.TemporaryDirectory(prefix="harness-ci-credentials-") as directory:
+                root = Path(directory)
+                source = self.copy_source(root)
+                path = source / relative
+                text = path.read_text(encoding="utf-8")
+                checkout = re.search(r"actions/checkout@[0-9a-f]{40} # v[0-9]+(?:\.[0-9]+){0,2}", text)
+                self.assertIsNotNone(checkout, "The operative template must contain a pinned checkout")
+                step = "      - uses: " + checkout.group() + "\n        with:\n          persist-credentials: false\n"
+                self.assertIn(step, text)
+                variants = {
+                    "missing": "      - uses: " + checkout.group() + "\n        with:\n          fetch-depth: 0\n",
+                    "true": step.replace("persist-credentials: false", "persist-credentials: true"),
+                    "commented": step.replace("persist-credentials: false", "# persist-credentials: false"),
+                    "env": step.replace("with:", "env:"),
+                    "next_step": step + "      - uses: " + checkout.group() + "\n        with:\n          fetch-depth: 0\n",
+                }
+                path.write_text(text.replace(step, variants[name], 1), encoding="utf-8")
+                environment, _ = fixture_environment(root)
+                result = run([sys.executable, "scripts/check.py"], source, environment)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("checkout step needs its own persist-credentials: false input", result.stderr)
+
+    def test_active_workflows_reject_mutable_actions_and_missing_release_comments(self):
+        relative = ".github/workflows/ci.yml"
+        cases = [
+            ("actions/checkout", "actions/checkout@v7 # v7", "full lowercase 40-hex revision"),
+            ("actions/setup-python", "actions/setup-python@v7 # v7", "full lowercase 40-hex revision"),
+            ("actions/setup-python", "actions/setup-python@" + "a" * 40, "readable version comment"),
+        ]
+        for action, replacement, message in cases:
+            with self.subTest(action=action, replacement=replacement), tempfile.TemporaryDirectory(prefix="harness-active-action-") as directory:
+                root = Path(directory)
+                source = self.copy_source(root)
+                path = source / relative
+                lines = path.read_text(encoding="utf-8").splitlines()
+                index = next(index for index, line in enumerate(lines) if re.match(r"\s*- uses: " + action + "@", line))
+                lines[index] = "      - uses: " + replacement
+                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                environment, _ = fixture_environment(root)
+                result = run([sys.executable, "scripts/check.py"], source, environment)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"{relative}:{index + 1}: ", result.stderr)
+                self.assertIn(message, result.stderr)
+
+        with tempfile.TemporaryDirectory(prefix="harness-active-yaml-") as directory:
+            root = Path(directory)
+            source = self.copy_source(root)
+            relative = ".github/workflows/extra.yaml"
+            (source / relative).write_text("jobs:\n  ci:\n    steps:\n      - uses: other/verify@v1 # v1\n", encoding="utf-8")
+            environment, _ = fixture_environment(root)
+            result = run([sys.executable, "scripts/check.py"], source, environment)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn(f"{relative}:4: non-local action requires a full lowercase 40-hex revision", result.stderr)
+
+    def test_checkout_credentials_guard_recognizes_case_insensitive_action_names(self):
+        for relative in [".github/workflows/ci.yml", "skills/github-workflow/templates/ci.yml"]:
+            for action in ["Actions/Checkout", "ACTIONS/CHECKOUT"]:
+                for credentials in ["false", "true", "missing"]:
+                    with self.subTest(relative=relative, action=action, credentials=credentials), tempfile.TemporaryDirectory(prefix="harness-checkout-case-") as directory:
+                        root = Path(directory)
+                        source = self.copy_source(root)
+                        path = source / relative
+                        text = path.read_text(encoding="utf-8")
+                        checkout = re.search(r"actions/checkout@[0-9a-f]{40} # v[0-9]+(?:\.[0-9]+){0,2}", text)
+                        self.assertIsNotNone(checkout, "The workflow must contain a pinned checkout")
+                        step = "      - uses: " + checkout.group() + "\n        with:\n          persist-credentials: false\n"
+                        self.assertIn(step, text)
+                        replacement = step.replace("actions/checkout@", action + "@")
+                        if credentials == "missing":
+                            replacement = replacement.replace("persist-credentials: false", "fetch-depth: 0")
+                        else:
+                            replacement = replacement.replace("persist-credentials: false", "persist-credentials: " + credentials)
+                        path.write_text(text.replace(step, replacement, 1), encoding="utf-8")
+                        environment, _ = fixture_environment(root)
+                        result = run([sys.executable, "scripts/check.py"], source, environment)
+                        expected = 0 if credentials == "false" else 1
+                        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                        if expected:
+                            self.assertIn("checkout step needs its own persist-credentials: false input", result.stderr)
+
+    def test_active_checkout_steps_need_separate_false_credentials_inputs(self):
+        relative = ".github/workflows/ci.yml"
+        for case in ["missing_first", "true_first", "missing_second", "true_second"]:
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="harness-active-credentials-") as directory:
+                root = Path(directory)
+                source = self.copy_source(root)
+                path = source / relative
+                text = path.read_text(encoding="utf-8")
+                checkout = re.search(r"actions/checkout@[0-9a-f]{40} # v[0-9]+(?:\.[0-9]+){0,2}", text)
+                self.assertIsNotNone(checkout, "The active CI must contain a pinned checkout")
+                step = "      - uses: " + checkout.group() + "\n        with:\n          persist-credentials: false\n"
+                self.assertIn(step, text)
+                missing = step.replace("persist-credentials: false", "fetch-depth: 0")
+                unsafe = step.replace("persist-credentials: false", "persist-credentials: true")
+                replacement = {
+                    "missing_first": missing,
+                    "true_first": unsafe,
+                    "missing_second": step + missing,
+                    "true_second": step + unsafe,
+                }[case]
+                path.write_text(text.replace(step, replacement, 1), encoding="utf-8")
+                environment, _ = fixture_environment(root)
+                result = run([sys.executable, "scripts/check.py"], source, environment)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"{relative}:", result.stderr)
+                self.assertIn("checkout step needs its own persist-credentials: false input", result.stderr)
 
     def test_source_gate_rejects_each_unsafe_workflow_command(self):
         cases = [
@@ -145,6 +316,9 @@ class SourceCheckTests(unittest.TestCase):
             ]:
                 result = run(["git", *args], source, environment)
                 self.assertEqual(result.returncode, 0, result.stderr)
+            published = run(["git", "rev-parse", "HEAD"], source, environment)
+            self.assertEqual(published.returncode, 0, published.stderr)
+            environment["FIXTURE_REMOTE_OID"] = published.stdout.strip()
             preflight = run(
                 ["bash", "skills/github-workflow/scripts/merge-preflight.sh", "suspension", "AGENTS.md"],
                 source,
@@ -288,7 +462,7 @@ class SourceCheckTests(unittest.TestCase):
             "git+https://github.com/" + "@".join(["owner/repo.git", "feature"]),
             "git+ssh://" + "@".join(["git", "github.com/owner/repo.git", "main"]),
         ]
-        # Workflow lines: in YAML the whole value of a `uses:` key is an action reference.
+        # YAML lines still exercise email screening without becoming active workflows.
         uses = [
             "  - uses: " + "@".join(["owner/action", "feature.one"]),
             "        uses: '" + "@".join(["owner/action", "release.candidate"]) + "'",
@@ -302,7 +476,7 @@ class SourceCheckTests(unittest.TestCase):
             profile = source / "profiles/AGENTS.template.md"
             profile.write_text(profile.read_text(encoding="utf-8") + "\n" + " ".join(addresses) + "\n" + "\n".join(lines) + "\n",
                                encoding="utf-8")
-            (source / ".github/workflows/fixture-uses.yml").write_text("jobs:\n  steps:\n" + "\n".join(uses) + "\n", encoding="utf-8")
+            (source / "tests/fixture-uses.yml").write_text("jobs:\n  steps:\n" + "\n".join(uses) + "\n", encoding="utf-8")
             environment, _ = fixture_environment(root)
             result = run([sys.executable, "scripts/check.py"], source, environment)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

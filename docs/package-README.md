@@ -4,7 +4,7 @@ Versioned development workflow, agent profiles and safe delivery tooling for Cod
 
 ## Install
 
-Extract outside project repositories. Ask the agent in each targeted application to verify MANIFEST.json, read STATUS.md and follow its installation guide. Back up targeted instructions and skills, preserve existing preferences/authentic history, compare versions and verify actual loading in a new session. Install Codex only when present and targeted. Do not modify unrelated projects, providers, permissions or settings.
+Authenticate the ZIP before running any bundled code or using an existing extraction. Obtain the installation guide and release checksum file through an authenticated source outside the ZIP, then use the guide's bootstrap from a download directory outside repositories and skill discovery roots. It checks captured ZIP bytes, validates members and creates a fresh verified package root. Ask the agent in each targeted application to read STATUS.md and follow that guide from the new root. Back up targeted instructions and skills, preserve existing preferences/authentic history, compare versions and verify actual loading in a new session. Install Codex only when present and targeted. Do not modify unrelated projects, providers, permissions or settings.
 
 | Application | Guide and source |
 |---|---|
@@ -28,7 +28,7 @@ When every checkpoint is `current` or `personalized`, no package update is neede
 
 ## Version and recovery
 
-The package is v6.5.0; the project template is v6.4. Package policy includes proactive technical judgment, incidental issue capture, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill. Authentic template snapshots are retained, including instructions to preserve destination-only v5.1/v5.2 history. The common policy is neutral; merge personal preferences during installation instead of overwriting them.
+The package is v6.5.0; the project template is v6.6, with compact instructions and required policy references. Package policy includes proactive technical judgment, incidental issue capture, written collaboration, review convergence, verified agent attribution and observed model/provider provenance in the shared profiles/skill. Authentic template snapshots are retained, including instructions to preserve destination-only v5.1/v5.2 history. The common policy is neutral; merge personal preferences during installation instead of overwriting them.
 
 MANIFEST.json hashes every payload except itself. The ZIP is reproducibly generated from the versioned source. Read [STATUS.md](STATUS.md) for actual scope and outstanding destination checks. The package contains no private backup, provider credentials or full Hermes SOUL.
 

@@ -49,6 +49,14 @@ del args[index:index + 2]
 if args[1] == 'graphql':
     print('false\\t0')
     sys.exit(0)
+if args[1] == 'repos/fixture/repo/branches/main':
+    if os.getenv('FIXTURE_BRANCH_API_FAIL') == '1':
+        sys.exit(94)
+    print(json.dumps({
+        'name': os.getenv('FIXTURE_BRANCH_NAME', 'main'),
+        'commit': {'sha': os.getenv('FIXTURE_REMOTE_OID', '')},
+    }))
+    sys.exit(0)
 if args[1] != 'repos/fixture/repo/pages':
     sys.exit(93)
 status = int(os.getenv('FIXTURE_HTTP', '404'))
@@ -2162,10 +2170,17 @@ ROUTING_CASES = (
     Case("push/fetch mismatch", 2, mode="pages", setup="push_mismatch"),
     Case("published-only veto", 1, setup="published_wait"),
     Case("unreadable published ref", 2, setup="missing_published_ref"),
+    Case("stale refspec cannot hide published veto", 2, setup="stale_published_ref"),
+    Case("missing remote object evidence", 2, environment=(("FIXTURE_REMOTE_OID", ""),)),
+    Case("mismatched remote object evidence", 2, environment=(("FIXTURE_REMOTE_OID", "f" * 40),)),
+    Case("mismatched remote branch identity", 2, environment=(("FIXTURE_BRANCH_NAME", "other"),)),
+    Case("unreadable remote object evidence", 2, environment=(("FIXTURE_BRANCH_API_FAIL", "1"),)),
+    Case("published tree without AGENTS", 0, setup="published_no_agents"),
+    Case("replacement cannot hide published veto", 1, setup="replaced_published_object"),
 )
 ALL_CASES = TEXT_CASES + LIST_COLUMN_CASES + LEAD_SCOPE_CASES + DASH_CASES + SOURCE_CASES + ROUTING_CASES
-if len(ALL_CASES) != 1559 or len({case.name for case in ALL_CASES}) != 1559:
-    raise RuntimeError("Merge fixture inventory must contain 1559 unique cases")
+if len(ALL_CASES) != 1566 or len({case.name for case in ALL_CASES}) != 1566:
+    raise RuntimeError("Merge fixture inventory must contain 1566 unique cases")
 
 
 class MergePreflightTests(unittest.TestCase):
@@ -2188,6 +2203,7 @@ class MergePreflightTests(unittest.TestCase):
         self.git("add", "AGENTS.md")
         self.git("commit", "-qm", "base")
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.environment["FIXTURE_REMOTE_OID"] = self.git("rev-parse", "HEAD")
 
     def git(self, *arguments: str) -> str:
         result = run(["git", *arguments], self.repo, self.environment)
@@ -2206,9 +2222,43 @@ class MergePreflightTests(unittest.TestCase):
             self.git("add", "AGENTS.md")
             self.git("commit", "-qm", "published wait")
             self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+            self.environment["FIXTURE_REMOTE_OID"] = self.git("rev-parse", "HEAD")
             write_fixture(self.instructions, "Local clear.\n")
         elif case.setup == "missing_published_ref":
             self.git("update-ref", "-d", "refs/remotes/origin/main")
+        elif case.setup == "stale_published_ref":
+            old = self.git("rev-parse", "refs/remotes/origin/main")
+            write_fixture(self.instructions, "Autonomous merge suspended — request dated 2026-09-27\n")
+            self.git("add", "AGENTS.md")
+            self.git("commit", "-qm", "published veto")
+            current = self.git("rev-parse", "HEAD")
+            remote = self.root / "server.git"
+            self.git("init", "--bare", "-q", str(remote))
+            self.git("push", "-q", str(remote), "HEAD:refs/heads/main")
+            self.git("config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/ignored-main")
+            self.git("remote", "set-url", "origin", str(remote))
+            self.git("fetch", "-q", "origin")
+            self.git("remote", "set-url", "origin", "https://github.example/fixture/repo.git")
+            self.assertEqual(self.git("rev-parse", "refs/remotes/origin/main"), old)
+            self.assertEqual(self.git("rev-parse", "refs/remotes/origin/ignored-main"), current)
+            self.environment["FIXTURE_REMOTE_OID"] = current
+            write_fixture(self.instructions, "Local clear.\n")
+        elif case.setup == "published_no_agents":
+            self.git("rm", "-q", "AGENTS.md")
+            self.git("commit", "-qm", "remove published instructions")
+            self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+            self.environment["FIXTURE_REMOTE_OID"] = self.git("rev-parse", "HEAD")
+            write_fixture(self.instructions, "Local clear.\n")
+        elif case.setup == "replaced_published_object":
+            clear = self.git("rev-parse", "HEAD")
+            write_fixture(self.instructions, "Autonomous merge suspended — request dated 2026-09-27\n")
+            self.git("add", "AGENTS.md")
+            self.git("commit", "-qm", "published veto")
+            current = self.git("rev-parse", "HEAD")
+            self.git("update-ref", "refs/remotes/origin/main", current)
+            self.environment["FIXTURE_REMOTE_OID"] = current
+            self.git("replace", current, clear)
+            write_fixture(self.instructions, "Local clear.\n")
         write_fixture(self.log, "")
         environment = self.environment | dict(case.environment)
         arguments = [str(self.instructions)] if case.mode == "suspension" else ["fixture", "repo"]
@@ -2217,8 +2267,9 @@ class MergePreflightTests(unittest.TestCase):
         result = run(["bash", str(PREFLIGHT), case.mode, *arguments], self.repo, environment)
         calls = [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
         api_calls = sum(call[0] == "api" for call in calls)
+        expected_api_calls = case.api_calls + (case.mode == "suspension")
         self.assertEqual(
-            (result.returncode, api_calls), (case.expected, case.api_calls),
+            (result.returncode, api_calls), (case.expected, expected_api_calls),
             f"{case.name}: stdout={result.stdout!r}, stderr={result.stderr!r}, gh={calls!r}",
         )
 
