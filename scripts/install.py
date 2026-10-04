@@ -1786,7 +1786,7 @@ class TraceBinding:
     The opened leaf is checked before the first byte and never reopened by pathname.
     """
     def __init__(self, path: Path) -> None:
-        self.stream = None
+        self.descriptor = None
         self.validation_descriptor = None
         self.parent = PhysicalDirectory(path.parent, writable=False)
         self.name = path.name
@@ -1834,7 +1834,8 @@ class TraceBinding:
 
     def _open(self) -> None:
         if os.name == "nt":
-            descriptor, identity = self._windows_file(0x84, 1 if self.before else 2, 3, os.O_WRONLY | os.O_APPEND)
+            descriptor, identity = self._windows_file(0x84, 1 if self.before else 2, 3,
+                                                      os.O_WRONLY | os.O_APPEND | os.O_BINARY)
         else:
             flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW
             if self.before is None:
@@ -1846,30 +1847,35 @@ class TraceBinding:
                 identity = [status.st_dev, status.st_ino]
             if not self._allowed(status) or (self.before is not None and identity != self.before_identity):
                 raise Blocked("The trace file changed after temporary-path validation")
-            self.stream = os.fdopen(descriptor, "a", encoding="utf-8")
             if self.validation_descriptor is not None:
                 os.close(self.validation_descriptor)
                 self.validation_descriptor = None
+            self.descriptor = descriptor
         except BaseException:
             os.close(descriptor)
             raise
 
     def write(self, name: str) -> None:
-        if self.stream is None:
+        if self.descriptor is None:
             self._open()
-        if os.fstat(self.stream.fileno()).st_nlink > 1:
+        if os.fstat(self.descriptor).st_nlink > 1:
             raise Blocked("The trace file acquired another hard link")
-        self.stream.write(name + "\n")
-        self.stream.flush()
+        data = (name + "\n").encode("utf-8")
+        if os.write(self.descriptor, data) != len(data):
+            raise OSError(errno.EIO, "Incomplete trace checkpoint write")
 
     def close(self) -> None:
-        if self.stream is not None:
-            self.stream.close()
-            self.stream = None
-        if self.validation_descriptor is not None:
-            os.close(self.validation_descriptor)
-            self.validation_descriptor = None
-        self.parent.close()
+        descriptor, self.descriptor = self.descriptor, None
+        validation, self.validation_descriptor = self.validation_descriptor, None
+        try:
+            if descriptor is not None:
+                os.close(descriptor)
+        finally:
+            try:
+                if validation is not None:
+                    os.close(validation)
+            finally:
+                self.parent.close()
 # Journal and receipt paths are data until they match the locations this installer generates.
 TRANSACTION_NAME = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\Z")
 ROLLBACK_NAME = re.compile(r"rollback-[0-9a-f]{8}\Z")
@@ -3430,18 +3436,26 @@ def main(argv=None) -> int:
     options = parser().parse_args(argv)
     handlers = {"verify-package": command_verify, "plan": command_plan, "apply": command_apply,
                 "rollback": command_rollback, "recover": command_recover}
+    report = None
     try:
         result = handlers[options.command](options)
     except Failure as error:
-        print(json.dumps({"error": str(error), "exit": error.code, "details": error.details, **hook_report()}, indent=2), file=sys.stderr)
-        return error.code
+        report = {"error": str(error), "exit": error.code, "details": error.details}
     except OSError as error:
-        print(json.dumps({"error": f"Unexpected filesystem error: {error}", "exit": 3, **hook_report()}, indent=2), file=sys.stderr)
-        return 3
+        report = {"error": f"Unexpected filesystem error: {error}", "exit": 3}
     finally:
-        if _TRACE is not None:
-            _TRACE.close()
-            _TRACE = None
+        trace, _TRACE = _TRACE, None
+        if trace is not None:
+            try:
+                trace.close()
+            except OSError as error:
+                if report is None:
+                    report = {"error": f"Trace cleanup failed: {error}", "exit": 3}
+                else:
+                    report["trace_cleanup_error"] = str(error)
+    if report is not None:
+        print(json.dumps({**report, **hook_report()}, indent=2), file=sys.stderr)
+        return report["exit"]
     # ASCII output: a legacy console encoding cannot fail on a non-ASCII home path.
     print(json.dumps({**result, **hook_report()}, indent=2))
     return 0

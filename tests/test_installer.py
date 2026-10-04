@@ -4428,6 +4428,68 @@ sys.exit(installer.main(sys.argv[4:]))
         self.assertEqual(snapshot(self.target), before)
         self.assertFalse((self.state() / "CURRENT").exists())
 
+    @unittest.skipIf(os.name == "nt", "POSIX FIFO reader disconnect")
+    def test_trace_fifo_disconnect_reports_one_incomplete_json_and_recovers(self):
+        before = self.v52_layout()
+        plan = self.plan()
+        pipe = self.base / "trace-disconnect.fifo"
+        os.mkfifo(pipe)
+        reader = [os.open(pipe, os.O_RDONLY | os.O_NONBLOCK)]
+
+        def disconnect():
+            os.close(reader.pop())
+
+        try:
+            result = self.invoke_at_checkpoint(
+                ["apply", "--plan", plan, "--checksums", self.checksums, "--maintenance-confirmed"],
+                "apply:staged", disconnect, env={"DEV_HARNESS_INSTALL_TEST_TRACE": str(pipe)})
+        finally:
+            if reader:
+                os.close(reader.pop())
+        self.assert_refused(result, 3)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("Broken pipe", json.loads(result.stderr)["error"])
+        current = self.state() / "CURRENT"
+        self.assertTrue(current.is_file())
+        journal = self.state() / current.read_text(encoding="utf-8").strip()
+        self.assertTrue(journal.is_file())
+        transaction = journal.parent
+        self.assertEqual(snapshot(transaction / "backup" / "github-workflow"), before)
+        self.assertTrue((transaction / "staged" / "github-workflow").is_dir())
+        self.assertFalse((transaction / "receipt.json").exists())
+        self.assertEqual(snapshot(self.target), before)
+
+        recovered = self.run_installer("recover", "--plan", plan, "--maintenance-confirmed")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(json.loads(recovered.stdout)["result"], "restored")
+        self.assertFalse(current.exists())
+        self.assertEqual(snapshot(self.target), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX FIFO reader disconnect")
+    def test_trace_fifo_failed_write_closes_its_bound_parent(self):
+        spec = importlib.util.spec_from_file_location("fifo_trace_installer", self.installer)
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(module)
+        pipe = self.base / "trace-parent-disconnect.fifo"
+        os.mkfifo(pipe)
+        reader = os.open(pipe, os.O_RDONLY | os.O_NONBLOCK)
+        binding = module.TraceBinding(pipe)
+        try:
+            binding.write("apply:staged")
+            self.assertEqual(os.read(reader, 4096), b"apply:staged\n")
+            os.close(reader)
+            reader = None
+            with self.assertRaises(BrokenPipeError):
+                binding.write("apply:prepared")
+        finally:
+            if reader is not None:
+                os.close(reader)
+            binding.close()
+        self.assertIsNone(binding.parent.fd)
+        self.assertIsNone(binding.descriptor)
+
     def test_plan_keeps_an_unused_trace_location_read_only(self):
         self.v52_layout()
         before = snapshot(self.home)
