@@ -249,6 +249,13 @@ GH_OPTIONS = {
 }
 CONTROL = {";", ";;", ";&", ";;&", "&&", "||", "|", "|&", "&", "(", ")"}
 ORIGIN_REPO = re.compile(r"\$(?:workflow_host|\{workflow_host\})/\$(?:workflow_repo|\{workflow_repo\})\Z")
+PUSH_BRANCH_REFSPEC = "HEAD:refs/heads/$workflow_branch"
+PUSH_BRANCH_SOURCE = 'HEAD:refs/heads/"$workflow_branch"'
+PUSH_DELETE_ARGS = (
+    "--force-with-lease=refs/heads/<branch>:<headRefOid>",
+    "origin",
+    ":refs/heads/<branch>",
+)
 PY_SWITCHES = {"-B", "-u", "-I", "-E", "-s", "-S", "-O", "-OO", "-b", "-bb", "-q", "-v", "-x", "-P", "-i", "-R", "-d", "-t"}
 PY_VALUE_SWITCHES = {"-W", "-X"}
 PROBE = "if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; assert sys.version_info >= (3,8)' 2>/dev/null; then"
@@ -415,11 +422,11 @@ def _shell_boundaries(command):
     return ShellBoundaries(command, has_here_operator, escaped, "")
 
 
-def _tokens(command):
+def _tokens(command, *, posix=True):
     boundaries = _shell_boundaries(command)
     if boundaries.error:
         raise ValueError(boundaries.error)
-    lexer = shlex.shlex(boundaries.visible, posix=True, punctuation_chars=";&|()")
+    lexer = shlex.shlex(boundaries.visible, posix=posix, punctuation_chars=";&|()")
     lexer.whitespace_split = True
     lexer.commenters = ""
     raw = []
@@ -673,6 +680,43 @@ def _direct_python(tail, *, windows_launcher=False):
     return True, False
 
 
+def _expanding_push_refspec(command, words, refspec_index):
+    """Require the documented double-quoted expansion, not literal $ text."""
+    try:
+        source_words = _tokens(command, posix=False)
+    except ValueError:
+        return False
+    # Non-POSIX shlex preserves quote/escape spelling. If it cannot align with
+    # the executable token stream, the bounded push recipe is unverified.
+    return (
+        len(source_words) == len(words)
+        and source_words[:refspec_index] == words[:refspec_index]
+        and source_words[refspec_index] == PUSH_BRANCH_SOURCE
+        and source_words[refspec_index + 1:] == words[refspec_index + 1:]
+    )
+
+
+def _git_push(tail, file, line, command, words, index):
+    """Check the documented push recipes, without inferring Git configuration."""
+    args, incomplete = _without_redirections(tail)
+    if not args or args[0] != "push":
+        if "push" in args:
+            return [Diagnostic(file, line, "unsupported git options before push; use the documented explicit-origin command")]
+        return []
+    if incomplete:
+        return [Diagnostic(file, line, "incomplete shell redirection in git push command")]
+    operands = tuple(args[1:])
+    if operands == PUSH_DELETE_ARGS:
+        return []
+    for recipe in (("-u", "origin", PUSH_BRANCH_REFSPEC), ("origin", PUSH_BRANCH_REFSPEC)):
+        if operands == recipe:
+            refspec_index = index + len(recipe) + 1
+            if tuple(tail) == ("push", *recipe) and _expanding_push_refspec(command, words, refspec_index):
+                return []
+            return [Diagnostic(file, line, "git push branch refspec must use the expanding documented double-quoted variable")]
+    return [Diagnostic(file, line, "git push needs explicit origin and one intended branch refspec, or the guarded deletion recipe")]
+
+
 def _analyze(command, file, line, *, inline=False, probe=False, origin_comparison=False, project_python=False):
     # Bare executable names in prose are references, like gh family shorthand.
     # Their standalone shell-fence/command-line form is executable and checked.
@@ -685,7 +729,7 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
 
     findings = []
     for index, word in enumerate(words):
-        if word not in {"gh", "python3", "python", "py", "coproc"}:
+        if word not in {"gh", "git", "python3", "python", "py", "coproc"}:
             continue
         executable, prefix_error = _command_start(words, index)
         if prefix_error:
@@ -696,6 +740,9 @@ def _analyze(command, file, line, *, inline=False, probe=False, origin_compariso
             findings.append(Diagnostic(file, line, "unsupported coprocess execution; use an explicit foreground command"))
             continue
         tail = _arguments(words, index + 1)
+        if word == "git":
+            findings.extend(_git_push(tail, file, line, command, words, index))
+            continue
         if word != "gh":
             direct, unsupported = _direct_python(tail, windows_launcher=word == "py")
             if direct and not (probe or project_python):
@@ -886,7 +933,7 @@ def scan_document(file, text):
                 origin_comparison=_origin_comparison(file, heading, source, snippet),
                 project_python=project_python,
             ))
-        if re.match(r"^\s*(?:gh|python3|python|py)(?:\s|$)", source):
+        if re.match(r"^\s*(?:gh|git|python3|python|py)(?:\s|$)", source):
             findings.extend(_analyze(source, file, number))
     if pending_line:
         findings.extend(_analyze(pending, file, pending_line))

@@ -2,7 +2,7 @@
 
 Shared templates have one active owner across issues, PRs, branches and runtimes. Coordinate claims, comment proposals and explicit handoffs/releases in [#15](https://github.com/0xNatoshi/agentic-dev-harness/issues/15). Read its claim before edits; inactivity releases nothing. CONTRIBUTING.md defines the family and procedure.
 
-<!-- github-workflow:start v6.5 — managed block from the github-workflow skill; preserve local safeguards and explicit approval requirements on update -->
+<!-- github-workflow:start v6.6 — managed block from the github-workflow skill; preserve local safeguards and explicit approval requirements on update -->
 
 Instructions for agents and humans: understand contracts, deliver verified increments, and own the outcome through authorized delivery.
 
@@ -93,7 +93,7 @@ Interruption allows owned-branch `chore(wip): ...` with hooks green, pushed and 
 
 ### 3. Push and synchronize
 
-Push each verified owned/entrusted commit: `git push -u origin HEAD`, then `git push`; draft at first push. Before PR/when default moves: `git fetch origin && git merge origin/main`. Never rebase pushed branches. Resolve conflicts manually, no `-X ours/theirs`/overwriting others; preserve both tracking entries. Take default's lockfile and regenerate with configured manager/version against merged manifests; verify frozen install/diff, never hand-edit. Rerun gates; if uncertain abort and resolve the concrete decision. Lease force-push only your working branch, never default.
+Immediately before each push, recheck origin, capture `workflow_branch=$(git branch --show-current)` and validate its nonempty name with `git check-ref-format "refs/heads/$workflow_branch"`. Verify it matches the entrusted issue/PR head and is not the default/protected branch. Push each verified commit with `git push -u origin HEAD:refs/heads/"$workflow_branch"`, then `git push origin HEAD:refs/heads/"$workflow_branch"`; draft at first push. Before PR/when default moves: `git fetch origin && git merge origin/main`. Never rebase pushed branches. Resolve conflicts manually, no `-X ours/theirs`/overwriting others; preserve both tracking entries. Take default's lockfile and regenerate with configured manager/version against merged manifests; verify frozen install/diff, never hand-edit. Rerun gates; if uncertain abort and resolve the concrete decision. Lease force-push only your working branch, never default.
 
 ### 4. Pull request, review and integration
 
@@ -114,7 +114,7 @@ Self-review full `git diff origin/main...HEAD`: scope/contracts/secrets/obsolete
 - Ordinary behavior: one fresh-context reviewer.
 - High stakes/large/difficult behavior (security/data/autonomy/CI/hooks/gates): multiple passes plus fresh skeptic, no quota. Executable Markdown rules are behavior. Initial reviewers get request/rules/diff without author rationale/other conclusions; skeptic gets final diff/findings/fixes/validation. Recheck significant deltas. Research follows this scale; explain multiple-agent review. Parent validates final combined state.
 
-After pushes/before merge, read human/agent/bot feedback (including `chatgpt-codex-connector[bot]`), inline threads, PR comments and relevant issues. Wait for requested/known running reviews; silence is not completion. Verify findings and leave fixes/evidence-backed dispositions visible before resolving; recheck significant changes. Only nonblocking unrelated findings move to issues. Status notices need no ritual reply; bots do not replace independent review/tests or widen authorization/ownership.
+All required self/independent/skeptical/delta reviews run locally. Cloud review requires an explicit user request; automatic/historical triggers, missing responses and quota/status notices add no gate. After pushes/before merge, read actual human/agent/bot feedback, inline threads, PR comments and relevant issues. Wait for requested or known running local/human reviews and explicitly requested Cloud reviews; verify material findings and record fixes or evidence-backed dispositions before resolving. Blockers and enforced server checks/approvals remain binding. Status notices need no ritual reply; bots replace neither local reviews nor tests and comments widen neither scope nor ownership.
 
 #### CI and readiness
 
@@ -128,7 +128,7 @@ Merge without another approval only when all hold:
 
 1. This session owns the PR or the user explicitly entrusted it.
 2. Ready, `MERGEABLE`, current with remote default, correctly titled, CI/authorized local gate passed on exact final head.
-3. Acceptance/risk/project proof, rollback and self/independent review complete; no change requests, pending reviews, unanswered comments or unresolved inline threads. Complete API/JSON/pagination reads required; partial/empty/error output proves no absence.
+3. Acceptance/risk/project proof, rollback and self/independent review complete; no change requests, pending required local/human or explicitly requested Cloud reviews, unanswered material comments or unresolved inline threads. Complete API/JSON/pagination reads required; partial/empty/error output proves no absence.
 4. Simple revert suffices: no data/schema migration, merge-triggered publication/release/deployment (including Vercel/Netlify/Pages), secret, permission or setting. Resolve uncertain impact first.
 5. No product/budget/scope choice, missing authorization or flaky-test deletion/quarantine decision remains. Technical decisions stay delegated.
 6. Instructions/explicit waits permit it. Reread/quote any claimed approval rule against current specific authorization; older generic go rules do not revoke it. Missing markers do not authorize.

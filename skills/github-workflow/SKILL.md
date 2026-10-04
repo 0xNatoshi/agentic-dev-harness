@@ -168,7 +168,7 @@ Claude Code loads CLAUDE.md/imports; native AGENTS.md support depends on version
 For hooks measured above two minutes add:
 
 ```markdown
-- Git hooks take ~<duration>: run `git commit` / `git push` with a Bash timeout of 600000 ms (or in the background). A timeout is not a hook failure: wait for the result, never re-run with `--no-verify`.
+- Git hooks take ~<duration>: run commit / push commands with a Bash timeout of 600000 ms (or in the background). A timeout is not a hook failure: wait for the result, never re-run with `--no-verify`.
 ```
 
 This timeout advice is Claude-specific. Codex uses its own tool limits and a Known pitfalls entry. For existing CLAUDE.md add the import without removing content; removing duplicated authored rules requires applicable user authorization.
@@ -178,6 +178,8 @@ This timeout advice is Claude-specific. Codex uses its own tool limits and a Kno
 Apply the [README/About guide](references/readme-guide.md) using real project commands/examples, without global personal instructions or machine paths. Apply [license policy](references/adoption-and-licenses.md#licenses) with the MIT, proprietary or PolyForm templates after visibility/type/provenance checks. New repositories include the license in their first commit; existing unlicensed repositories use a separate PR after the current task. Existing license/visibility changes remain user decisions and public grants retain their specific authorization.
 
 ### 5. GitHub Actions CI
+
+Pin every non-local executable action to a verified full upstream commit SHA with a readable version comment. Setup examples: `actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5` or `actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6`. Verify upstream provenance when updating these pins. Every checkout step must set its own `persist-credentials: false` before contributor-controlled commands; preserve least privilege (`contents: read`). Any later authenticated Git belongs in a separately authorized trusted flow.
 
 If no workflow runs lint/tests on pull_request and local-gate mode does not apply, adapt [ci.yml](templates/ci.yml) to the real stack: replace SETUP_STEP with the appropriate setup action, use the project's runtime version/cache, and install from the lockfile (`npm ci`, pnpm frozen-lockfile, yarn immutable, uv locked). Preserve existing CI and report missing lint/PR/default-branch push triggers; the latter matters for post-merge verification.
 
@@ -214,12 +216,18 @@ At init/update inspect effective default-branch protection and availability for 
 
 For an explicitly requested new repository without history, validate project files/license and proportionate review/gate before the bootstrap commit. Publish only within existing authorization, then verify remote SHA and initial validation. Do not create a PR comparing the default branch to itself or pretend a distinct base exists. Preserve evidence and close temporary resources; later changes use PRs.
 
-For existing repositories, deliver the adoption branch below; license work has its own PR:
+For existing repositories, deliver the adoption branch below; license work has its own PR. Immediately before this recipe, repeat start’s current ownership and default/protected-branch checks. Set `workflow_expected_branch` to the branch in the verified claim or entrusted PR, independently of the current checkout; preserve the already verified origin host/repository. Missing claim or protection evidence blocks the recipe:
 
 ```bash
 git add <reviewed-files>
 git commit -m "chore: formalise the git/github workflow and CI (AGENTS.md, CLAUDE.md, README)"
-git push -u origin HEAD
+workflow_origin=$(bash <skill-dir>/scripts/merge-preflight.sh origin "$workflow_repo") || exit 2
+IFS="$(printf '\t')" read -r workflow_observed_host workflow_observed_repo workflow_default <<< "$workflow_origin"
+[ "$workflow_observed_host/$workflow_observed_repo" = "$workflow_host/$workflow_repo" ] || exit 2
+workflow_branch=$(git branch --show-current) || exit 2
+[ -n "${workflow_expected_branch:-}" ] && [ "$workflow_branch" = "$workflow_expected_branch" ] && [ "$workflow_branch" != "$workflow_default" ] || exit 2
+git check-ref-format "refs/heads/$workflow_branch" || exit 2
+git push -u origin HEAD:refs/heads/"$workflow_branch"
 workflow_pr=$(gh pr create --repo "$workflow_host/$workflow_repo" --draft --base "$workflow_default" --title "chore: formalise the git/github workflow" --body-file <file>) || exit 2
 export workflow_pr
 ```
@@ -236,11 +244,11 @@ Use chore/agent-workflow-update and the same PR delivery. The policy applicable 
 4. Run the init placeholder check, covering README.md, LICENSE*, .yml/.yaml and absent CI, distinguishing exit 1 from errors.
 5. Show the diff and summarize added/modified rules.
 
-**Development package v6.5.0; active repository template v6.5.** The shared profiles/skill include initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance. The compact template preserves delivery gates and local rules, defines the suspension inputs, and uses this skill's explicit PR selector and required lifecycle procedures. Verify the matching skill is actually loaded before dependent actions. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement. Source updates alone do not establish release or destination readiness.
+**Development package v6.5.0; active repository template v6.6.** The shared profiles/skill include initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance. The compact template preserves delivery gates and local rules, defines the suspension inputs, and uses this skill's explicit PR selector and required lifecycle procedures. Verify the matching skill is actually loaded before dependent actions. Deliver a missing/older project-block update through its separate PR after the current task. Older versions migrate using authentic history/cmp and preserved local rules, not blind replacement. Source updates alone do not establish release or destination readiness.
 
 ## What's new
 
-- **v6.5.0 / template v6.5 (development)**: compact project instructions, explicit PR/repository targeting, defined suspension inputs, one owner per template family and required skill procedures. Preserve the preceding initiative, written collaboration, review convergence, verified agent attribution, observed model/provider provenance, reporting and authorization safeguards; compare real loading and historical customizations before delivery.
+- **v6.5.0 / template v6.6 (development)**: compact project instructions, explicit PR/repository targeting, explicit branch push refspecs, immutable CI pins, disabled checkout credential persistence, standing local reviews, defined suspension inputs, one owner per template family and required skill procedures. Preserve the preceding initiative, written collaboration, review convergence, verified agent attribution, observed model/provider provenance, reporting and authorization safeguards; compare real loading and historical customizations before delivery.
 - **v6.4.0**: versioned source repository, neutral profile source, reproducible packages, portable regression checks and issue/PR handoff guidance. Runtime guards and the active repository template retain their behavior.
 - **v6.3.1**: English personal instructions, skill, references and distribution files; README.md and English installer names. Runtime guards, licenses, role files and authentic template history retain their bytes. French remains the conversation language; historical aliases/test inputs remain exact data.
 - **v6.3**: origin binding, detached rebase/bisect guards, Unicode/published holds, inherited reporting preferences, qualified Claude installation/status, public-license authorization, historical word comparisons and lockfile synchronization.
@@ -277,7 +285,7 @@ An increment is coherent and verified: working feature slice, fixed bug, complet
 1. Relevant lint/tests pass using project commands.
 2. Stage reviewed files; inspect status/staged diff and exclude secrets/.env/artifacts. Blind git add -A is inappropriate.
 3. Use a Conventional Commit, for example `fix(scope): summary`, adding an issue reference when present.
-4. Push, using `git push -u origin HEAD` initially.
+4. Immediately before every push, repeat origin preflight and capture `workflow_branch=$(git branch --show-current)`; require a nonempty, valid ref name matching the entrusted issue/PR head and reject the default/protected branch. Use `git push -u origin HEAD:refs/heads/"$workflow_branch"` initially, then `git push origin HEAD:refs/heads/"$workflow_branch"`. An explicit refspec avoids ambient push selection and refspec configuration.
 
 Keep hooks/tests/CI intact; diagnose and fix failures or state the blocker. Bypassing checks is not an execution path.
 

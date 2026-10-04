@@ -139,6 +139,183 @@ class WorkflowCommandTests(unittest.TestCase):
             })
             self.assertEqual(check_repository(root), [])
 
+    def test_git_push_guard_covers_active_guidance_and_preserves_data(self):
+        bad = "git push"
+        for name in ("AGENTS.md", "skills/github-workflow/templates/AGENTS.md",
+                     "skills/github-workflow/SKILL.md", "skills/github-workflow/references/example.md"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(prefix="workflow-push-scope-") as directory:
+                root = self.root(directory)
+                target = root / name
+                original = target.read_text(encoding="utf-8") if target.exists() else ""
+                target.write_text(original + f"\nUse `{bad}`.\n```bash\n{bad}\n```\n", encoding="utf-8")
+                findings = [item for item in check_repository(root) if item.file == name]
+                self.assertEqual(len(findings), 2, [str(item) for item in findings])
+                self.assertTrue(all("git push needs explicit origin" in item.message for item in findings))
+
+        with tempfile.TemporaryDirectory(prefix="workflow-push-data-") as directory:
+            root = self.root(directory, references={
+                "example.md": "```text\ngit push\n```\n```bash\nprintf '%s\\n' 'git push'\ncat <<'EOF'\ngit push\nEOF\n```\n",
+            })
+            history = root / "skills/github-workflow/templates/history"
+            history.mkdir(parents=True)
+            (history / "AGENTS-v1.md").write_text("```bash\ngit push\n```\n", encoding="utf-8")
+            self.assertEqual(check_repository(root), [])
+
+    def test_git_push_requires_origin_and_the_intended_single_refspec(self):
+        valid = (
+            'git push -u origin HEAD:refs/heads/"$workflow_branch"',
+            'git push origin HEAD:refs/heads/"$workflow_branch"',
+            'git push --force-with-lease=refs/heads/<branch>:<headRefOid> origin :refs/heads/<branch>',
+        )
+        invalid = (
+            "git push",
+            "git push -u",
+            "git push origin",
+            "git push -u origin HEAD",
+            "git push origin HEAD",
+            'git push upstream HEAD:refs/heads/"$workflow_branch"',
+            'git push HEAD:refs/heads/"$workflow_branch"',
+            "git push origin HEAD:refs/heads/main",
+            'git push origin HEAD:refs/heads/"$workflow_default"',
+            'git push origin main:refs/heads/"$workflow_branch"',
+            'git push origin HEAD:refs/heads/"$workflow_branch" HEAD:refs/heads/other',
+            "git push origin --all",
+            "git push --mirror origin",
+            "git push --force origin HEAD:refs/heads/$workflow_branch",
+            "git push origin :refs/heads/<branch>",
+            "git push --force-with-lease=refs/heads/<branch>:<headRefOid> upstream :refs/heads/<branch>",
+            "git push --force-with-lease=refs/heads/<branch>:<headRefOid> origin :refs/heads/other",
+        )
+        with tempfile.TemporaryDirectory(prefix="workflow-push-contract-") as directory:
+            root = self.root(directory)
+            target = root / "skills/github-workflow/references/example.md"
+            for command in valid:
+                with self.subTest(valid=command):
+                    target.write_text(f"```bash\n{command}\n```\n", encoding="utf-8")
+                    self.assertEqual(check_repository(root), [])
+            for command in invalid:
+                with self.subTest(invalid=command):
+                    target.write_text(f"```bash\n{command}\n```\n", encoding="utf-8")
+                    findings = check_repository(root)
+                    self.assertTrue(any(item.file.endswith("example.md") and item.line == 2 and
+                                        "git push needs explicit origin" in item.message for item in findings),
+                                    [str(item) for item in findings])
+
+    def test_git_push_branch_refspec_requires_live_double_quoted_expansion(self):
+        accepted = (
+            'git push -u origin HEAD:refs/heads/"$workflow_branch"',
+            'env git push origin HEAD:refs/heads/"$workflow_branch"',
+            'if true; then git push origin HEAD:refs/heads/"$workflow_branch"; fi',
+        )
+        literal_or_wrong_expansion = (
+            ("git push origin 'HEAD:refs/heads/$workflow_branch'", "expanding documented double-quoted variable"),
+            ("git push -u origin HEAD:refs/heads/'$workflow_branch'", "expanding documented double-quoted variable"),
+            ("git push origin HEAD:refs/heads/'$workflow_branch'", "expanding documented double-quoted variable"),
+            (r"git push origin HEAD:refs/heads/\$workflow_branch", "expanding documented double-quoted variable"),
+            (r'git push origin HEAD:refs/heads/"\$workflow_branch"', "git push needs explicit origin"),
+            ("git push origin HEAD:refs/heads/'$workflow'_branch", "expanding documented double-quoted variable"),
+            ('git push origin HEAD:refs/heads/"$workflow"_branch', "expanding documented double-quoted variable"),
+            ('git push origin HEAD:refs/heads/$workflow_branch', "expanding documented double-quoted variable"),
+            ("git push origin HEAD:refs/heads/'$workflow_branch' # HEAD:refs/heads/\"$workflow_branch\"",
+             "expanding documented double-quoted variable"),
+            ("printf '%s\\n' 'HEAD:refs/heads/\"$workflow_branch\"'; git push origin HEAD:refs/heads/'$workflow_branch'",
+             "expanding documented double-quoted variable"),
+        )
+        with tempfile.TemporaryDirectory(prefix="workflow-push-expansion-") as directory:
+            root = self.root(directory)
+            target = root / "skills/github-workflow/references/example.md"
+            for command in accepted:
+                with self.subTest(accepted=command):
+                    target.write_text(f"```bash\n{command}\n```\n", encoding="utf-8")
+                    self.assertEqual(check_repository(root), [])
+            for command, expected in literal_or_wrong_expansion:
+                with self.subTest(rejected=command):
+                    target.write_text(f"```bash\n{command}\n```\n", encoding="utf-8")
+                    findings = check_repository(root)
+                    self.assertTrue(any(item.file.endswith("example.md") and item.line == 2 and
+                                        expected in item.message
+                                        for item in findings), [str(item) for item in findings])
+
+    def test_git_push_guard_follows_execution_boundaries(self):
+        with tempfile.TemporaryDirectory(prefix="workflow-push-boundaries-") as directory:
+            root = self.root(directory)
+            target = root / "skills/github-workflow/references/example.md"
+            cases = (
+                ("env git push", "git push needs explicit origin"),
+                ("echo $(git push)", "git push needs explicit origin"),
+                ("git -c push.default=current push", "unsupported git options before push"),
+                ("git push origin HEAD:refs/heads/$workflow_branch && git push", "git push needs explicit origin"),
+            )
+            for command, expected in cases:
+                with self.subTest(command=command):
+                    target.write_text(f"```bash\n{command}\n```\n", encoding="utf-8")
+                    self.assertTrue(any(expected in item.message for item in check_repository(root)))
+            target.write_text("```bash\nprintf '%s\\n' git push\n```\n", encoding="utf-8")
+            self.assertEqual(check_repository(root), [])
+
+    def test_explicit_git_push_ignores_ambient_destinations_and_refspecs(self):
+        branch = "fix/82-push-guard"
+        with tempfile.TemporaryDirectory(prefix="workflow-push-remotes-") as directory:
+            root = Path(directory)
+            work = root / "work"
+            origin = root / "origin.git"
+            alternate = root / "alternate.git"
+            template = root / "empty-template"
+            template.mkdir()
+            environment = os.environ.copy()
+            environment.update({
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": str(root / "empty-global-config"),
+                "GIT_CONFIG_COUNT": "0",
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_TEMPLATE_DIR": str(template),
+                "GIT_AUTHOR_NAME": "Fixture User",
+                "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                "GIT_COMMITTER_NAME": "Fixture User",
+                "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+                "workflow_branch": branch,
+            })
+
+            def git(*arguments, cwd=work):
+                return subprocess.run(["git", *arguments], cwd=cwd, env=environment,
+                                      capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+
+            git("init", "--bare", str(origin), cwd=root)
+            git("init", "--bare", str(alternate), cwd=root)
+            git("init", "-b", branch, str(work), cwd=root)
+            git("remote", "add", "origin", str(origin))
+            git("remote", "add", "alternate", str(alternate))
+            (work / "fixture.txt").write_text("first\n", encoding="utf-8")
+            git("add", "fixture.txt")
+            git("commit", "-m", "fixture: first")
+            git("branch", "other")
+            git("config", f"branch.{branch}.pushRemote", "alternate")
+            git("config", "remote.pushDefault", "alternate")
+            git("config", "remote.origin.push", "refs/heads/other:refs/heads/unintended")
+            git("config", "push.default", "matching")
+            self.assertEqual(git("config", "--get", f"branch.{branch}.pushRemote"), "alternate")
+            self.assertEqual(git("config", "--get", "remote.pushDefault"), "alternate")
+            self.assertEqual(git("config", "--get", "remote.origin.push"),
+                             "refs/heads/other:refs/heads/unintended")
+
+            for command, content in (
+                ('git push -u origin HEAD:refs/heads/"$workflow_branch"', "first\n"),
+                ('git push origin HEAD:refs/heads/"$workflow_branch"', "second\n"),
+            ):
+                with self.subTest(command=command):
+                    (work / "fixture.txt").write_text(content, encoding="utf-8")
+                    git("add", "fixture.txt")
+                    if content == "second\n":
+                        git("commit", "-m", "fixture: second")
+                    result = subprocess.run([bash(), "--noprofile", "--norc", "-c", command], cwd=work,
+                                            env=environment, capture_output=True, text=True, encoding="utf-8", check=False)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(git("rev-parse", "HEAD"),
+                                     git("rev-parse", f"refs/heads/{branch}", cwd=origin))
+                    self.assertEqual(git("for-each-ref", "--format=%(refname)", "refs/heads", cwd=origin),
+                                     f"refs/heads/{branch}")
+                    self.assertEqual(git("for-each-ref", "--format=%(refname)", "refs/heads", cwd=alternate), "")
+
     def test_each_banned_form_is_rejected_at_the_inserted_line(self):
         bad_examples = [
             ('gh pr view --repo "$workflow_host/$workflow_repo" --json body', "PR selector"),
