@@ -4,6 +4,7 @@
 
 Development version: 6.5.0. These are unreleased source changes; existing release tags and assets remain immutable (next package-version delivery is tracked in #63).
 
+- Bind duplicate retirement/restoration and test trace writes to physical directories and file handles (#88, #89). Retain original parent identities across recovery, preserve supported secondary-root aliases and POSIX FIFO staging pauses, and verify native Windows junction/handle behavior in CI.
 - Bind recovery selectors, journals, receipts and duplicate moves to the selected install state and generated transaction paths (#83). Reject malformed or linked transaction metadata before rollback or recovery changes state, write the staged apply journal before its crash checkpoint, and retain `CURRENT` when a journal is missing so the operator can inspect uncertain recovery data.
 - Authenticate captured package ZIP bytes before any bundled code or Python discovery in both Windows installation guides. Create a fresh verified workspace, retain archive-member checks before full extraction, isolate Python startup, and exercise substituted packages and Windows PowerShell in the guide regression gate (#81).
 

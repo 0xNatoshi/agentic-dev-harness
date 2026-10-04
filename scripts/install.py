@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import errno
 import hashlib
 import io
@@ -60,6 +60,8 @@ TEST_FAULT = "DEV_HARNESS_INSTALL_TEST_FAULT"
 TEST_CRASH = "DEV_HARNESS_INSTALL_TEST_CRASH"
 TEST_TRACE = "DEV_HARNESS_INSTALL_TEST_TRACE"
 TEST_PROCESSES = "DEV_HARNESS_INSTALL_TEST_PROCESSES"
+_TRACE = None
+_UNBOUND_DIRECTORY = object()
 REPARSE_POINT = 0x400
 # IO_REPARSE_TAG_SYMLINK and IO_REPARSE_TAG_MOUNT_POINT (junctions). Other reparse points, such as
 # cloud placeholders, hold their own content.
@@ -154,8 +156,9 @@ def contains(parent: str, child: str) -> bool:
         return False
 
 
-def require_test_home(locations: "Locations") -> None:
+def require_test_home(locations: "Locations", checkpoints: bool = True) -> None:
     """Honour test hooks only when every location the command can touch is under the temporary directory."""
+    global _TRACE
     hooks = active_test_hooks()
     if not hooks:
         return
@@ -167,18 +170,20 @@ def require_test_home(locations: "Locations") -> None:
     if outside:
         raise Blocked("Installer test hooks are set outside a temporary test home; unset them",
                       {"hooks": sorted(hooks), "outside": outside})
+    if hooks.get(TEST_TRACE) and checkpoints:
+        if _TRACE is not None:
+            _TRACE.close()
+        _TRACE = TraceBinding(Path(os.path.abspath(hooks[TEST_TRACE])))
 
 
 def checkpoint(name: str) -> None:
-    trace = os.environ.get(TEST_TRACE)
-    if trace:
-        with open(trace, "a", encoding="utf-8") as stream:
-            stream.write(name + "\n")
+    if _TRACE is not None:
+        _TRACE.write(name)
     if os.environ.get(TEST_CRASH) == name:
         os._exit(70)
 
 
-def rename(source: Path, destination: Path, point: str) -> None:
+def rename(source: Path, destination: Path, point: str, source_parent=None, destination_parent=None) -> None:
     # DEV_HARNESS_INSTALL_TEST_FAULT: comma-separated points such as `apply:activate:permission`.
     for fault in filter(None, os.environ.get(TEST_FAULT, "").split(",")):
         permission = fault.endswith(":permission")
@@ -186,9 +191,25 @@ def rename(source: Path, destination: Path, point: str) -> None:
             if permission:
                 raise PermissionError(13, "The process cannot access the file because it is being used by another process", str(source))
             raise OSError(5, "Injected rename failure", str(source))
-    os.rename(source, destination)
-    sync_directory(source.parent)
-    sync_directory(destination.parent)
+    if source_parent is not None or destination_parent is not None:
+        if os.name == "nt":
+            source = source_parent.path / source.name if source_parent else source
+            destination = destination_parent.path / destination.name if destination_parent else destination
+            os.rename(source, destination)
+        else:
+            os.rename(source.name if source_parent else source, destination.name if destination_parent else destination,
+                      src_dir_fd=source_parent.fd if source_parent else None,
+                      dst_dir_fd=destination_parent.fd if destination_parent else None)
+            for parent in (source_parent, destination_parent):
+                if parent is not None:
+                    try:
+                        os.fsync(parent.fd)
+                    except OSError:
+                        pass  # As with sync_directory, some filesystems do not support directory fsync.
+    else:
+        os.rename(source, destination)
+        sync_directory(source.parent)
+        sync_directory(destination.parent)
     # A crash here models a kill after the rename and before the journal records it.
     checkpoint(point + ":done")
 
@@ -1361,6 +1382,11 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
     locations.require_movable(moves=[move for path in duplicates for move in (
         (Path(path).parent, f"so the duplicate {path} cannot be moved out of it"),
         (Path(path), "so this duplicate cannot be moved to another directory"))])
+    duplicate_inventories, duplicate_physical = {}, {}
+    for path in duplicates:
+        with PhysicalDirectory(Path(path).parent, writable=False) as parent:
+            duplicate_inventories[path] = parent.inventory(Path(path).name)
+            duplicate_physical[path] = parent.describe()
     plan = {
         "plan_format": 1,
         "installer_version": INSTALLER_VERSION,
@@ -1379,7 +1405,8 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
                                       "rollback_command names a retained installer copy; use independently verified "
                                       "installer code for rollback."},
         "duplicates": duplicates,
-        "duplicate_inventories": {path: inventory(Path(path), "plan again") for path in duplicates},
+        "duplicate_inventories": duplicate_inventories,
+        "duplicate_physical": duplicate_physical,
         "legacy_commands": [str(path) for path in locations.legacy if exists(path)],
         "interrupted": str(locations.state / "CURRENT") if exists(locations.state / "CURRENT") else None,
     }
@@ -1387,7 +1414,7 @@ def make_plan(runtime: str, home: str | None, config: str | None, package_source
 
 
 DRIFT_KEYS = ("installer_version", "runtime", "home", "config_root", "target", "skill_roots", "state_root", "package", "retirement_list",
-              "before", "classification", "retirements", "retirement_copies", "duplicates", "duplicate_inventories")
+              "before", "classification", "retirements", "retirement_copies", "duplicates", "duplicate_inventories", "duplicate_physical")
 
 
 def drift(plan: dict, fresh: dict) -> list:
@@ -1524,6 +1551,331 @@ class Lock:
         self.stream.close()
 
 
+class PhysicalDirectory:
+    """An opened physical parent for duplicate moves, never a reusable alias pathname.
+
+    POSIX renames use dir_fd. Windows captures no-reparse relative handles and holds
+    no-delete-shared directories plus an auto-deleted guard child during mutations.
+    This blocks replacement and in-place junction conversion while the handles live.
+    Persisted identities prevent a later recovery from accepting a replacement directory.
+    """
+    def __init__(self, path: Path, expected=_UNBOUND_DIRECTORY, writable: bool = True) -> None:
+        self.fd = None
+        self.handles = []
+        resolved = os.path.realpath(str(path))
+        if expected is not _UNBOUND_DIRECTORY:
+            identity = expected.get("identity") if isinstance(expected, dict) else None
+            recorded = expected.get("path") if isinstance(expected, dict) else None
+            if (not isinstance(recorded, str) or not os.path.isabs(recorded)
+                    or not isinstance(identity, list) or len(identity) != 2
+                    or any(type(value) is not int or value < 0 for value in identity)):
+                raise Refused("Invalid physical duplicate-parent binding")
+            if os.path.normcase(resolved) != os.path.normcase(recorded):
+                raise Blocked(f"The duplicate parent {path} now resolves elsewhere; restore its recorded folder and retry")
+            resolved = recorded
+        self.path = Path(resolved)
+        try:
+            if os.name == "nt":
+                self._open_windows()
+                identity = self._windows_identity()
+            else:
+                flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                self.fd = os.open(self.path.anchor, flags)
+                for component in self.path.parts[1:]:
+                    next_fd = os.open(component, flags, dir_fd=self.fd)
+                    os.close(self.fd)
+                    self.fd = next_fd
+                status = os.fstat(self.fd)
+                identity = [status.st_dev, status.st_ino]
+            self.identity = identity
+            if not identity[1]:
+                raise Blocked(f"The filesystem does not expose a stable identity for {self.path}")
+            if expected is not _UNBOUND_DIRECTORY and self.identity != expected["identity"]:
+                raise Blocked(f"The duplicate parent {path} was replaced; restore its recorded folder and retry")
+            if os.name == "nt" and writable:
+                self._protect_windows()
+        except BaseException:
+            self.close()
+            raise
+
+    def _open_windows(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel.CloseHandle.restype = wintypes.BOOL
+        kernel.GetFileInformationByHandleEx.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+        kernel.GetFileInformationByHandleEx.restype = wintypes.BOOL
+        self.kernel = kernel
+
+        # RootDirectory-relative opens with OBJ_DONT_REPARSE avoid resolving any replaced
+        # pathname during capture and guard creation. Ordinary Win32 opens have no equivalent.
+        class UnicodeString(ctypes.Structure):
+            _fields_ = [("length", wintypes.USHORT), ("maximum", wintypes.USHORT), ("buffer", wintypes.LPWSTR)]
+
+        class ObjectAttributes(ctypes.Structure):
+            _fields_ = [("length", wintypes.ULONG), ("root", wintypes.HANDLE),
+                        ("name", ctypes.POINTER(UnicodeString)), ("attributes", wintypes.ULONG),
+                        ("security", wintypes.LPVOID), ("quality", wintypes.LPVOID)]
+
+        class StatusBlock(ctypes.Structure):
+            _fields_ = [("status", wintypes.LPVOID), ("information", ctypes.c_size_t)]
+
+        native = ctypes.WinDLL("ntdll")
+        native.NtCreateFile.argtypes = (ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG,
+                                       ctypes.POINTER(ObjectAttributes), ctypes.POINTER(StatusBlock),
+                                       wintypes.LPVOID, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG,
+                                       wintypes.ULONG, wintypes.LPVOID, wintypes.ULONG)
+        native.NtCreateFile.restype = wintypes.LONG
+        native.RtlNtStatusToDosError.argtypes = (wintypes.LONG,)
+        native.RtlNtStatusToDosError.restype = wintypes.ULONG
+
+        def open_relative(parent, name, access, disposition=1, options=1, sharing=3):
+            if not name or name in (".", "..") or any(part in name for part in ("/", "\\", ":")):
+                raise Blocked("A physical directory operation requires one ordinary filename")
+            buffer = ctypes.create_unicode_buffer(name)
+            size = len(name.encode("utf-16-le"))
+            counted = UnicodeString(size, size + 2, ctypes.cast(buffer, wintypes.LPWSTR))
+            attributes = ObjectAttributes(ctypes.sizeof(ObjectAttributes), parent, ctypes.pointer(counted),
+                                          0x40 | 0x1000, None, None)  # CASE_INSENSITIVE | DONT_REPARSE
+            status, handle = StatusBlock(), wintypes.HANDLE()
+            result = native.NtCreateFile(ctypes.byref(handle), access | 0x100000, ctypes.byref(attributes),
+                                         ctypes.byref(status), None, 0, sharing, disposition,
+                                         options | 0x20 | 0x200000, None, 0)
+            if result < 0:
+                raise ctypes.WinError(native.RtlNtStatusToDosError(result))
+            return handle.value
+
+        self.open_relative = open_relative
+        # Read/list access makes the no-delete sharing barrier effective. Allowing writes
+        # is necessary for ordinary child renames and transaction-journal replacement.
+        root = kernel.CreateFileW(self.path.anchor, 0x81, 3, None, 3, 0x02000000 | 0x00200000, None)
+        if root == wintypes.HANDLE(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.handles.append(root)
+        self._windows_directory(root)
+        for component in self.path.parts[1:]:
+            handle = open_relative(self.handles[-1], component, 0x81)
+            self.handles.append(handle)
+            self._windows_directory(handle)
+        self.directory_handle = self.handles[-1]
+
+    def _protect_windows(self) -> None:
+        # Windows permits converting an open *empty* directory into a junction. A
+        # no-delete-shared child makes the final parent nonempty until handles close;
+        # each ancestor likewise retains its opened direct child. NTFS rejects reparse
+        # conversion of nonempty directories. DELETE_ON_CLOSE also covers abrupt exit.
+        guard = self.open_relative(self.directory_handle, ".harness-guard-" + uuid.uuid4().hex,
+                                   0x10082, disposition=2, options=0x40 | 0x1000, sharing=1)
+        self.handles.append(guard)
+        self._windows_directory(self.directory_handle)
+
+    def _windows_attributes(self, handle) -> tuple:
+        import ctypes
+        from ctypes import wintypes
+
+        class Attributes(ctypes.Structure):
+            _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
+
+        attributes = Attributes()
+        if not self.kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return attributes.attributes, attributes.tag
+
+    def _windows_directory(self, handle) -> None:
+        attributes, tag = self._windows_attributes(handle)
+        # Every name-surrogate tag redirects a namespace lookup, including tags other
+        # than the ordinary symlink/junction tags that discovery already recognizes.
+        if not attributes & 0x10 or tag & 0x20000000:
+            raise Blocked("A canonical duplicate parent is not an ordinary physical directory")
+
+    def _windows_identity(self, handle=None) -> list:
+        import ctypes
+
+        class FileIdentity(ctypes.Structure):
+            _fields_ = [("volume", ctypes.c_ulonglong), ("identifier", ctypes.c_ubyte * 16)]
+
+        information = FileIdentity()
+        # FileIdInfo retains the full 128-bit identifier, including on ReFS where
+        # the older 64-bit BY_HANDLE_FILE_INFORMATION file index is not unique.
+        if not self.kernel.GetFileInformationByHandleEx(self.directory_handle if handle is None else handle,
+                                                       18, ctypes.byref(information),
+                                                       ctypes.sizeof(information)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return [information.volume, int.from_bytes(bytes(information.identifier), "little")]
+
+    def describe(self) -> dict:
+        return {"path": str(self.path), "identity": self.identity}
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        for handle in reversed(self.handles):
+            self.kernel.CloseHandle(handle)
+        self.handles.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def exists(self, name: str) -> bool:
+        if self.fd is None:
+            return exists(self.path / name)
+        try:
+            os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def inventory(self, name: str) -> dict | None:
+        if self.fd is None:
+            try:
+                child = self.open_relative(self.directory_handle, name, 0x81)
+            except FileNotFoundError:
+                return None
+            try:
+                self._windows_directory(child)
+                # Pin the direct child while inspecting the duplicate. This stabilizes
+                # its parent namespace; inventories still reject links within the tree.
+                return inventory(self.path / name)
+            finally:
+                self.kernel.CloseHandle(child)
+        if not self.exists(name):
+            return None
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        entries = {}
+
+        def visit(parent: int, child: str, relative: str) -> None:
+            descriptor = os.open(child, flags, dir_fd=parent)
+            try:
+                entries[relative or "."] = {"type": "dir", "mode": stat.S_IMODE(os.fstat(descriptor).st_mode)}
+                for child_name in os.listdir(descriptor):
+                    key = relative + "/" + child_name if relative else child_name
+                    status = os.stat(child_name, dir_fd=descriptor, follow_symlinks=False)
+                    if stat.S_ISDIR(status.st_mode):
+                        visit(descriptor, child_name, key)
+                    elif stat.S_ISREG(status.st_mode):
+                        child_fd = os.open(child_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
+                        with os.fdopen(child_fd, "rb") as stream:
+                            opened = os.fstat(stream.fileno())
+                            if not stat.S_ISREG(opened.st_mode):
+                                raise Blocked("A duplicate inventory entry changed type")
+                            data = stream.read()
+                        entries[key] = {"type": "file", "mode": stat.S_IMODE(opened.st_mode),
+                                        "sha256": digest(data), "bytes": len(data)}
+                    else:
+                        raise Blocked(f"Link or special file inside the duplicate: {self.path / name / key}")
+            finally:
+                os.close(descriptor)
+
+        visit(self.fd, name, "")
+        return dict(sorted(entries.items()))
+
+
+class TraceBinding:
+    """Keep the validated temporary parent and lazily open one trace file per command.
+
+    Opening a FIFO is intentionally delayed until the first checkpoint, after staging.
+    The opened leaf is checked before the first byte and never reopened by pathname.
+    """
+    def __init__(self, path: Path) -> None:
+        self.descriptor = None
+        self.validation_descriptor = None
+        self.parent = PhysicalDirectory(path.parent, writable=False)
+        self.name = path.name
+        try:
+            temporary = os.path.normcase(os.path.realpath(tempfile.gettempdir()))
+            physical = os.path.normcase(str(self.parent.path))
+            if os.path.commonpath([temporary, physical]) != temporary:
+                raise Blocked("The trace parent is outside the validated temporary directory")
+            self.before, self.before_identity = None, None
+            if self.parent.fd is None:
+                self.parent._protect_windows()
+                if self.parent.exists(self.name):
+                    self.validation_descriptor, self.before_identity = self._windows_file(0x80, 1, 7, os.O_RDONLY)
+                    self.before = os.fstat(self.validation_descriptor)
+                    # Keep the validation handle until append opens: a deleted file's
+                    # ID cannot be recycled while its original handle remains live.
+            else:
+                self.before = os.stat(self.name, dir_fd=self.parent.fd, follow_symlinks=False) if self.parent.exists(self.name) else None
+                if self.before is not None:
+                    self.before_identity = [self.before.st_dev, self.before.st_ino]
+            if self.before is not None and not self._allowed(self.before):
+                raise Blocked("The trace must be a single-link regular file or a POSIX FIFO, never a link or shared file")
+        except BaseException:
+            self.close()
+            raise
+
+    @staticmethod
+    def _allowed(status) -> bool:
+        return status.st_nlink == 1 and (stat.S_ISREG(status.st_mode) or (os.name != "nt" and stat.S_ISFIFO(status.st_mode)))
+
+    def _windows_file(self, access, disposition, sharing, flags):
+        import msvcrt
+
+        handle = self.parent.open_relative(self.parent.directory_handle, self.name, access,
+                                           disposition=disposition, options=0x40, sharing=sharing)
+        try:
+            _, tag = self.parent._windows_attributes(handle)
+            if tag & 0x20000000:
+                raise Blocked("The trace file is a name-surrogate reparse point")
+            identity = self.parent._windows_identity(handle)
+            return msvcrt.open_osfhandle(handle, flags), identity
+        except BaseException:
+            self.parent.kernel.CloseHandle(handle)
+            raise
+
+    def _open(self) -> None:
+        if os.name == "nt":
+            descriptor, identity = self._windows_file(0x84, 1 if self.before else 2, 3,
+                                                      os.O_WRONLY | os.O_APPEND | os.O_BINARY)
+        else:
+            flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW
+            if self.before is None:
+                flags |= os.O_CREAT | os.O_EXCL
+            descriptor = os.open(self.name, flags, 0o600, dir_fd=self.parent.fd)
+        try:
+            status = os.fstat(descriptor)
+            if os.name != "nt":
+                identity = [status.st_dev, status.st_ino]
+            if not self._allowed(status) or (self.before is not None and identity != self.before_identity):
+                raise Blocked("The trace file changed after temporary-path validation")
+            if self.validation_descriptor is not None:
+                os.close(self.validation_descriptor)
+                self.validation_descriptor = None
+            self.descriptor = descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def write(self, name: str) -> None:
+        if self.descriptor is None:
+            self._open()
+        if os.fstat(self.descriptor).st_nlink > 1:
+            raise Blocked("The trace file acquired another hard link")
+        data = (name + "\n").encode("utf-8")
+        if os.write(self.descriptor, data) != len(data):
+            raise OSError(errno.EIO, "Incomplete trace checkpoint write")
+
+    def close(self) -> None:
+        descriptor, self.descriptor = self.descriptor, None
+        validation, self.validation_descriptor = self.validation_descriptor, None
+        try:
+            if descriptor is not None:
+                os.close(descriptor)
+        finally:
+            try:
+                if validation is not None:
+                    os.close(validation)
+            finally:
+                self.parent.close()
 # Journal and receipt paths are data until they match the locations this installer generates.
 TRANSACTION_NAME = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\Z")
 ROLLBACK_NAME = re.compile(r"rollback-[0-9a-f]{8}\Z")
@@ -1557,6 +1909,30 @@ def normalized_absolute(value: object, field: str) -> Path:
             or not os.path.isabs(value) or os.path.normpath(value) != value):
         raise Refused(f"The recorded {field} is not an absolute normalized path")
     return Path(value)
+
+
+def recorded_physical(value: object, field: str) -> None:
+    """Validate a persisted parent identity without binding it to today's pathname."""
+    if not isinstance(value, dict) or set(value) != {"path", "identity"}:
+        raise Refused(f"Invalid physical {field} binding")
+    normalized_absolute(value["path"], f"physical {field} path")
+    identity = value["identity"]
+    if (not isinstance(identity, list) or len(identity) != 2
+            or any(type(part) is not int or part < 0 for part in identity) or not identity[1]):
+        raise Refused(f"Invalid physical {field} binding")
+
+
+def recorded_move_physical(move: dict, external: str, field: str) -> None:
+    if "physical" not in move:
+        return  # Historical records are parsed, then refused at the physical move boundary.
+    bindings = move["physical"]
+    if not isinstance(bindings, dict) or set(bindings) - {"from", "to"}:
+        raise Refused(f"Invalid physical {field} bindings")
+    for side, binding in bindings.items():
+        recorded_physical(binding, f"{field} {side}")
+    if external not in bindings:
+        raise Blocked("The journal lacks the original duplicate-parent identity; automatic recovery is refused. "
+                      "Keep its backups and use manual restoration after verifying the original folder")
 
 
 def selected_locations(record: dict, locations: Locations) -> None:
@@ -1788,10 +2164,13 @@ def plan_metadata(plan: dict) -> tuple[Locations, Path]:
 
     duplicates = plan["duplicates"]
     duplicate_inventories = plan["duplicate_inventories"]
+    duplicate_physical = plan["duplicate_physical"]
     if not isinstance(duplicates, list) or not isinstance(duplicate_inventories, dict):
         invalid("duplicates" if not isinstance(duplicates, list) else "duplicate_inventories")
     for duplicate in duplicates:
         normalized_absolute(duplicate, "plan duplicates")
+    if not isinstance(duplicate_physical, dict) or set(duplicate_physical) != set(duplicates):
+        invalid("duplicate_physical")
     for duplicate, listed in duplicate_inventories.items():
         normalized_absolute(duplicate, "plan duplicate_inventories")
         try:
@@ -1800,6 +2179,12 @@ def plan_metadata(plan: dict) -> tuple[Locations, Path]:
             invalid("duplicate_inventories")
         if any("\x00" in name for name in listed):
             invalid("duplicate_inventories")
+    for duplicate, physical in duplicate_physical.items():
+        normalized_absolute(duplicate, "plan duplicate_physical")
+        try:
+            recorded_physical(physical, "plan duplicate")
+        except Refused:
+            invalid("duplicate_physical")
     return locations, source
 
 
@@ -1842,6 +2227,8 @@ def receipt_metadata(receipt: dict, locations: Locations) -> Path:
             if not isinstance(duplicate["resolved"], str):
                 raise Refused(f"The receipt records no valid location for the retired duplicate {original}; rollback refused")
             normalized_absolute(duplicate["resolved"], "resolved duplicate")
+        if "physical" in duplicate:
+            recorded_physical(duplicate["physical"], "duplicate")
     retirements = receipt.get("retirements", [])
     if not isinstance(retirements, list):
         raise Refused("The recorded retirements are not a list")
@@ -1985,10 +2372,11 @@ def journal_metadata(record: dict, journal: Path, locations: Locations) -> dict 
                           "move backup", locations.state)
             if "resolved" in move:
                 normalized_absolute(move["resolved"], "resolved move")
+            recorded_move_physical(move, "from", "apply move")
         else:
             if index >= len(receipt["duplicates"]):
                 raise Refused("The rollback journal has an unrecorded duplicate")
-            if set(move) != {"from", "to", "inventory"}:
+            if set(move) not in ({"from", "to", "inventory"}, {"from", "to", "inventory", "physical"}):
                 raise Refused("The rollback journal move has unexpected fields")
             original = duplicate_path(locations, move.get("to"))
             recorded_path(str(original), Path(receipt["duplicates"][index]["path"]), "restored duplicate")
@@ -1998,6 +2386,14 @@ def journal_metadata(record: dict, journal: Path, locations: Locations) -> dict 
             plain_transaction_path(locations.state, Path(move["from"]))
             if canonical(move["inventory"]) != canonical(receipt["duplicates"][index]["inventory"]):
                 raise Refused("The rollback journal move inventory differs from its receipt")
+            recorded_move_physical(move, "to", "rollback move")
+            authoritative = installed_record["moves"][index].get("physical", {}).get("from")
+            operative = move.get("physical", {}).get("to")
+            if authoritative is None or receipt["duplicates"][index].get("physical") is None or operative is None:
+                raise Blocked("The rollback lacks the original duplicate-parent identity; automatic recovery is "
+                              "refused. Keep its backups and use manual restoration after verifying the original folder")
+            if canonical(operative) != canonical(authoritative):
+                raise Refused("The rollback move's physical destination differs from its committed apply journal; CURRENT was kept")
     if kind == "rollback" and len(moves) != len(receipt["duplicates"]):
         raise Refused("The rollback journal omits a recorded duplicate")
     # Undo creates these copies from the journal's parked and move paths before renaming them.
@@ -2084,6 +2480,66 @@ class Operation:
         self.locations = locations
         self.path = journal_path
         self.record = record
+        self._move_parents = {}
+
+    @contextmanager
+    def bound_moves(self, create_internal: bool = True, writable: bool = True):
+        if self._move_parents:
+            yield
+            return
+        with ExitStack() as opened:
+            parents = {}
+            unbound = []
+            try:
+                for index, move in enumerate(self.record["moves"]):
+                    physical = move.get("physical", {})
+                    if not isinstance(physical, dict) or set(physical) - {"from", "to"}:
+                        raise Refused("Invalid physical duplicate-move bindings")
+                    external = "to" if self.record.get("moves_last") else "from"
+                    # A pathname from an older journal cannot prove which physical
+                    # directory occupied it before the crash. Never bind history to
+                    # the current directory merely because its spelling is unchanged.
+                    if external not in physical:
+                        raise Blocked("The journal lacks the original duplicate-parent identity; automatic recovery "
+                                      "is refused. Keep its backups and use manual restoration after verifying the original folder")
+                    for side in ("from", "to"):
+                        path = Path(move[side])
+                        if side not in physical:
+                            unbound.append((index, side, path))
+                            continue
+                        if not path.parent.is_dir():
+                            raise Blocked(f"The recorded duplicate-move parent {path.parent} is missing; restore it and retry")
+                        parents[index, side] = opened.enter_context(
+                            PhysicalDirectory(path.parent, physical[side], writable=writable))
+                # Every historical binding is checked while its handle stays open. In particular,
+                # a later bad binding cannot leave an earlier generated transaction parent behind.
+                for index, side, path in unbound:
+                    if create_internal:
+                        private_mkdirs(path.parent, self.locations.state)
+                    elif not path.parent.is_dir():
+                        raise Refused("The committed move's transaction parent is missing; CURRENT was kept")
+                    parents[index, side] = opened.enter_context(
+                        PhysicalDirectory(path.parent, _UNBOUND_DIRECTORY, writable=writable))
+                for index, move in enumerate(self.record["moves"]):
+                    physical = move.get("physical", {})
+                    for side in ("from", "to"):
+                        physical[side] = parents[index, side].describe()
+                    move["physical"] = physical
+                self._move_parents = parents
+                yield
+            finally:
+                self._move_parents = {}
+
+    def move_inventory(self, index: int, side: str) -> dict | None:
+        return self._move_parents[index, side].inventory(Path(self.record["moves"][index][side]).name)
+
+    def move_exists(self, index: int, side: str) -> bool:
+        return self._move_parents[index, side].exists(Path(self.record["moves"][index][side]).name)
+
+    def rename_move(self, index: int, source_side: str, destination_side: str, point: str) -> None:
+        move = self.record["moves"][index]
+        rename(Path(move[source_side]), Path(move[destination_side]), point,
+               self._move_parents[index, source_side], self._move_parents[index, destination_side])
 
     def save(self, state: str) -> None:
         self.record["state"] = state
@@ -2096,6 +2552,10 @@ class Operation:
         return Path(self.record["target"])
 
     def run(self) -> None:
+        with self.bound_moves():
+            self.run_bound()
+
+    def run_bound(self) -> None:
         op = self.record["operation"]
         self.save("prepared")
         # Apply retires duplicates first; rollback restores them last. Either way the count of
@@ -2124,45 +2584,48 @@ class Operation:
         if self.record.get("moves_last"):
             self.run_moves()
         problems = differences(self.record["incoming"], inventory(self.target))
-        for move in self.record["moves"]:
-            problems += differences(move["inventory"], inventory(Path(move["to"])))
+        for index, move in enumerate(self.record["moves"]):
+            problems += differences(move["inventory"], self.move_inventory(index, "to"))
         if problems:
             raise Refused("The activated state does not match its verified inventory", problems)
 
     def run_moves(self) -> None:
         for index, move in enumerate(self.record["moves"]):
             self.save(f"moving-{index}")
-            Path(move["to"]).parent.mkdir(parents=True, exist_ok=True)
-            rename(Path(move["from"]), Path(move["to"]), self.record["operation"] + f":move-{index}")
+            self.rename_move(index, "from", "to", self.record["operation"] + f":move-{index}")
             self.save(f"moved-{index}")
 
     def undo_moves(self) -> None:
         op = self.record["operation"]
         for index, move in reversed(list(enumerate(self.record["moves"]))):
             source, destination = Path(move["from"]), Path(move["to"])
-            if exists(source):
-                if differences(move["inventory"], inventory(source)) or (
-                        exists(destination) and str(destination) not in self.record.get("moved_drift", [])):
+            if self.move_exists(index, "from"):
+                if differences(move["inventory"], self.move_inventory(index, "from")) or (
+                        self.move_exists(index, "to") and str(destination) not in self.record.get("moved_drift", [])):
                     raise Incomplete("A moved copy cannot be located unambiguously", {"from": str(source), "to": str(destination)})
                 continue
-            if exists(destination) and not differences(move["inventory"], inventory(destination)):
-                rename(destination, source, f"{op}:undo-move-{index}")
+            if self.move_exists(index, "to") and not differences(move["inventory"], self.move_inventory(index, "to")):
+                self.rename_move(index, "to", "from", f"{op}:undo-move-{index}")
                 continue
             # The moved copy is lost or changed. Apply kept a verified backup of each retired duplicate.
             backup = move.get("backup")
             if not backup or differences(move["inventory"], inventory(Path(backup))):
                 raise Incomplete("A moved copy is missing or changed and no verified backup exists",
                                  {"from": str(source), "to": str(destination)})
-            if exists(destination) and str(destination) not in self.record.get("moved_drift", []):
+            if self.move_exists(index, "to") and str(destination) not in self.record.get("moved_drift", []):
                 # Keep the differing copy where it is, as for the target. Saved before the restoring rename,
                 # so a rerun after a kill recognizes the kept copy.
                 self.record.setdefault("moved_drift", []).append(str(destination))
             self.save(f"restoring-move-{index}")
             self.restore_verified(Path(backup), move["inventory"], destination.parent.parent / f"restore-{index}" / source.name,
-                                  source, f"{op}:undo-move-restore-{index}")
+                                  source, f"{op}:undo-move-restore-{index}", self._move_parents[index, "from"])
             self.save(f"restored-move-{index}")
 
     def undo(self) -> None:
+        with self.bound_moves():
+            self.undo_bound()
+
+    def undo_bound(self) -> None:
         """Return to the origin state, verified; Incomplete when that cannot be established.
 
         Every step first checks whether it is already done, so an interrupted undo can be rerun.
@@ -2192,8 +2655,8 @@ class Operation:
         if not self.record.get("moves_last"):
             self.undo_moves()
         problems = differences(self.record["origin"], inventory(target))
-        for move in self.record["moves"]:
-            problems += differences(move["inventory"], inventory(Path(move["from"])))
+        for index, move in enumerate(self.record["moves"]):
+            problems += differences(move["inventory"], self.move_inventory(index, "from"))
         if problems:
             raise Incomplete("The restored state does not match the origin inventory", problems)
         self.save("undone")
@@ -2205,7 +2668,7 @@ class Operation:
         self.restore_verified(Path(backup), self.record["origin"], Path(self.record["parked"]).parent / "restore" / SKILL,
                               self.target, self.record["operation"] + ":undo-restore")
 
-    def restore_verified(self, backup: Path, expected: dict, copy: Path, destination: Path, label: str) -> None:
+    def restore_verified(self, backup: Path, expected: dict, copy: Path, destination: Path, label: str, destination_parent=None) -> None:
         """Copy a verified backup beside the transaction, check it, then rename it into place."""
         if exists(copy):
             # A copy left by an interrupted restoration; kept aside, never deleted. The journal names the aside
@@ -2218,7 +2681,7 @@ class Operation:
         fsync_tree(copy)
         if differences(expected, inventory(copy)):
             raise Incomplete("The restoration copy does not match its inventory", {"path": str(copy)})
-        rename(copy, destination, label)
+        rename(copy, destination, label, destination_parent=destination_parent)
 
 
 def copy_tree(source: Path, destination: Path) -> None:
@@ -2330,7 +2793,8 @@ def command_verify(options) -> dict:
 
 
 def command_plan(options) -> dict:
-    require_test_home(Locations(options.runtime, options.home))
+    # A read-only plan emits no checkpoints, so it only validates the hook paths.
+    require_test_home(Locations(options.runtime, options.home), checkpoints=False)
     plan, _ = make_plan(options.runtime, options.home, None, Path(options.package), Path(options.checksums))
     if options.output:
         write_json(Path(options.output), plan)
@@ -2401,16 +2865,21 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         moves = []
         for index, duplicate in enumerate(plan["duplicates"]):
             path = Path(duplicate)
-            duplicate_inventory = inventory(path)
             duplicate_backup = transaction / "backup" / f"duplicate-{index}" / path.name
-            copy_tree(path, duplicate_backup)
-            fsync_tree(duplicate_backup)
-            if differences(duplicate_inventory, inventory(duplicate_backup)):
-                raise Refused(f"The backup copy of {path} does not match its inventory")
+            with PhysicalDirectory(path.parent, plan["duplicate_physical"][duplicate], writable=False) as parent:
+                duplicate_inventory = parent.inventory(path.name)
+                if differences(plan["duplicate_inventories"][duplicate], duplicate_inventory):
+                    raise Refused(f"The duplicate {path} changed after it was planned")
+                copy_tree(parent.path / path.name, duplicate_backup)
+                fsync_tree(duplicate_backup)
+                if differences(duplicate_inventory, inventory(duplicate_backup)):
+                    raise Refused(f"The backup copy of {path} does not match its inventory")
+                physical = parent.describe()
+                resolved = str(parent.path / path.name)
             # Where the copy physically was, so rollback can refuse a link added or retargeted since (#54).
             moves.append({"from": str(path), "to": str(transaction / "duplicates" / str(index) / path.name),
                           "inventory": duplicate_inventory, "backup": str(duplicate_backup),
-                          "resolved": os.path.realpath(str(path))})
+                          "resolved": resolved, "physical": {"from": physical}})
         staged = transaction / "staged" / SKILL
         stage(staged, package_files, locations.target, before or {}, plan["classification"])
         fsync_tree(staged)
@@ -2475,7 +2944,7 @@ def install(plan: dict, package: Package, locations: Locations, boundary: dict) 
         "preserved_paths": sorted(name for name, kind in classification.items() if kind in PRESERVED),
         "replaced_paths": sorted(name for name, kind in classification.items() if kind == "package"),
         "duplicates": [{"path": move["from"], "retired_to": move["to"], "backup": move["backup"], "inventory": move["inventory"],
-                        "resolved": move["resolved"]} for move in moves],
+                        "resolved": move["resolved"], "physical": move["physical"]["from"]} for move in moves],
         "legacy_commands": plan["legacy_commands"],
         "instruction_files": file_hashes(locations.instructions),
         "maintenance_boundary": boundary,
@@ -2596,7 +3065,7 @@ def command_rollback(options) -> dict:
         # The retired copy itself is not checked: its inventory records its mode, so one that lost owner
         # write no longer matches and the verified backup is restored instead.
         # The parent the duplicate returns through must be searchable as well as writable.
-        restoring = []
+        restoring, physical_duplicates = [], {}
         for index, duplicate in enumerate(receipt["duplicates"]):
             original = Path(duplicate["path"])
             parent = searchable_part(original, "run rollback again")
@@ -2604,10 +3073,14 @@ def command_rollback(options) -> dict:
                 parent = original.parent
             if parent is not None:
                 restoring.append((parent, f"so the retired duplicate {original} cannot be moved back into it"))
-            # A legacy receipt may omit resolved, but cannot discard the apply journal's location.
+            # Check both the receipt and its committed apply journal. The latter is the
+            # retained authority for the physical parent from which apply moved the copy.
             verify_duplicate_restoration_path(locations, original, duplicate)
             verify_duplicate_restoration_path(locations, original, installed_record["moves"][index])
             require_discovered_duplicate_path(locations, original)
+            physical = installed_record["moves"][index]["physical"]["from"]
+            with PhysicalDirectory(original.parent, physical, writable=False) as bound_parent:
+                physical_duplicates[str(original)] = bound_parent.describe()
         locations.require_movable(recorded, "run rollback again", restoring)
         active = inventory(locations.target, "run rollback again")
         origin = receipt["after"]
@@ -2661,7 +3134,10 @@ def command_rollback(options) -> dict:
                     fsync_tree(source)
                     if differences(expected, inventory(source)):
                         raise Refused(f"Neither the retired copy nor the backup of {original} matches its inventory")
-                moves.append({"from": str(source), "to": str(original), "inventory": expected})
+                with PhysicalDirectory(original.parent, physical_duplicates[str(original)], writable=False) as parent:
+                    physical = parent.describe()
+                moves.append({"from": str(source), "to": str(original), "inventory": expected,
+                              "physical": {"to": physical}})
         except UntrustedState as error:
             raise incomplete_state(error, locations.state, work) from None
         except OSError as error:
@@ -2751,11 +3227,19 @@ def apply_receipt_matches_journal(record: dict, receipt: dict, journal: Path,
                  **({"resolved": duplicate["resolved"]} if "resolved" in duplicate else {})}
                 for duplicate in receipt["duplicates"]]
     if len(duplicates) == len(recorded):
-        for expected, actual in zip(duplicates, recorded):
+        for expected, actual, move, duplicate in zip(duplicates, recorded, record["moves"], receipt["duplicates"]):
             # Legacy receipts omit this optional field; their rollback still checks the journal's
             # recorded location and applies the legacy linked-root rule to the receipt.
             if "resolved" not in actual:
                 expected.pop("resolved", None)
+            apply_physical = move.get("physical", {}).get("from")
+            receipt_physical = duplicate.get("physical")
+            if apply_physical is None or receipt_physical is None:
+                raise Blocked("The receipt or committed apply journal lacks the original duplicate-parent identity; "
+                              "automatic duplicate restoration is refused. Keep its backups and use manual "
+                              "restoration after verifying the original folder")
+            if canonical(apply_physical) != canonical(receipt_physical):
+                raise Refused("The receipt's physical duplicate parent differs from its committed apply journal; CURRENT was kept")
     if canonical(duplicates) != canonical(recorded):
         raise Refused("The apply receipt differs from its journal duplicates; CURRENT was kept")
 
@@ -2862,49 +3346,53 @@ def command_recover(options) -> dict:
                                                    recovery=True)
                 require_discovered_duplicate_path(locations, original, recovery=True)
         if record.get("state") == "committed":
-            if differences(record["incoming"], inventory(locations.target)) or any(
-                    differences(move["inventory"], inventory(Path(move["to"]))) for move in record["moves"]):
-                raise Refused("The committed journal does not match the installed state; CURRENT was kept")
-            result = {"result": "already committed", "journal": str(journal)}
-            if record["operation"] == "rollback" and not mark_rolled_back(record, locations, tolerant=True):
-                result["receipt_not_updated"] = record["receipt"]
-            if record["operation"] == "apply":
-                # The apply output may never have been printed: name the receipt and what it retired.
-                receipt = apply_receipt_path
-                result["receipt"] = str(receipt)
-                try:
-                    value = read_control_json(receipt, locations.state)
-                except Refused as error:
-                    raise Incomplete(f"The committed apply receipt {receipt} is unavailable: {error}; "
-                                     "CURRENT was kept for inspection") from None
-                else:
-                    receipt_metadata(value, locations)
-                    apply_receipt_matches_journal(record, value, journal)
-                    result.update({key: value[key] for key in ("retirements", "rollback_command") if key in value})
+            with operation.bound_moves(create_internal=False):
+                changed = differences(record["incoming"], inventory(locations.target))
+                for index, move in enumerate(record["moves"]):
+                    changed += differences(move["inventory"], operation.move_inventory(index, "to"))
+                if changed:
+                    raise Refused("The committed journal does not match the installed state; CURRENT was kept")
+                result = {"result": "already committed", "journal": str(journal)}
+                if record["operation"] == "rollback" and not mark_rolled_back(record, locations, tolerant=True):
+                    result["receipt_not_updated"] = record["receipt"]
+                if record["operation"] == "apply":
+                    # The apply output may never have been printed: name the receipt and what it retired.
+                    receipt = apply_receipt_path
+                    result["receipt"] = str(receipt)
+                    try:
+                        value = read_control_json(receipt, locations.state)
+                    except Refused as error:
+                        raise Incomplete(f"The committed apply receipt {receipt} is unavailable: {error}; "
+                                         "CURRENT was kept for inspection") from None
+                    else:
+                        receipt_metadata(value, locations)
+                        apply_receipt_matches_journal(record, value, journal)
+                        result.update({key: value[key] for key in ("retirements", "rollback_command") if key in value})
+                finish(locations.state)
+                return result
+        with operation.bound_moves():
+            operation.record["recovery_boundary"] = boundary
+            try:
+                operation.undo_bound()
+            except (Failure, OSError) as error:
+                raise Incomplete(f"Restoration incomplete: {error}{record_undo_error(operation, error)}. Recovery data kept "
+                                 f"in {operation.path.parent}; fix the cause and run `recover` again",
+                                 getattr(error, "details", None))
+            result = {"result": "restored", "operation": record["operation"], "journal": str(journal), "target": record["target"]}
+            for key in ("parked_drift", "moved_drift"):
+                if key in operation.record:
+                    result[key] = operation.record[key]
+            # An aside path is recorded before its rename; one whose rename never happened names nothing.
+            stale = [path for path in operation.record.get("stale_restore_copies", ()) if exists(Path(path))]
+            if stale:
+                result["stale_restore_copies"] = stale
+            receipt = journal.parent / "receipt.json"
+            if record["operation"] == "apply" and exists(receipt):
+                value = read_control_json(receipt, locations.state)
+                value["state"] = "recovered to the before-state; not installed"
+                write_json(receipt, value, locations.state)
             finish(locations.state)
             return result
-        operation.record["recovery_boundary"] = boundary
-        try:
-            operation.undo()
-        except (Failure, OSError) as error:
-            raise Incomplete(f"Restoration incomplete: {error}{record_undo_error(operation, error)}. Recovery data kept "
-                             f"in {operation.path.parent}; fix the cause and run `recover` again",
-                             getattr(error, "details", None))
-        result = {"result": "restored", "operation": record["operation"], "journal": str(journal), "target": record["target"]}
-        for key in ("parked_drift", "moved_drift"):
-            if key in operation.record:
-                result[key] = operation.record[key]
-        # An aside path is recorded before its rename; one whose rename never happened names nothing.
-        stale = [path for path in operation.record.get("stale_restore_copies", ()) if exists(Path(path))]
-        if stale:
-            result["stale_restore_copies"] = stale
-        receipt = journal.parent / "receipt.json"
-        if record["operation"] == "apply" and exists(receipt):
-            value = read_control_json(receipt, locations.state)
-            value["state"] = "recovered to the before-state; not installed"
-            write_json(receipt, value, locations.state)
-        finish(locations.state)
-        return result
 
 
 def parser() -> argparse.ArgumentParser:
@@ -2944,17 +3432,30 @@ def hook_report() -> dict:
 
 
 def main(argv=None) -> int:
+    global _TRACE
     options = parser().parse_args(argv)
     handlers = {"verify-package": command_verify, "plan": command_plan, "apply": command_apply,
                 "rollback": command_rollback, "recover": command_recover}
+    report = None
     try:
         result = handlers[options.command](options)
     except Failure as error:
-        print(json.dumps({"error": str(error), "exit": error.code, "details": error.details, **hook_report()}, indent=2), file=sys.stderr)
-        return error.code
+        report = {"error": str(error), "exit": error.code, "details": error.details}
     except OSError as error:
-        print(json.dumps({"error": f"Unexpected filesystem error: {error}", "exit": 3, **hook_report()}, indent=2), file=sys.stderr)
-        return 3
+        report = {"error": f"Unexpected filesystem error: {error}", "exit": 3}
+    finally:
+        trace, _TRACE = _TRACE, None
+        if trace is not None:
+            try:
+                trace.close()
+            except OSError as error:
+                if report is None:
+                    report = {"error": f"Trace cleanup failed: {error}", "exit": 3}
+                else:
+                    report["trace_cleanup_error"] = str(error)
+    if report is not None:
+        print(json.dumps({**report, **hook_report()}, indent=2), file=sys.stderr)
+        return report["exit"]
     # ASCII output: a legacy console encoding cannot fail on a non-ASCII home path.
     print(json.dumps({**result, **hook_report()}, indent=2))
     return 0
