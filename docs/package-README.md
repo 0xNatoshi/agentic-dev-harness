@@ -32,6 +32,8 @@ The package is v6.5.0; the project template is v6.6, with compact instructions a
 
 MANIFEST.json hashes every payload except itself. The ZIP is reproducibly generated from the versioned source. Read [STATUS.md](STATUS.md) for actual scope and outstanding destination checks. The package contains no private backup, provider credentials or full Hermes SOUL.
 
+The installer caps a ZIP at 256 MiB, each file at 64 MiB, and expanded ZIP or directory contents at 256 MiB. It also caps package entries at 1,024, counting files and folders implied by ZIP paths or present in an extracted directory; cumulative relative path bytes at 128 KiB; ZIP central-directory bytes at 512 KiB; `MANIFEST.json` at 1 MiB and 1,024 file entries; and the checksum file at 128 KiB. Manifest-listed paths, including paths absent from the package, must fit the same entry and pathname budgets before collision checks. ZIP archives may use stored or DEFLATE entries; other compression methods and ZIP64 central-directory records are refused. These are input safety budgets; path, type, manifest and checksum verification still apply before an install can proceed.
+
 Installation guides record backups under `%LOCALAPPDATA%\dev-harness\backups`. Restore only files still matching their installed hashes or merge later edits. The [root license](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md) remain applicable.
 
 Maintain changes, reviews and handoffs in the private [source repository](https://github.com/0xNatoshi/agentic-dev-harness). Building this package does not publish a release or install a cleanup automation.
