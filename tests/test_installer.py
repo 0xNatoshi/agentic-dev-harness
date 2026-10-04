@@ -212,6 +212,31 @@ sys.exit(installer.main(sys.argv[3:]))
         self.assertEqual(archive.returncode, 0, archive.stderr)
         self.assertEqual(json.loads(archive.stdout)["archive_digest"], "verified")
 
+    def test_stored_and_deflated_archives_verify_like_the_directory(self):
+        manifest = (self.package / "MANIFEST.json").read_bytes()
+        for label, method in (("stored", zipfile.ZIP_STORED), ("deflated", zipfile.ZIP_DEFLATED)):
+            with self.subTest(label):
+                archive = self.base / f"{label}.zip"
+                with zipfile.ZipFile(archive, "w") as bundle:
+                    for path in sorted(self.package.rglob("*")):
+                        if path.is_file():
+                            name = self.package.name + "/" + path.relative_to(self.package).as_posix()
+                            bundle.write(path, name, compress_type=method)
+                checksums = self.base / f"{label}-SHA256SUMS.txt"
+                checksums.write_text(
+                    f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {self.package.name}-codex-claude.zip\n"
+                    f"{hashlib.sha256(manifest).hexdigest()}  {self.package.name}-MANIFEST.json\n",
+                    encoding="utf-8")
+                verified = self.run_installer("verify-package", archive, "--checksums", checksums)
+                directory = self.run_installer("verify-package", self.package, "--checksums", checksums)
+                self.assertEqual(verified.returncode, 0, verified.stderr)
+                self.assertEqual(directory.returncode, 0, directory.stderr)
+                zip_report, directory_report = json.loads(verified.stdout), json.loads(directory.stdout)
+                self.assertEqual(zip_report["archive_digest"], "verified")
+                self.assertEqual(zip_report["files_verified"], directory_report["files_verified"])
+                self.assertEqual(zip_report["manifest_sha256"], directory_report["manifest_sha256"])
+                self.assertEqual(zip_report["checksums_sha256"], directory_report["checksums_sha256"])
+
     def test_verify_package_hashes_the_parsed_checksum_snapshot(self):
         spec = importlib.util.spec_from_file_location("harness_installer_for_snapshot", ROOT / "scripts/install.py")
         installer = importlib.util.module_from_spec(spec)
@@ -243,6 +268,27 @@ sys.exit(installer.main(sys.argv[3:]))
         self.assertEqual(report["checksums_sha256"], hashlib.sha256(original).hexdigest())
         self.assertEqual(checksums.read_bytes(), original + b"\n")
         self.assertEqual(len(opens), 1)
+
+    def test_checksum_capture_accepts_exact_budget_and_refuses_oversize_before_plan(self):
+        limit = 128 * 1024
+        original = self.checksums.read_bytes()
+        self.assertLess(len(original), limit)
+        checksums = self.base / "bounded-SHA256SUMS.txt"
+        exact = original + b"\n" * (limit - len(original))
+        checksums.write_bytes(exact)
+        verified = self.run_installer("verify-package", self.package, "--checksums", checksums)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        self.assertEqual(json.loads(verified.stdout)["checksums_sha256"], hashlib.sha256(exact).hexdigest())
+
+        checksums.write_bytes(exact + b"\xff")
+        plan = self.base / "oversized-checksums-plan.json"
+        refused = self.run_installer("plan", "--runtime", "claude", "--home", self.home,
+                                     "--package", self.package, "--checksums", checksums, "--output", plan)
+        self.assert_refused(refused, 1)
+        self.assertIn("Checksums exceed", json.loads(refused.stderr)["error"])
+        self.assertFalse(plan.exists())
+        self.assertFalse(self.state().exists())
+        self.assertFalse(self.target.exists())
 
     def test_verify_package_rejects_tampering(self):
         copy = self.base / "package"
@@ -439,6 +485,40 @@ sys.exit(installer.main(sys.argv[3:]))
                         tracemalloc.stop()
                 self.assertIn(phrase, str(refusal.exception))
                 self.assertLess(peak, 16 * 1024 * 1024)
+
+    def test_unsupported_zip_codecs_refuse_before_zipfile_and_large_allocations(self):
+        spec = importlib.util.spec_from_file_location("harness_codec_preflight", ROOT / "scripts/install.py")
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        for label, method in (("bzip2", zipfile.ZIP_BZIP2), ("lzma", zipfile.ZIP_LZMA)):
+            archive = self.base / f"{label}-oversized.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr(self.package.name + "/first.txt", b"small", compress_type=zipfile.ZIP_STORED)
+                bundle.writestr(self.package.name + "/large.txt", b"x" * (8 * 1024 * 1024),
+                                compress_type=method)
+            # The central directory understates expansion. A bounded ZipExtFile.read() is not
+            # enough for codecs that decompress the entire compressed block before slicing it.
+            altered = bytearray(archive.read_bytes())
+            second = altered.rfind(b"PK\x01\x02")
+            self.assertGreaterEqual(second, 0)
+            struct.pack_into("<L", altered, second + 24, 1024)
+            archive.write_bytes(altered)
+            with self.subTest(codec=label, phase="allocation"):
+                with mock.patch.object(installer, "MEMBER_LIMIT", 1024), \
+                     mock.patch.object(installer, "ARCHIVE_LIMIT", 1024 * 1024):
+                    tracemalloc.start()
+                    try:
+                        with self.assertRaises(installer.Refused) as refusal:
+                            installer.load_archive(archive)
+                    finally:
+                        _, peak = tracemalloc.get_traced_memory()
+                        tracemalloc.stop()
+                self.assertLess(peak, 4 * 1024 * 1024)
+                self.assertIn("Unsupported ZIP compression method", str(refusal.exception))
+            with self.subTest(codec=label, phase="preflight"):
+                with mock.patch.object(zipfile, "ZipFile", side_effect=AssertionError("ZipFile constructed")):
+                    with self.assertRaisesRegex(installer.Refused, "Unsupported ZIP compression method"):
+                        installer.load_archive(archive)
 
     def test_manifest_only_deep_paths_refuse_before_collision_expansion(self):
         spec = importlib.util.spec_from_file_location("harness_manifest_limits", self.installer)

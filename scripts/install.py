@@ -68,6 +68,7 @@ PACKAGE_NAME_BYTES_LIMIT = 128 * 1024
 CENTRAL_DIRECTORY_LIMIT = 512 * 1024
 MANIFEST_LIMIT = 1024 * 1024
 MANIFEST_ENTRY_LIMIT = 1024
+CHECKSUM_LIMIT = 128 * 1024
 
 
 class Failure(Exception):
@@ -519,6 +520,9 @@ def preflight_archive_metadata(archive: bytes) -> int:
     while position < eocd:
         if position + 46 > eocd or archive[position:position + 4] != b"PK\x01\x02":
             raise Refused("Not a valid ZIP archive: invalid central directory entry")
+        method = struct.unpack_from("<H", archive, position + 10)[0]
+        if method not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            raise Refused(f"Unsupported ZIP compression method: {method}")
         filename_size, extra_size, entry_comment_size = struct.unpack_from("<3H", archive, position + 28)
         position += 46 + filename_size + extra_size + entry_comment_size
         if position > eocd:
@@ -600,7 +604,10 @@ def read_checksums(path: Path) -> tuple[dict, bytes]:
     entries = {}
     try:
         # A path or link can change after this open; parse and record only these captured bytes.
-        data = Path(path).read_bytes()
+        with Path(path).open("rb") as stream:
+            data = stream.read(CHECKSUM_LIMIT + 1)
+        if len(data) > CHECKSUM_LIMIT:
+            raise Refused(f"Checksums exceed {CHECKSUM_LIMIT} bytes: {path}")
         lines = data.decode("utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as error:
         raise Refused(f"Cannot read checksums {path}: {error}")
