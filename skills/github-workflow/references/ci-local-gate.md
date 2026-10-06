@@ -41,6 +41,8 @@ Workflow `run_started_at` may be populated while queued. Inspect status, jobs/st
 
 ## Execute authorized fallback
 
+Fast mode runs the complete applicable gate once on the final reviewed version. Successful applicable CI supplies that evidence; do not duplicate the full suite locally. During implementation or after a delta, run affected checks and invalidate only affected evidence unless broad coverage changed. Required hooks, separate platform qualification, running/red checks and enforced server requirements remain binding. This cadence does not reinterpret a failed, filtered or missing required check as passed.
+
 1. Establish real validation commands from repository scripts/workflows/rules. Cover required risk/project surfaces (types, lint, build, tests, relevant integration); a faster, narrower suite cannot replace a required gate. An inaccessible indispensable environment keeps the PR in draft with the needed action.
 2. Run the gate on the consolidated final-head tree. Attach fallback reason, SHA, timestamped observations, exact commands/results and coverage/limits in English without personal paths. Use `Validation: local gate passed; remote CI did not start`, not an unproved remote-CI claim.
 3. Reread head, checks and protections immediately before integration. Revalidate a changed head. Wait for newly started checks; a red result blocks. Review, rollback, instruction restrictions and all other autonomy criteria still apply.
