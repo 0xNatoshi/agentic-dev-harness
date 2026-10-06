@@ -38,6 +38,34 @@ def merge_recipe(path):
 
 
 class TemplateContractTests(unittest.TestCase):
+    def test_fast_mode_contract_reaches_each_active_policy_surface(self):
+        # These are executable agent-policy contracts, not a claim that an
+        # interactive runtime has adopted them. Immutable history is excluded.
+        sources = (
+            Path("AGENTS.md"), TEMPLATE, SKILL / "SKILL.md",
+            Path("profiles/AGENTS.template.md"),
+            Path("profiles/hermes-development.md"),
+            SKILL / "references/development-loop.md",
+        )
+        contracts = (
+            r"one (?:active )?heavy PR",
+            r"two is the hard maximum",
+            r"one fresh(?:-context)? (?:local )?reviewer",
+            r"monetary amounts, data integrity or confidentiality",
+            r"at most two review/fix cycles",
+            r"[Cc]ycle two checks only true blockers",
+            r"remaining blockers.*?(?:draft|simplif|split)",
+            r"complete applicable gate once on the final reviewed version",
+            r"100,000-client trials or giant comparisons unless performance or monetary calculation is an acceptance criterion",
+        )
+        obsolete_rules = r"(?:several|multiple) (?:review )?passes|(?:no|without (?:an? )?)quota|before a third|before another cycle"
+        for relative in sources:
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            with self.subTest(source=str(relative)):
+                for contract in contracts:
+                    self.assertRegex(text, re.compile(contract, re.I | re.S))
+                self.assertNotRegex(text, obsolete_rules)
+
     def test_adoption_fixture_honors_configured_bash_and_isolates_startup(self):
         with tempfile.TemporaryDirectory(prefix="configured-bash-") as directory:
             base = Path(directory)

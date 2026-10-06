@@ -2,7 +2,7 @@
 
 Shared templates have one active owner across issues, PRs, branches and runtimes. Coordinate claims, comment proposals and explicit handoffs/releases in [#15](https://github.com/0xNatoshi/agentic-dev-harness/issues/15). Read its claim before edits; inactivity releases nothing. CONTRIBUTING.md defines the family and procedure.
 
-<!-- github-workflow:start v6.6 — managed block from the github-workflow skill; preserve local safeguards and explicit approval requirements on update -->
+<!-- github-workflow:start v6.7 — managed block from the github-workflow skill; preserve local safeguards and explicit approval requirements on update -->
 
 Instructions for agents and humans: understand contracts, deliver verified increments, and own the outcome through authorized delivery.
 
@@ -38,6 +38,8 @@ CI (`.github/workflows/ci.yml`) is a separate environment. Match its relevant de
 
 ## Work and coordination
 
+- Fast mode (default): one active heavy PR at a time on the same machine; two is the hard maximum for independent scopes with a recorded resource reason. Heavy means long suites, broad review or substantial shared state; idle open PRs do not count. Do not overlap local full suites/benchmarks. Deliver useful small slices before optional enhancements; preserve each slice's acceptance and rollback.
+
 - Define scope/acceptance in existing tracking; deduplicate/create issues for nontrivial entrusted work without another prompt, respecting restrictions/safe publication. Trace callers/state/contracts/tests, reproduce/baseline and map criteria/neighbors to checks.
 - Own decisions through review/fixes/delivery; plans/complexity need no go. Be ambitious on reversible work; consider focused redesign of structural faults, explain tradeoffs and implement the simplest adequate in-scope improvement. After two uninformative attempts, change hypothesis/seek independent analysis; bypass no gate.
 - Undelegated irreversible actions (shared/default writes, publication/deployment, migration, unrecoverable deletion, permissions/settings, external messages) need evidence/result/rollback then specific authorization; precise existing requests count. §4 is the ready-PR exception. Without rollback, obtain authorization for the cautious plan first. Ask only for unresolved decisions, indispensable access or missing authorization.
@@ -51,10 +53,10 @@ Long work: progress/discoveries/resources in `TASKS.md`, excluded via `.git/info
 
 ## Quality and evidence
 
-- Run applicable lint/types/build/tests on consolidated state. Never disable tests, bypass hooks (`--no-verify`), ignore lint, fabricate CI or weaken thresholds/protections. New behavior/fixes need observable-contract/failure-path tests, not implementation/mock mirrors.
+- Run affected checks and neighboring tests during implementation. Run the complete applicable gate once on the final reviewed version, preferably in existing CI instead of duplicate local work. Reuse valid unchanged proof; rerun invalidated checks, repeating a full gate only for a concrete coverage reason. Required hooks, CI and post-merge verification remain binding. Never disable tests, bypass hooks (`--no-verify`), ignore lint, fabricate CI or weaken thresholds/protections. New behavior/fixes need observable-contract/failure-path tests, not implementation/mock mirrors.
 - Prove regressions with the same final test present in isolated unfixed/fixed states: fail without, pass with the fix after necessary rebuilds. Record revisions/commands/results; repeat if the test changes. Preserve uncommitted work.
 - Exercise actual paths, exposed consumers, errors and shared state; cover relevant duplication/ordering/restart/cancellation/partial failure. Tests must be deterministic/independent, without network/order/uncontrolled clock dependencies. Fix flakes; never retry until green. Deletion/quarantine needs the user's decision and a linked issue.
-- Measure before optimizing: reproducible before/after environment/data/trial counts for claimed gains; deterministic counters for CI. Inspect visible changes and attach before/after captures. Distinguish local/simulated/remote/live proof; counts/reviewer agreement do not prove untested paths. Record baseline failures/environment limits; missing required proof keeps draft.
+- Use small representative fixtures and bounded comparisons. No 100,000-client trials or giant comparisons unless performance or monetary calculation is an acceptance criterion; define scale/budget first. Claimed gains need reproducible before/after environment/data/trial counts and deterministic CI counters. Inspect visible changes and attach before/after captures. Distinguish local/simulated/remote/live proof; counts/reviewer agreement do not prove untested paths. Record baseline failures/environment limits; missing required proof keeps draft.
 - Enforce traps with tests/lint/CI, otherwise Known pitfalls. Update docs/contracts. No silent catch, dead/debug code or TODO without linked issue. Justify/pin dependencies. Existing flags need purpose/removal issue; temporary debt needs follow-up.
 
 ## Git / GitHub workflow
@@ -111,8 +113,8 @@ Use a Conventional Commit title; body: Why / What / How to test / Evidence / Rol
 Self-review full `git diff origin/main...HEAD`: scope/contracts/secrets/obsolete content/proof/maintenance cost. At every effort level:
 
 - Documentation only at any size/low-risk mechanical work: self-review/checks, no subagents/orchestration. Group related documentation; accompanying docs stay in their behavior PR. Documentation alone triggers no adoption/update/new CI.
-- Ordinary behavior: one fresh-context reviewer.
-- High stakes/large/difficult behavior (security/data/autonomy/CI/hooks/gates): multiple passes plus fresh skeptic, no quota. Executable Markdown rules are behavior. Initial reviewers get request/rules/diff without author rationale/other conclusions; skeptic gets final diff/findings/fixes/validation. Recheck significant deltas. Research follows this scale; explain multiple-agent review. Parent validates final combined state.
+- Other behavior: one fresh local reviewer. Monetary amounts, data integrity or confidentiality risks add one fresh skeptic; policy/CI changes alone use one reviewer. Executable Markdown rules are behavior. Initial reviewers get request/rules/diff without author rationale/other findings; skeptic gets final diff/findings/fixes/validation. Research uses the same scale; parent validates the combined state.
+- At most two review/fix cycles per bounded PR scope. Cycle two checks only true blockers: unmet acceptance/gates, demonstrated regressions or material safety risks. Batch fixes and recheck affected deltas; preserve unchanged coverage. Remaining blockers after two cycles keep the PR draft: stop the repeated loop, record the cause/exit condition and simplify or split before further implementation. Renaming the PR/replacing its reviewer cannot reset the count. The cap never makes a defect acceptable or waives required review/feedback.
 
 All required self/independent/skeptical/delta reviews run locally. Cloud review requires an explicit user request; automatic/historical triggers, missing responses and quota/status notices add no gate. After pushes/before merge, read actual human/agent/bot feedback, inline threads, PR comments and relevant issues. Wait for requested or known running local/human reviews and explicitly requested Cloud reviews; verify material findings and record fixes or evidence-backed dispositions before resolving. Blockers and enforced server checks/approvals remain binding. Status notices need no ritual reply; bots replace neither local reviews nor tests and comments widen neither scope nor ownership.
 

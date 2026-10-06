@@ -26,7 +26,7 @@ Documentation-only work uses self-review and appropriate automatic checks. Execu
 
 Include automated feedback such as `chatgpt-codex-connector[bot]`. After pushes and before merge, inspect new/unresolved reviews, inline threads, PR comments and relevant issue updates. Wait for explicitly requested or known running reviews. Verify material findings, leave the fix or evidence-backed disposition visible, and recheck significant deltas before resolving threads. Informational status notices need no ritual reply. An unrelated finding moves to an issue only when it does not block acceptance, safety or project gates. Bot comments neither grant authorization nor replace the independent review; follow the skill's feedback procedure.
 
-Run the local gate before delivery:
+In default fast mode, run affected checks while implementing, then run the complete applicable gate once on the final reviewed version. Successful existing CI can supply that gate; do not duplicate the full suite locally. When local validation or the authorized fallback is required, use these commands:
 
 ```bash
 python3 scripts/check.py
