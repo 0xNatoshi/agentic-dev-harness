@@ -44,6 +44,7 @@ class TemplateContractTests(unittest.TestCase):
         sources = (
             Path("AGENTS.md"), TEMPLATE, SKILL / "SKILL.md",
             Path("profiles/AGENTS.template.md"),
+            Path("profiles/CLAUDE.template.md"),
             Path("profiles/hermes-development.md"),
             SKILL / "references/development-loop.md",
         )
@@ -55,10 +56,19 @@ class TemplateContractTests(unittest.TestCase):
             r"at most two review/fix cycles",
             r"[Cc]ycle two checks only true blockers",
             r"remaining blockers.*?(?:draft|simplif|split)",
-            r"complete applicable gate once on the final reviewed version",
+            r"test pyramid",
+            r"small, bounded end-to-end \(E2E\) set",
+            r"before a release, on main/nightly, or when risk justifies it",
+            r"smallest regression test",
+            r"(?:PR-level gate|On a (?:pull request|PR)|A PR runs)",
+            r"affected unit/integration checks",
             r"100,000-client trials or giant comparisons unless performance or monetary calculation is an acceptance criterion",
         )
-        obsolete_rules = r"(?:several|multiple) (?:review )?passes|(?:no|without (?:an? )?)quota|before a third|before another cycle"
+        obsolete_rules = (
+            r"(?:several|multiple) (?:review )?passes|(?:no|without (?:an? )?)quota|before a third|before another cycle"
+            r"|complete applicable gate once|complete final gate"
+            r"|local gate for every PR is the full|full (?:unittest )?suite (?:as|for) (?:the )?(?:PR|pull request)"
+        )
         for relative in sources:
             text = (ROOT / relative).read_text(encoding="utf-8")
             with self.subTest(source=str(relative)):
@@ -169,6 +179,12 @@ gh() {{ printf '%s\\n' 'https://github.example/fixture/repository/pull/1'; }}
             self.assertEqual(len(lines), 1, str(relative))
             inventories.append(lines[0])
         self.assertEqual(len(set(inventories)), 1, "Suspension scan inputs drifted")
+
+    def test_local_gate_reference_keeps_pr_and_release_scope_distinct(self):
+        text = (ROOT / SKILL / "references/ci-local-gate.md").read_text(encoding="utf-8")
+        self.assertRegex(text, r"project's PR-level gate")
+        self.assertRegex(text, r"broader integration suite and bounded E2E set")
+        self.assertNotRegex(text, r"complete applicable gate")
 
     def test_merge_uses_only_the_successfully_validated_head(self):
         cases = (

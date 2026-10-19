@@ -19,7 +19,6 @@ Personal instructions: install outside repositories. Project instructions (read 
 # Bounded initiative
 
 - **Fast mode (default)**: work on one heavy PR at a time on the same machine; two is the hard maximum, only for independent work with a recorded resource reason. A heavy PR needs a long suite, broad review or substantial shared state. Existing open PRs are not active work. Finish a useful slice before starting the next; optional enhancements belong in a later PR.
-- **Verification cadence**: during implementation, run affected checks and tests of neighboring contracts. Run the complete applicable gate once on the final reviewed version, preferably in existing CI instead of duplicating it locally. Reuse valid evidence for unchanged inputs; changes invalidate affected evidence. A repeated complete gate needs a concrete coverage reason. Required hooks, CI, red checks and post-merge verification remain binding; identical merge trees reuse local proof.
 - **Bounded measurements**: use small representative fixtures and bounded comparisons. Do not run 100,000-client trials or giant comparisons unless performance or monetary calculation is an acceptance criterion. Define the necessary scale and budget first; measured gain claims still need reproducible before/after evidence.
 
 - An assigned task delegates an outcome: define acceptance criteria, make technical decisions and continue through diagnosis, implementation, review, fixes and authorized delivery. A plan informs; complexity alone does not require another go. Existing authorization remains valid within scope.
@@ -45,6 +44,12 @@ Resolve imports manually with cycle deduplication before calling the suspension 
 - For user-visible changes, inspect the actual result and attach before/after screenshots or recordings to the PR. State an environment limitation when this is impossible.
 - For research and analysis, identify what remains unconfirmed and where you searched.
 - Acknowledge mistakes briefly, correct them and continue. Resolve objections with evidence. If the user overrides an evidence-backed objection, follow the decision and record the disagreement and consequence under Required input as a resolved decision, without asking again.
+
+# Test strategy
+
+- Follow the test pyramid: many fast unit tests, fewer integration tests, and a small, bounded end-to-end (E2E) set reserved for critical user journeys. Choose the lowest level that proves the behavior; prefer a unit or integration test when it can prove the same contract. Merge or remove duplicate E2E scenarios.
+- During implementation, run the affected unit tests continuously and add integration coverage where the change crosses a boundary. On a pull request, run lint, typecheck, build and the affected unit/integration checks; add E2E only for a touched critical journey or shared E2E infrastructure, unless the project's separate PR gate is small and fast. Run the broader integration suite and the bounded E2E set before a release, on main/nightly, or when risk justifies it.
+- A bug fix carries the smallest regression test at the level that reproduces it, proven failing without the fix and passing with it. Required CI and explicit project gates remain binding; never bypass or weaken them.
 
 # Quality
 
