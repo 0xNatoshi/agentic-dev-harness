@@ -62,6 +62,11 @@ class TemplateContractTests(unittest.TestCase):
             r"smallest regression test",
             r"(?:PR-level gate|On a (?:pull request|PR)|A PR runs)",
             r"affected unit/integration checks",
+            r"Delivery efficiency",
+            r"TASKS\.md.*outside Git",
+            r"heavy business/QA/E2E suites.*(?:at|belong to) the PR/pre-merge gate or CI",
+            r"merge the oldest/lowest-conflict first",
+            r"cheapest capable model",
             r"100,000-client trials or giant comparisons unless performance or monetary calculation is an acceptance criterion",
         )
         obsolete_rules = (

@@ -2,7 +2,7 @@
 
 Versioned development workflow, agent profiles and safe delivery tooling for Codex, Claude Code and Hermes
 
-This private repository is the shared source for harness changes, review and handoff between coding agents. It started from the verified v6.3.1 distribution; v6.4.0 established repository maintenance and reproducible packaging. **v6.5.0** adds proactive technical initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance. Unreleased source uses project template v6.7: fast mode limits active heavy work and review cycles, follows the test pyramid with focused PR checks and a broader release/milestone gate, and delivers useful small stages. Required policy references and delivery gates remain explicit.
+This private repository is the shared source for harness changes, review and handoff between coding agents. It started from the verified v6.3.1 distribution; v6.4.0 established repository maintenance and reproducible packaging. **v6.5.0** adds proactive technical initiative, written collaboration, review convergence, verified agent attribution and observed model/provider provenance. Unreleased source uses project template v6.7: fast mode limits active heavy work and review cycles, follows the test pyramid with focused PR checks and a broader release/milestone gate, keeps hooks fast and cached, puts heavy business/QA suites at the pre-merge gate, preserves evidence, orders merges to avoid resynchronization, calibrates review to risk, and includes a read-only delivery readiness helper. Required policy references and delivery gates remain explicit.
 
 ## Work with another agent
 
